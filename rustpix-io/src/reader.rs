@@ -4,8 +4,8 @@
 
 use crate::{Error, Result};
 use memmap2::Mmap;
-use rustpix_tpx::{Tpx3Hit, Tpx3Packet, DetectorConfig};
 use rustpix_tpx::section::{discover_sections, process_section};
+use rustpix_tpx::{DetectorConfig, Tpx3Hit, Tpx3Packet};
 use std::fs::File;
 use std::path::Path;
 
@@ -80,7 +80,7 @@ impl Tpx3FileReader {
 
     /// Reads and parses all hits from the file using section discovery.
     pub fn read_hits(&self) -> Result<Vec<Tpx3Hit>> {
-        if self.reader.len() % 8 != 0 {
+        if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
                 "file size {} is not a multiple of 8",
                 self.reader.len()
@@ -88,23 +88,23 @@ impl Tpx3FileReader {
         }
 
         let data = self.reader.as_bytes();
-        
+
         // Phase 1: Discover sections
         let sections = discover_sections(data);
-        
+
         // Phase 2: Process sections
         // TODO: Use Rayon for parallel processing if available/configured
         // For now, sequential processing
-        
+
         let tdc_correction = self.config.tdc_correction_25ns();
-        // Note: map_chip_to_global is not yet in DetectorConfig in lib.rs, 
-        // but the plan implies it should be. 
+        // Note: map_chip_to_global is not yet in DetectorConfig in lib.rs,
+        // but the plan implies it should be.
         // I'll check lib.rs again. It has tdc_correction_25ns but maybe not map_chip_to_global.
         // If not, I'll implement a simple identity or default transform for now.
-        
+
         let mut all_hits = Vec::new();
         for section in sections {
-             let hits: Vec<Tpx3Hit> = process_section(
+            let hits: Vec<Tpx3Hit> = process_section(
                 data,
                 &section,
                 tdc_correction,
@@ -112,7 +112,7 @@ impl Tpx3FileReader {
             );
             all_hits.extend(hits);
         }
-        
+
         // Sort by TOF
         all_hits.sort_unstable_by_key(|h| h.tof);
 
@@ -121,13 +121,10 @@ impl Tpx3FileReader {
 
     /// Returns an iterator over raw packets.
     pub fn iter_packets(&self) -> impl Iterator<Item = Tpx3Packet> + '_ {
-        self.reader
-            .as_bytes()
-            .chunks_exact(8)
-            .map(|chunk| {
-                let bytes: [u8; 8] = chunk.try_into().unwrap();
-                Tpx3Packet::new(u64::from_le_bytes(bytes))
-            })
+        self.reader.as_bytes().chunks_exact(8).map(|chunk| {
+            let bytes: [u8; 8] = chunk.try_into().unwrap();
+            Tpx3Packet::new(u64::from_le_bytes(bytes))
+        })
     }
 }
 

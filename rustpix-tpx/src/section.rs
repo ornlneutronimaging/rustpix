@@ -122,7 +122,9 @@ pub fn process_section<H: From<(u32, u16, u16, u32, u16, u8)>>(
     for i in 0..num_packets {
         let offset = i * PACKET_SIZE;
         let raw = u64::from_le_bytes(
-            section_data[offset..offset + PACKET_SIZE].try_into().unwrap()
+            section_data[offset..offset + PACKET_SIZE]
+                .try_into()
+                .unwrap(),
         );
         let packet = Tpx3Packet::new(raw);
 
@@ -140,7 +142,14 @@ pub fn process_section<H: From<(u32, u16, u16, u32, u16, u8)>>(
             let timestamp = correct_timestamp_rollover(raw_timestamp, tdc_ts);
             let tof = calculate_tof(timestamp, tdc_ts, tdc_correction_25ns);
 
-            hits.push(H::from((tof, global_x, global_y, timestamp, packet.tot(), section.chip_id)));
+            hits.push(H::from((
+                tof,
+                global_x,
+                global_y,
+                timestamp,
+                packet.tot(),
+                section.chip_id,
+            )));
         }
     }
 
@@ -150,7 +159,7 @@ pub fn process_section<H: From<(u32, u16, u16, u32, u16, u8)>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hit::{Tpx3Hit, correct_timestamp_rollover};
+    use crate::hit::{correct_timestamp_rollover, Tpx3Hit};
 
     // Helper to create a TPX3 header packet
     fn make_header(chip_id: u8) -> u64 {
@@ -164,34 +173,31 @@ mod tests {
 
     // Helper to create a Hit packet
     fn make_hit(toa: u16, tot: u16, addr: u16) -> u64 {
-        0xB000_0000_0000_0000 |
-        ((toa as u64) << 30) |
-        ((tot as u64) << 20) |
-        ((addr as u64) << 44)
+        0xB000_0000_0000_0000 | ((toa as u64) << 30) | ((tot as u64) << 20) | ((addr as u64) << 44)
     }
 
     #[test]
     fn test_discover_sections_single_chip() {
         let mut data = Vec::new();
-        
+
         // Section 1: Chip 0
         data.extend_from_slice(&make_header(0).to_le_bytes());
         data.extend_from_slice(&make_tdc(1000).to_le_bytes());
         data.extend_from_slice(&make_hit(100, 10, 0).to_le_bytes());
-        
+
         // Section 2: Chip 0 (should inherit TDC)
         data.extend_from_slice(&make_header(0).to_le_bytes());
         data.extend_from_slice(&make_hit(200, 10, 0).to_le_bytes());
 
         let sections = discover_sections(&data);
-        
+
         assert_eq!(sections.len(), 2);
-        
+
         // Check Section 1
         assert_eq!(sections[0].chip_id, 0);
         assert_eq!(sections[0].initial_tdc, None);
         assert_eq!(sections[0].final_tdc, Some(1000));
-        
+
         // Check Section 2
         assert_eq!(sections[1].chip_id, 0);
         assert_eq!(sections[1].initial_tdc, Some(1000)); // Inherited!
@@ -200,29 +206,29 @@ mod tests {
     #[test]
     fn test_discover_sections_multi_chip() {
         let mut data = Vec::new();
-        
+
         // Section 1: Chip 0
         data.extend_from_slice(&make_header(0).to_le_bytes());
         data.extend_from_slice(&make_tdc(1000).to_le_bytes());
-        
+
         // Section 2: Chip 1
         data.extend_from_slice(&make_header(1).to_le_bytes());
         data.extend_from_slice(&make_tdc(2000).to_le_bytes());
-        
+
         // Section 3: Chip 0 (should inherit from Section 1)
         data.extend_from_slice(&make_header(0).to_le_bytes());
         data.extend_from_slice(&make_hit(300, 10, 0).to_le_bytes()); // Add hit so section isn't empty
-        
+
         let sections = discover_sections(&data);
-        
+
         assert_eq!(sections.len(), 3);
-        
+
         assert_eq!(sections[0].chip_id, 0);
         assert_eq!(sections[0].final_tdc, Some(1000));
-        
+
         assert_eq!(sections[1].chip_id, 1);
         assert_eq!(sections[1].final_tdc, Some(2000));
-        
+
         assert_eq!(sections[2].chip_id, 0);
         assert_eq!(sections[2].initial_tdc, Some(1000)); // Inherited from Chip 0
     }
@@ -230,19 +236,19 @@ mod tests {
     #[test]
     fn test_process_section() {
         let mut data = Vec::new();
-        
+
         // Header (skipped by process_section logic, but needed for offset calculation in test setup)
         // In reality, discover_sections gives us offsets that skip the header.
         // Let's construct data that matches what process_section expects (body only)
-        
+
         let tdc_val = 1000;
         data.extend_from_slice(&make_tdc(tdc_val).to_le_bytes());
-        
+
         // Hit: ToA=1100 (raw), ToT=10, Addr=0
         // Timestamp = 1100 << 4 = 17600
         // TOF = 17600 - 1000 = 16600
         data.extend_from_slice(&make_hit(1100, 10, 0).to_le_bytes());
-        
+
         let section = Tpx3Section {
             start_offset: 0,
             end_offset: data.len(),
@@ -250,14 +256,14 @@ mod tests {
             initial_tdc: None,
             final_tdc: None,
         };
-        
+
         let hits: Vec<Tpx3Hit> = process_section(
             &data,
             &section,
-            1_000_000, // Large correction
+            1_000_000,        // Large correction
             |_, x, y| (x, y), // Identity transform
         );
-        
+
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].tot, 10);
         // Verify TOF calculation roughly
@@ -270,35 +276,41 @@ mod tests {
         // Test case to compare section.rs calculation vs packet.rs calculation
         // packet.rs: (spidr << 18) | (toa << 4) | ((16 - fine) & 0xF)
         // section.rs: correct_timestamp_rollover((toa << 4) | fine, tdc)
-        
+
         let spidr = 100u16;
         let toa = 200u16;
         let fine = 5u8;
         let tot = 10u16;
         let addr = 0u16;
-        
+
         // Construct raw packet
-        let raw = 0xB000_0000_0000_0000 |
-                  ((addr as u64) << 44) |
-                  ((toa as u64) << 30) |
-                  ((tot as u64) << 20) |
-                  ((fine as u64) << 16) |
-                  (spidr as u64);
-                  
+        let raw = 0xB000_0000_0000_0000
+            | ((addr as u64) << 44)
+            | ((toa as u64) << 30)
+            | ((tot as u64) << 20)
+            | ((fine as u64) << 16)
+            | (spidr as u64);
+
         let packet = Tpx3Packet::new(raw);
-        
+
         // 1. packet.rs calculation
         let ts_packet = packet.timestamp_25ns();
         let expected_ts = ((spidr as u32) << 18) | ((toa as u32) << 4) | ((16 - fine as u32) & 0xF);
-        assert_eq!(ts_packet, expected_ts, "Packet timestamp calculation mismatch");
-        
+        assert_eq!(
+            ts_packet, expected_ts,
+            "Packet timestamp calculation mismatch"
+        );
+
         // 2. section.rs calculation (simulated)
         let tdc_ts = ts_packet; // Perfect synchronization
-        
+
         let raw_timestamp_section = (packet.toa() as u32) << 4 | (packet.fine_toa() as u32);
         let ts_section = correct_timestamp_rollover(raw_timestamp_section, tdc_ts);
-        
+
         // Assert that they are DIFFERENT to confirm the discrepancy
-        assert_ne!(ts_section, ts_packet, "Timestamps unexpectedly match despite logic difference");
+        assert_ne!(
+            ts_section, ts_packet,
+            "Timestamps unexpectedly match despite logic difference"
+        );
     }
 }

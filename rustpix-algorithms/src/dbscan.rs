@@ -123,14 +123,16 @@ impl DbscanClustering {
                 continue;
             }
             let neighbor = &hits[neighbor_idx];
-            if hit.within_temporal_window(neighbor, window_tof) &&
-               hit.distance_squared(neighbor) <= epsilon_sq {
+            if hit.within_temporal_window(neighbor, window_tof)
+                && hit.distance_squared(neighbor) <= epsilon_sq
+            {
                 neighbors.push(neighbor_idx);
             }
         }
         neighbors
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn expand_cluster<H: Hit>(
         &self,
         hits: &[H],
@@ -147,10 +149,11 @@ impl DbscanClustering {
             let neighbor_idx = seeds[i];
             i += 1;
 
-            if labels[neighbor_idx] == -1 { // Was noise or unvisited
-                 labels[neighbor_idx] = cluster_id;
+            if labels[neighbor_idx] == -1 {
+                // Was noise or unvisited
+                labels[neighbor_idx] = cluster_id;
             }
-            
+
             if state.visited[neighbor_idx] {
                 continue;
             }
@@ -207,7 +210,7 @@ impl HitClustering for DbscanClustering {
         }
 
         let n = hits.len();
-        
+
         // Reset state
         state.hits_processed = 0;
         state.clusters_found = 0;
@@ -244,7 +247,9 @@ impl HitClustering for DbscanClustering {
             } else {
                 state.point_types[i] = PointType::Core;
                 labels[i] = cluster_id;
-                self.expand_cluster(hits, i, neighbors, cluster_id, epsilon_sq, window_tof, state, labels);
+                self.expand_cluster(
+                    hits, i, neighbors, cluster_id, epsilon_sq, window_tof, state, labels,
+                );
                 cluster_id += 1;
             }
             state.hits_processed += 1;
@@ -277,10 +282,12 @@ mod tests {
 
     #[test]
     fn test_dbscan_state_reset() {
-        let mut state = DbscanState::default();
-        state.hits_processed = 100;
-        state.clusters_found = 10;
-        state.noise_points = 5;
+        let mut state = DbscanState {
+            hits_processed: 100,
+            clusters_found: 10,
+            noise_points: 5,
+            ..Default::default()
+        };
         state.reset();
         assert_eq!(state.hits_processed, 0);
         assert_eq!(state.clusters_found, 0);
@@ -290,29 +297,62 @@ mod tests {
     #[test]
     fn test_dbscan_clustering_basic() {
         use rustpix_core::hit::GenericHit;
-        
+
         let clustering = DbscanClustering::default();
         let mut state = clustering.create_state();
-        
+
         // Create two clusters of hits
-        let mut hits = Vec::new();
-        
-        // Cluster 1: (10, 10)
-        hits.push(GenericHit { x: 10, y: 10, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 11, y: 11, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 12, y: 12, tof: 100, ..Default::default() });
-        
-        // Noise point
-        hits.push(GenericHit { x: 100, y: 100, tof: 100, ..Default::default() });
-        
-        // Cluster 2: (50, 50)
-        hits.push(GenericHit { x: 50, y: 50, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 51, y: 51, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 52, y: 52, tof: 100, ..Default::default() });
-        
+        let hits = vec![
+            // Cluster 1: (10, 10)
+            GenericHit {
+                x: 10,
+                y: 10,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 11,
+                y: 11,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 12,
+                y: 12,
+                tof: 100,
+                ..Default::default()
+            },
+            // Noise point
+            GenericHit {
+                x: 100,
+                y: 100,
+                tof: 100,
+                ..Default::default()
+            },
+            // Cluster 2: (50, 50)
+            GenericHit {
+                x: 50,
+                y: 50,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 51,
+                y: 51,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 52,
+                y: 52,
+                tof: 100,
+                ..Default::default()
+            },
+        ];
+
         let mut labels = vec![0; hits.len()];
         let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
-        
+
         assert_eq!(count, 2);
         assert_eq!(labels[0], labels[1]);
         assert_eq!(labels[1], labels[2]);

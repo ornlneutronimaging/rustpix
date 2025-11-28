@@ -31,20 +31,11 @@ impl Default for GraphConfig {
 }
 
 /// Graph clustering state.
+#[derive(Default)]
 pub struct GraphState {
     hits_processed: usize,
     clusters_found: usize,
     edges_created: usize,
-}
-
-impl Default for GraphState {
-    fn default() -> Self {
-        Self {
-            hits_processed: 0,
-            clusters_found: 0,
-            edges_created: 0,
-        }
-    }
 }
 
 impl ClusteringState for GraphState {
@@ -204,14 +195,14 @@ impl HitClustering for GraphClustering {
             std::collections::HashMap::new();
         let mut next_cluster = 0i32;
 
-        for i in 0..n {
+        for (i, label) in labels.iter_mut().enumerate() {
             let root = uf.find(i);
             let cluster_id = *cluster_map.entry(root).or_insert_with(|| {
                 let id = next_cluster;
                 next_cluster += 1;
                 id
             });
-            labels[i] = cluster_id;
+            *label = cluster_id;
         }
 
         state.hits_processed = n;
@@ -254,10 +245,11 @@ mod tests {
 
     #[test]
     fn test_graph_state_reset() {
-        let mut state = GraphState::default();
-        state.hits_processed = 100;
-        state.clusters_found = 10;
-        state.edges_created = 50;
+        let mut state = GraphState {
+            hits_processed: 100,
+            clusters_found: 10,
+            edges_created: 50,
+        };
         state.reset();
         assert_eq!(state.hits_processed, 0);
         assert_eq!(state.clusters_found, 0);

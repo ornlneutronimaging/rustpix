@@ -195,11 +195,7 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                     sum_tot += hit.tot() as u32;
                 }
 
-                (
-                    sum_x / n,
-                    sum_y / n,
-                    sum_tot.min(u16::MAX as u32) as u16,
-                )
+                (sum_x / n, sum_y / n, sum_tot.min(u16::MAX as u32) as u16)
             };
 
             // Apply super-resolution scaling
@@ -243,8 +239,8 @@ mod tests {
     #[test]
     fn test_weighted_centroid() {
         let hits = vec![
-            GenericHit::new(1000, 0, 0, 500, 30, 0),  // weight 30
-            GenericHit::new(1000, 2, 0, 500, 10, 0),  // weight 10
+            GenericHit::new(1000, 0, 0, 500, 30, 0), // weight 30
+            GenericHit::new(1000, 2, 0, 500, 10, 0), // weight 10
         ];
         let labels = vec![0, 0];
 

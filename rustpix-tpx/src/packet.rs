@@ -112,9 +112,9 @@ impl Tpx3Packet {
     #[inline]
     pub const fn pixel_coordinates(&self) -> (u16, u16) {
         let addr = self.pixel_address();
-        let dcol = ((addr & 0xFE00) >> 8) as u16;
-        let spix = ((addr & 0x1F8) >> 1) as u16;
-        let pix = (addr & 0x7) as u16;
+        let dcol = (addr & 0xFE00) >> 8;
+        let spix = (addr & 0x1F8) >> 1;
+        let pix = addr & 0x7;
         let x = dcol + (pix >> 2);
         let y = spix + (pix & 0x3);
         (x, y)

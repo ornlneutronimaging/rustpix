@@ -5,8 +5,8 @@
 //! This binary will provide a CLI for processing pixel detector data.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
 use rustpix_algorithms::HitClustering;
+use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
 use rustpix_core::extraction::NeutronExtraction;
 use rustpix_io::Tpx3FileReader;
 use std::path::PathBuf;
@@ -167,7 +167,7 @@ fn main() -> Result<()> {
                 }
 
                 let mut labels = vec![0; hits.len()];
-                
+
                 // Perform clustering
                 let num_clusters = match algorithm {
                     Algorithm::Abs => {
@@ -175,25 +175,25 @@ fn main() -> Result<()> {
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         algo.cluster(&hits, &mut state, &mut labels)?
-                    },
+                    }
                     Algorithm::Dbscan => {
                         let mut algo = DbscanClustering::default();
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         algo.cluster(&hits, &mut state, &mut labels)?
-                    },
+                    }
                     Algorithm::Graph => {
                         let mut algo = GraphClustering::default();
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         algo.cluster(&hits, &mut state, &mut labels)?
-                    },
+                    }
                     Algorithm::Grid => {
                         let mut algo = GridClustering::default();
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         algo.cluster(&hits, &mut state, &mut labels)?
-                    },
+                    }
                 };
 
                 if verbose {
@@ -202,11 +202,11 @@ fn main() -> Result<()> {
 
                 // Perform extraction
                 let neutrons = extractor.extract(&hits, &labels, num_clusters)?;
-                
+
                 if verbose {
                     eprintln!("  {} neutrons extracted", neutrons.len());
                 }
-                
+
                 all_neutrons.extend(neutrons);
             }
 
@@ -218,7 +218,7 @@ fn main() -> Result<()> {
             }
 
             let mut writer = rustpix_io::DataFileWriter::create(&output)?;
-            
+
             if let Some(ext) = output.extension().and_then(|e| e.to_str()) {
                 match ext.to_lowercase().as_str() {
                     "csv" => writer.write_neutrons_csv(&all_neutrons)?,
@@ -234,7 +234,11 @@ fn main() -> Result<()> {
                 writer.write_neutrons_binary(&all_neutrons)?;
             }
 
-            println!("Processed {} files in {:.2}s", input.len(), elapsed.as_secs_f64());
+            println!(
+                "Processed {} files in {:.2}s",
+                input.len(),
+                elapsed.as_secs_f64()
+            );
             println!("Total neutrons: {}", all_neutrons.len());
         }
 
@@ -294,12 +298,15 @@ fn main() -> Result<()> {
                 max_cluster_size: None,
             };
 
-            println!("{:<10} | {:<15} | {:<15} | {:<15}", "Algorithm", "Mean Time (ms)", "Min Time (ms)", "Max Time (ms)");
+            println!(
+                "{:<10} | {:<15} | {:<15} | {:<15}",
+                "Algorithm", "Mean Time (ms)", "Min Time (ms)", "Max Time (ms)"
+            );
             println!("{:-<65}", "");
 
             for (algo_enum, name) in algorithms {
                 let mut times = Vec::with_capacity(iterations);
-                
+
                 // Warmup
                 let mut labels = vec![0; hits.len()];
                 match algo_enum {
@@ -308,58 +315,58 @@ fn main() -> Result<()> {
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         let _ = algo.cluster(&hits, &mut state, &mut labels);
-                    },
+                    }
                     Algorithm::Dbscan => {
                         let mut algo = DbscanClustering::default();
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         let _ = algo.cluster(&hits, &mut state, &mut labels);
-                    },
+                    }
                     Algorithm::Graph => {
                         let mut algo = GraphClustering::default();
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         let _ = algo.cluster(&hits, &mut state, &mut labels);
-                    },
+                    }
                     Algorithm::Grid => {
                         let mut algo = GridClustering::default();
                         algo.configure(&config);
                         let mut state = algo.create_state();
                         let _ = algo.cluster(&hits, &mut state, &mut labels);
-                    },
+                    }
                 }
 
                 for _ in 0..iterations {
                     let mut labels = vec![0; hits.len()];
                     let start = Instant::now();
-                    
+
                     match algo_enum {
                         Algorithm::Abs => {
                             let mut algo = AbsClustering::default();
                             algo.configure(&config);
                             let mut state = algo.create_state();
                             let _ = algo.cluster(&hits, &mut state, &mut labels)?;
-                        },
+                        }
                         Algorithm::Dbscan => {
                             let mut algo = DbscanClustering::default();
                             algo.configure(&config);
                             let mut state = algo.create_state();
                             let _ = algo.cluster(&hits, &mut state, &mut labels)?;
-                        },
+                        }
                         Algorithm::Graph => {
                             let mut algo = GraphClustering::default();
                             algo.configure(&config);
                             let mut state = algo.create_state();
                             let _ = algo.cluster(&hits, &mut state, &mut labels)?;
-                        },
+                        }
                         Algorithm::Grid => {
                             let mut algo = GridClustering::default();
                             algo.configure(&config);
                             let mut state = algo.create_state();
                             let _ = algo.cluster(&hits, &mut state, &mut labels)?;
-                        },
+                        }
                     }
-                    
+
                     times.push(start.elapsed().as_secs_f64() * 1000.0);
                 }
 
@@ -367,7 +374,10 @@ fn main() -> Result<()> {
                 let max_time = times.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                 let mean_time = times.iter().sum::<f64>() / times.len() as f64;
 
-                println!("{:<10} | {:<15.2} | {:<15.2} | {:<15.2}", name, mean_time, min_time, max_time);
+                println!(
+                    "{:<10} | {:<15.2} | {:<15.2} | {:<15.2}",
+                    name, mean_time, min_time, max_time
+                );
             }
         }
     }

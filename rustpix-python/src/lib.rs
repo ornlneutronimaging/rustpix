@@ -4,7 +4,7 @@
 //! for efficient data exchange with Python.
 
 use numpy::ndarray::Array1;
-use numpy::{PyArray1};
+use numpy::PyArray1;
 use pyo3::prelude::*;
 use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
 use rustpix_core::clustering::{ClusteringConfig, HitClustering};
@@ -58,12 +58,12 @@ impl PyHit {
     fn tot(&self) -> u16 {
         self.inner.tot
     }
-    
+
     #[getter]
     fn timestamp(&self) -> u32 {
         self.inner.timestamp
     }
-    
+
     #[getter]
     fn chip_id(&self) -> u8 {
         self.inner.chip_id
@@ -72,11 +72,7 @@ impl PyHit {
     fn __repr__(&self) -> String {
         format!(
             "Hit(x={}, y={}, tof={}, tot={}, chip={})",
-            self.inner.x,
-            self.inner.y,
-            self.inner.tof,
-            self.inner.tot,
-            self.inner.chip_id
+            self.inner.x, self.inner.y, self.inner.tof, self.inner.tot, self.inner.chip_id
         )
     }
 }
@@ -111,7 +107,7 @@ impl PyNeutron {
     fn tof(&self) -> u32 {
         self.inner.tof
     }
-    
+
     #[getter]
     fn tof_ns(&self) -> f64 {
         self.inner.tof_ns()
@@ -126,7 +122,7 @@ impl PyNeutron {
     fn n_hits(&self) -> u16 {
         self.inner.n_hits
     }
-    
+
     #[getter]
     fn chip_id(&self) -> u8 {
         self.inner.chip_id
@@ -171,7 +167,7 @@ impl PyClusteringConfig {
             },
         }
     }
-    
+
     #[staticmethod]
     fn default() -> Self {
         Self {
@@ -212,7 +208,7 @@ fn read_tpx3_file(path: &str) -> PyResult<Vec<PyHit>> {
 
     Ok(hits
         .into_iter()
-        .map(|h| PyHit { 
+        .map(|h| PyHit {
             inner: GenericHit {
                 x: h.x,
                 y: h.y,
@@ -222,7 +218,7 @@ fn read_tpx3_file(path: &str) -> PyResult<Vec<PyHit>> {
                 chip_id: h.chip_id,
                 _padding: 0,
                 cluster_id: -1,
-            }
+            },
         })
         .collect())
 }
@@ -280,28 +276,28 @@ fn cluster_hits(
             let mut state = algo.create_state();
             algo.cluster(&hit_data, &mut state, &mut labels)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
-        },
+        }
         "dbscan" => {
             let mut algo = DbscanClustering::default();
             algo.configure(&config.inner);
             let mut state = algo.create_state();
             algo.cluster(&hit_data, &mut state, &mut labels)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
-        },
+        }
         "graph" => {
             let mut algo = GraphClustering::default();
             algo.configure(&config.inner);
             let mut state = algo.create_state();
             algo.cluster(&hit_data, &mut state, &mut labels)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
-        },
+        }
         "grid" => {
             let mut algo = GridClustering::default();
             algo.configure(&config.inner);
             let mut state = algo.create_state();
             algo.cluster(&hit_data, &mut state, &mut labels)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
-        },
+        }
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Unknown algorithm: {}. Use 'abs', 'dbscan', 'graph', or 'grid'",
@@ -317,16 +313,18 @@ fn cluster_hits(
 #[pyfunction]
 #[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
 fn extract_neutrons(
-    hits: Vec<PyHit>, 
-    labels: Vec<i32>, 
+    hits: Vec<PyHit>,
+    labels: Vec<i32>,
     num_clusters: usize,
     super_resolution: f64,
-    tot_weighted: bool
+    tot_weighted: bool,
 ) -> PyResult<Vec<PyNeutron>> {
     let mut extractor = SimpleCentroidExtraction::new();
-    extractor.configure(ExtractionConfig::default()
-        .with_super_resolution(super_resolution)
-        .with_weighted_by_tot(tot_weighted));
+    extractor.configure(
+        ExtractionConfig::default()
+            .with_super_resolution(super_resolution)
+            .with_weighted_by_tot(tot_weighted),
+    );
 
     let hit_data: Vec<GenericHit> = hits.iter().map(|h| h.inner).collect();
 
@@ -334,7 +332,10 @@ fn extract_neutrons(
         .extract(&hit_data, &labels, num_clusters)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-    Ok(neutrons.into_iter().map(|n| PyNeutron { inner: n }).collect())
+    Ok(neutrons
+        .into_iter()
+        .map(|n| PyNeutron { inner: n })
+        .collect())
 }
 
 /// Extract neutrons and return as numpy arrays.
@@ -396,7 +397,14 @@ fn process_tpx3_file_numpy<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let hits = read_tpx3_file(path)?;
     let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
-    extract_neutrons_numpy(py, hits, labels, num_clusters, super_resolution, tot_weighted)
+    extract_neutrons_numpy(
+        py,
+        hits,
+        labels,
+        num_clusters,
+        super_resolution,
+        tot_weighted,
+    )
 }
 
 /// Python module for rustpix.

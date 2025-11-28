@@ -7,9 +7,9 @@ name = "rustpix"
 version = "0.1.0"
 requires-python = ">=3.11"
 classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = ["numpy"]
 
@@ -29,6 +29,8 @@ numpy = "*"
 maturin = "*"
 rust = "*"
 pip = "*"
+pre-commit = "*"
+taplo = "*"
 
 [tool.pixi.tasks]
 build-rust = "cargo build --release"
@@ -37,3 +39,8 @@ develop = "maturin develop"
 test-rust = "cargo test --workspace"
 test-python = "python -c 'import rustpix; print(dir(rustpix))'"
 gui = "cargo run -p rustpix-gui --release"
+pre-commit-install = "pre-commit install"
+pre-commit-run = "pre-commit run --all-files"
+fmt = "cargo fmt --all"
+clippy = "cargo clippy --workspace --all-targets -- -D warnings"
+lint = { depends-on = ["fmt", "clippy"] }

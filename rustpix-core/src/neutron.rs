@@ -114,18 +114,12 @@ impl NeutronStatistics {
         let single_hit_fraction =
             neutrons.iter().filter(|n| n.n_hits == 1).count() as f64 / count as f64;
 
-        let x_min = neutrons
-            .iter()
-            .map(|n| n.x)
-            .fold(f64::INFINITY, f64::min);
+        let x_min = neutrons.iter().map(|n| n.x).fold(f64::INFINITY, f64::min);
         let x_max = neutrons
             .iter()
             .map(|n| n.x)
             .fold(f64::NEG_INFINITY, f64::max);
-        let y_min = neutrons
-            .iter()
-            .map(|n| n.y)
-            .fold(f64::INFINITY, f64::min);
+        let y_min = neutrons.iter().map(|n| n.y).fold(f64::INFINITY, f64::min);
         let y_max = neutrons
             .iter()
             .map(|n| n.y)

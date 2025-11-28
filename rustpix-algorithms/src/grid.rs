@@ -38,18 +38,10 @@ impl Default for GridConfig {
 }
 
 /// Grid clustering state.
+#[derive(Default)]
 pub struct GridState {
     hits_processed: usize,
     clusters_found: usize,
-}
-
-impl Default for GridState {
-    fn default() -> Self {
-        Self {
-            hits_processed: 0,
-            clusters_found: 0,
-        }
-    }
 }
 
 impl ClusteringState for GridState {
@@ -132,19 +124,18 @@ impl HitClustering for GridClustering {
         }
 
         let n = hits.len();
-        
+
         // Reset state
         state.hits_processed = 0;
         state.clusters_found = 0;
-        
+
         // Initialize labels
         labels.iter_mut().for_each(|l| *l = -1);
 
         // Build spatial index
         // Note: Using a fixed grid size for now, but could be dynamic based on detector size
         // The SpatialGrid uses a HashMap, so the width/height args are just hints/unused
-        let mut grid: SpatialGrid<usize> =
-            SpatialGrid::new(self.config.cell_size, 512, 512);
+        let mut grid: SpatialGrid<usize> = SpatialGrid::new(self.config.cell_size, 512, 512);
 
         for (i, hit) in hits.iter().enumerate() {
             grid.insert(hit.x() as i32, hit.y() as i32, i);
@@ -190,10 +181,11 @@ impl HitClustering for GridClustering {
                 if neighbor_idx <= i {
                     continue; // Avoid duplicate checks
                 }
-                
+
                 let neighbor = &hits[neighbor_idx];
-                if hit.within_temporal_window(neighbor, window_tof) &&
-                   hit.distance_squared(neighbor) <= radius_sq {
+                if hit.within_temporal_window(neighbor, window_tof)
+                    && hit.distance_squared(neighbor) <= radius_sq
+                {
                     union(&mut parent, &mut rank, i, neighbor_idx);
                 }
             }
@@ -203,14 +195,14 @@ impl HitClustering for GridClustering {
         let mut root_to_label = std::collections::HashMap::new();
         let mut next_label = 0;
 
-        for i in 0..n {
+        for (i, label) in labels.iter_mut().enumerate() {
             let root = find(&mut parent, i);
-            let label = *root_to_label.entry(root).or_insert_with(|| {
+            let label_id = *root_to_label.entry(root).or_insert_with(|| {
                 let l = next_label;
                 next_label += 1;
                 l
             });
-            labels[i] = label;
+            *label = label_id;
         }
 
         state.hits_processed = n;
@@ -242,9 +234,10 @@ mod tests {
 
     #[test]
     fn test_grid_state_reset() {
-        let mut state = GridState::default();
-        state.hits_processed = 100;
-        state.clusters_found = 10;
+        let mut state = GridState {
+            hits_processed: 100,
+            clusters_found: 10,
+        };
         state.reset();
         assert_eq!(state.hits_processed, 0);
         assert_eq!(state.clusters_found, 0);
@@ -259,24 +252,43 @@ mod tests {
     #[test]
     fn test_grid_clustering_basic() {
         use rustpix_core::hit::GenericHit;
-        
+
         let clustering = GridClustering::default();
         let mut state = clustering.create_state();
-        
+
         // Create two clusters of hits
-        let mut hits = Vec::new();
-        
-        // Cluster 1: (10, 10)
-        hits.push(GenericHit { x: 10, y: 10, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 11, y: 11, tof: 100, ..Default::default() });
-        
-        // Cluster 2: (50, 50)
-        hits.push(GenericHit { x: 50, y: 50, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 51, y: 51, tof: 100, ..Default::default() });
-        
+        let hits = vec![
+            // Cluster 1: (10, 10)
+            GenericHit {
+                x: 10,
+                y: 10,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 11,
+                y: 11,
+                tof: 100,
+                ..Default::default()
+            },
+            // Cluster 2: (50, 50)
+            GenericHit {
+                x: 50,
+                y: 50,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 51,
+                y: 51,
+                tof: 100,
+                ..Default::default()
+            },
+        ];
+
         let mut labels = vec![0; hits.len()];
         let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
-        
+
         assert_eq!(count, 2);
         assert_eq!(labels[0], labels[1]);
         assert_eq!(labels[2], labels[3]);

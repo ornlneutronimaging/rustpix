@@ -9,11 +9,11 @@
 //! - Spatial indexing (32x32 grid) for O(1) neighbor lookup
 //! - Age-based bucket closure for temporal correlation
 
+use crate::spatial::SpatialGrid;
 use rustpix_core::clustering::{
     ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
 };
 use rustpix_core::hit::Hit;
-use crate::spatial::SpatialGrid;
 
 /// ABS-specific configuration.
 #[derive(Clone, Debug)]
@@ -117,8 +117,7 @@ impl Bucket {
         let y = hit.y() as i32;
         let r = radius.ceil() as i32;
 
-        x >= self.x_min - r && x <= self.x_max + r &&
-        y >= self.y_min - r && y <= self.y_max + r
+        x >= self.x_min - r && x <= self.x_max + r && y >= self.y_min - r && y <= self.y_max + r
     }
 
     fn fits_temporally<H: Hit>(&self, hit: &H, window_tof: u32) -> bool {
@@ -233,12 +232,7 @@ impl AbsClustering {
     }
 
     /// Close a bucket and assign cluster labels.
-    fn close_bucket(
-        &self,
-        bucket_idx: usize,
-        state: &mut AbsState,
-        labels: &mut [i32],
-    ) -> bool {
+    fn close_bucket(&self, bucket_idx: usize, state: &mut AbsState, labels: &mut [i32]) -> bool {
         let bucket = &mut state.bucket_pool[bucket_idx];
 
         if bucket.hit_indices.len() >= self.config.min_cluster_size as usize {
@@ -258,18 +252,13 @@ impl AbsClustering {
     }
 
     /// Scan and close aged buckets.
-    fn scan_and_close_aged(
-        &self,
-        reference_tof: u32,
-        state: &mut AbsState,
-        labels: &mut [i32],
-    ) {
+    fn scan_and_close_aged(&self, reference_tof: u32, state: &mut AbsState, labels: &mut [i32]) {
         let window_tof = self.config.window_tof();
 
         // Identify aged buckets
         let mut aged_indices = Vec::new();
         let mut active_indices_to_keep = Vec::new();
-        
+
         for &bucket_idx in &state.active_buckets {
             let bucket = &state.bucket_pool[bucket_idx];
             if bucket.is_aged(reference_tof, window_tof) {
@@ -278,18 +267,20 @@ impl AbsClustering {
                 active_indices_to_keep.push(bucket_idx);
             }
         }
-        
+
         // Update active buckets list
         state.active_buckets = active_indices_to_keep;
-        
+
         // Close and cleanup aged buckets
         for bucket_idx in aged_indices {
             self.close_bucket(bucket_idx, state, labels);
-            
+
             // Remove from spatial index using stored insertion coordinates
             let bucket = &mut state.bucket_pool[bucket_idx];
-            state.spatial_grid.remove(bucket.insertion_x, bucket.insertion_y, bucket_idx);
-            
+            state
+                .spatial_grid
+                .remove(bucket.insertion_x, bucket.insertion_y, bucket_idx);
+
             // Return to pool
             bucket.is_active = false;
             state.free_buckets.push(bucket_idx);
@@ -383,12 +374,12 @@ impl HitClustering for AbsClustering {
         // Force close remaining buckets
         for bucket_idx in std::mem::take(&mut state.active_buckets) {
             self.close_bucket(bucket_idx, state, labels);
-            
+
             // Remove from spatial index? We don't have coordinates easily.
             // But since we are finishing, maybe it doesn't matter if we don't clear the grid explicitly
             // if we are going to reset anyway?
             // But `reset` clears the grid.
-            
+
             state.bucket_pool[bucket_idx].is_active = false;
             state.free_buckets.push(bucket_idx);
         }
@@ -414,21 +405,40 @@ mod tests {
     fn test_abs_clustering_basic() {
         let clustering = AbsClustering::default();
         let mut state = clustering.create_state();
-        
+
         // Create two clusters of hits
-        let mut hits = Vec::new();
-        
-        // Cluster 1: (10, 10) at t=100
-        hits.push(GenericHit { x: 10, y: 10, tof: 100, ..Default::default() });
-        hits.push(GenericHit { x: 11, y: 11, tof: 102, ..Default::default() });
-        
-        // Cluster 2: (50, 50) at t=200
-        hits.push(GenericHit { x: 50, y: 50, tof: 200, ..Default::default() });
-        hits.push(GenericHit { x: 51, y: 51, tof: 202, ..Default::default() });
-        
+        let hits = vec![
+            // Cluster 1: (10, 10) at t=100
+            GenericHit {
+                x: 10,
+                y: 10,
+                tof: 100,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 11,
+                y: 11,
+                tof: 102,
+                ..Default::default()
+            },
+            // Cluster 2: (50, 50) at t=200
+            GenericHit {
+                x: 50,
+                y: 50,
+                tof: 200,
+                ..Default::default()
+            },
+            GenericHit {
+                x: 51,
+                y: 51,
+                tof: 202,
+                ..Default::default()
+            },
+        ];
+
         let mut labels = vec![0; hits.len()];
         let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
-        
+
         assert_eq!(count, 2);
         assert_eq!(labels[0], labels[1]);
         assert_eq!(labels[2], labels[3]);

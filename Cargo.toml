@@ -1,12 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "rustpix-core",
-    "rustpix-tpx",
-    "rustpix-algorithms",
-    "rustpix-io",
-    "rustpix-python",
-    "rustpix-cli", "rustpix-gui",
+  "rustpix-core",
+  "rustpix-tpx",
+  "rustpix-algorithms",
+  "rustpix-io",
+  "rustpix-python",
+  "rustpix-cli",
+  "rustpix-gui",
 ]
 
 [workspace.package]
