@@ -1,0 +1,17 @@
+[package]
+name = "rustpix-io"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Memory-mapped file I/O for rustpix"
+
+[dependencies]
+rustpix-core.workspace = true
+rustpix-tpx.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

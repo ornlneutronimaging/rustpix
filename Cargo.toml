@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "rustpix-core",
+    "rustpix-tpx",
+    "rustpix-algorithms",
+    "rustpix-io",
+    "rustpix-python",
+    "rustpix-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["ORNL Neutron Imaging <neutronimaging@ornl.gov>"]
+license = "MIT"
+repository = "https://github.com/ornlneutronimaging/rustpix"
+description = "High-performance Rust library for pixel detector data processing"
+
+[workspace.dependencies]
+# Internal crates
+rustpix-core = { path = "rustpix-core" }
+rustpix-tpx = { path = "rustpix-tpx" }
+rustpix-algorithms = { path = "rustpix-algorithms" }
+rustpix-io = { path = "rustpix-io" }
+
+# Parallelism
+rayon = "1.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Memory-mapped I/O
+memmap2 = "0.9"
+
+# Error handling
+thiserror = "2.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Python bindings
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"
+
+# Testing
+approx = "0.5"
+tempfile = "3.14"

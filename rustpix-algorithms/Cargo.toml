@@ -1,0 +1,20 @@
+[package]
+name = "rustpix-algorithms"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Clustering algorithms (ABS, DBSCAN, Graph, Grid) with spatial indexing"
+
+[dependencies]
+rustpix-core.workspace = true
+rayon.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+approx.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde", "rustpix-core/serde"]
