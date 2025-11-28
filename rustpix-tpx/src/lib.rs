@@ -9,7 +9,7 @@
 //!
 //! - [`Tpx3Packet`] - Low-level packet parser with bit field extraction
 //! - [`Tpx3Hit`] - Hit data structure with TOF, coordinates, and cluster assignment
-//! - [`Tpx3Processor`] - Section-aware file processor (TODO)
+//! - `Tpx3Processor` - Section-aware file processor (TODO)
 //!
 //! # Processing Pipeline
 //!
