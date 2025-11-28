@@ -1,0 +1,22 @@
+[package]
+name = "rustpix-tpx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TPX3 packet parser, hit types, and file processor"
+
+[dependencies]
+rustpix-core.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+approx.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde", "rustpix-core/serde"]
