@@ -150,7 +150,7 @@ pub fn process_section<H: From<(u32, u16, u16, u32, u16, u8)>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hit::Tpx3Hit;
+    use crate::hit::{Tpx3Hit, correct_timestamp_rollover};
 
     // Helper to create a TPX3 header packet
     fn make_header(chip_id: u8) -> u64 {
@@ -263,5 +263,42 @@ mod tests {
         // Verify TOF calculation roughly
         // ToA 1100 -> timestamp 17600. TDC 1000. Diff 16600.
         assert_eq!(hits[0].tof, 16600);
+    }
+
+    #[test]
+    fn test_timestamp_calculation_verification() {
+        // Test case to compare section.rs calculation vs packet.rs calculation
+        // packet.rs: (spidr << 18) | (toa << 4) | ((16 - fine) & 0xF)
+        // section.rs: correct_timestamp_rollover((toa << 4) | fine, tdc)
+        
+        let spidr = 100u16;
+        let toa = 200u16;
+        let fine = 5u8;
+        let tot = 10u16;
+        let addr = 0u16;
+        
+        // Construct raw packet
+        let raw = 0xB000_0000_0000_0000 |
+                  ((addr as u64) << 44) |
+                  ((toa as u64) << 30) |
+                  ((tot as u64) << 20) |
+                  ((fine as u64) << 16) |
+                  (spidr as u64);
+                  
+        let packet = Tpx3Packet::new(raw);
+        
+        // 1. packet.rs calculation
+        let ts_packet = packet.timestamp_25ns();
+        let expected_ts = ((spidr as u32) << 18) | ((toa as u32) << 4) | ((16 - fine as u32) & 0xF);
+        assert_eq!(ts_packet, expected_ts, "Packet timestamp calculation mismatch");
+        
+        // 2. section.rs calculation (simulated)
+        let tdc_ts = ts_packet; // Perfect synchronization
+        
+        let raw_timestamp_section = (packet.toa() as u32) << 4 | (packet.fine_toa() as u32);
+        let ts_section = correct_timestamp_rollover(raw_timestamp_section, tdc_ts);
+        
+        // Assert that they are DIFFERENT to confirm the discrepancy
+        assert_ne!(ts_section, ts_packet, "Timestamps unexpectedly match despite logic difference");
     }
 }

@@ -127,20 +127,22 @@ impl HitClustering for GridClustering {
         state: &mut Self::State,
         labels: &mut [i32],
     ) -> Result<usize, ClusteringError> {
-        // TODO: Implement grid clustering algorithm
-        // See IMPLEMENTATION_PLAN.md Part 4.4 for full specification
-        //
-        // Algorithm outline:
-        // 1. Build spatial grid index
-        // 2. For each hit, query 3x3 neighborhood
-        // 3. Use union-find to merge spatially/temporally close hits
-        // 4. Assign cluster labels
-
         if hits.is_empty() {
             return Ok(0);
         }
 
+        let n = hits.len();
+        
+        // Reset state
+        state.hits_processed = 0;
+        state.clusters_found = 0;
+        
+        // Initialize labels
+        labels.iter_mut().for_each(|l| *l = -1);
+
         // Build spatial index
+        // Note: Using a fixed grid size for now, but could be dynamic based on detector size
+        // The SpatialGrid uses a HashMap, so the width/height args are just hints/unused
         let mut grid: SpatialGrid<usize> =
             SpatialGrid::new(self.config.cell_size, 512, 512);
 
@@ -148,14 +150,71 @@ impl HitClustering for GridClustering {
             grid.insert(hit.x() as i32, hit.y() as i32, i);
         }
 
-        // Placeholder: assign each hit to its own cluster
-        // TODO: Implement proper union-find based clustering
-        for (i, label) in labels.iter_mut().enumerate() {
-            *label = i as i32;
+        // Union-Find structure
+        let mut parent: Vec<usize> = (0..n).collect();
+        let mut rank: Vec<usize> = vec![0; n];
+
+        let find = |parent: &mut Vec<usize>, mut i: usize| -> usize {
+            while i != parent[i] {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        };
+
+        let union = |parent: &mut Vec<usize>, rank: &mut Vec<usize>, i: usize, j: usize| {
+            let root_i = find(parent, i);
+            let root_j = find(parent, j);
+            if root_i != root_j {
+                if rank[root_i] < rank[root_j] {
+                    parent[root_i] = root_j;
+                } else {
+                    parent[root_j] = root_i;
+                    if rank[root_i] == rank[root_j] {
+                        rank[root_i] += 1;
+                    }
+                }
+            }
+        };
+
+        let radius_sq = self.config.radius * self.config.radius;
+        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
+
+        // Iterate over all hits and connect neighbors
+        for (i, hit) in hits.iter().enumerate() {
+            let x = hit.x() as i32;
+            let y = hit.y() as i32;
+
+            // Query neighbors
+            for &neighbor_idx in grid.query_neighborhood(x, y) {
+                if neighbor_idx <= i {
+                    continue; // Avoid duplicate checks
+                }
+                
+                let neighbor = &hits[neighbor_idx];
+                if hit.within_temporal_window(neighbor, window_tof) &&
+                   hit.distance_squared(neighbor) <= radius_sq {
+                    union(&mut parent, &mut rank, i, neighbor_idx);
+                }
+            }
         }
 
-        state.hits_processed = hits.len();
-        state.clusters_found = hits.len();
+        // Assign cluster labels
+        let mut root_to_label = std::collections::HashMap::new();
+        let mut next_label = 0;
+
+        for i in 0..n {
+            let root = find(&mut parent, i);
+            let label = *root_to_label.entry(root).or_insert_with(|| {
+                let l = next_label;
+                next_label += 1;
+                l
+            });
+            labels[i] = label;
+        }
+
+        state.hits_processed = n;
+        state.clusters_found = next_label as usize;
 
         Ok(state.clusters_found)
     }
@@ -195,5 +254,32 @@ mod tests {
     fn test_grid_with_parallel() {
         let algo = GridClustering::default().with_parallel(false);
         assert!(!algo.config.parallel);
+    }
+
+    #[test]
+    fn test_grid_clustering_basic() {
+        use rustpix_core::hit::GenericHit;
+        
+        let clustering = GridClustering::default();
+        let mut state = clustering.create_state();
+        
+        // Create two clusters of hits
+        let mut hits = Vec::new();
+        
+        // Cluster 1: (10, 10)
+        hits.push(GenericHit { x: 10, y: 10, tof: 100, ..Default::default() });
+        hits.push(GenericHit { x: 11, y: 11, tof: 100, ..Default::default() });
+        
+        // Cluster 2: (50, 50)
+        hits.push(GenericHit { x: 50, y: 50, tof: 100, ..Default::default() });
+        hits.push(GenericHit { x: 51, y: 51, tof: 100, ..Default::default() });
+        
+        let mut labels = vec![0; hits.len()];
+        let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
+        
+        assert_eq!(count, 2);
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[2], labels[3]);
+        assert_ne!(labels[0], labels[2]);
     }
 }

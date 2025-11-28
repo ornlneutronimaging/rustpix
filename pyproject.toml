@@ -1,0 +1,39 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rustpix"
+version = "0.1.0"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = ["numpy"]
+
+[tool.maturin]
+manifest-path = "rustpix-python/Cargo.toml"
+features = ["pyo3/extension-module"]
+module-name = "rustpix"
+
+[tool.pixi.project]
+name = "rustpix"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64"]
+
+[tool.pixi.dependencies]
+python = ">=3.11,<3.14"
+numpy = "*"
+maturin = "*"
+rust = "*"
+pip = "*"
+
+[tool.pixi.tasks]
+build-rust = "cargo build --release"
+build-python = "maturin build --release"
+develop = "maturin develop"
+test-rust = "cargo test --workspace"
+test-python = "python -c 'import rustpix; print(dir(rustpix))'"
+gui = "cargo run -p rustpix-gui --release"

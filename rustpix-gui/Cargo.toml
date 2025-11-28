@@ -1,0 +1,25 @@
+[package]
+name = "rustpix-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GUI application for rustpix pixel detector processing"
+
+[dependencies]
+rustpix-core.workspace = true
+rustpix-io.workspace = true
+rustpix-algorithms.workspace = true
+rustpix-tpx.workspace = true
+
+# GUI
+eframe = "0.29"
+egui = "0.29"
+egui_plot = "0.29"
+rfd = "0.15"
+
+# Utils
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"

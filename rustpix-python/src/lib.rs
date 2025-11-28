@@ -4,76 +4,96 @@
 //! for efficient data exchange with Python.
 
 use numpy::ndarray::Array1;
-use numpy::PyArray1;
+use numpy::{PyArray1};
 use pyo3::prelude::*;
 use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
-use rustpix_core::{
-    Centroid, CentroidExtractor, Cluster, ClusteringAlgorithm, ClusteringConfig, ExtractionConfig,
-    HitData, WeightedCentroidExtractor,
-};
+use rustpix_core::clustering::{ClusteringConfig, HitClustering};
+use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
+use rustpix_core::hit::GenericHit;
+use rustpix_core::neutron::Neutron;
 use rustpix_io::Tpx3FileReader;
 use rustpix_tpx::Tpx3Hit;
 
-/// Python wrapper for HitData.
+/// Python wrapper for GenericHit.
 #[pyclass(name = "Hit")]
 #[derive(Clone)]
 pub struct PyHit {
-    inner: HitData,
+    inner: GenericHit,
 }
 
 #[pymethods]
 impl PyHit {
     #[new]
-    fn new(x: u16, y: u16, toa: u64, tot: u16) -> Self {
+    fn new(x: u16, y: u16, tof: u32, tot: u16, timestamp: u32, chip_id: u8) -> Self {
         Self {
-            inner: HitData::new(x, y, toa, tot),
+            inner: GenericHit {
+                x,
+                y,
+                tof,
+                tot,
+                timestamp,
+                chip_id,
+                _padding: 0,
+                cluster_id: -1,
+            },
         }
     }
 
     #[getter]
     fn x(&self) -> u16 {
-        self.inner.coord.x
+        self.inner.x
     }
 
     #[getter]
     fn y(&self) -> u16 {
-        self.inner.coord.y
+        self.inner.y
     }
 
     #[getter]
-    fn toa(&self) -> u64 {
-        self.inner.toa.as_u64()
+    fn tof(&self) -> u32 {
+        self.inner.tof
     }
 
     #[getter]
     fn tot(&self) -> u16 {
         self.inner.tot
     }
+    
+    #[getter]
+    fn timestamp(&self) -> u32 {
+        self.inner.timestamp
+    }
+    
+    #[getter]
+    fn chip_id(&self) -> u8 {
+        self.inner.chip_id
+    }
 
     fn __repr__(&self) -> String {
         format!(
-            "Hit(x={}, y={}, toa={}, tot={})",
-            self.inner.coord.x,
-            self.inner.coord.y,
-            self.inner.toa.as_u64(),
-            self.inner.tot
+            "Hit(x={}, y={}, tof={}, tot={}, chip={})",
+            self.inner.x,
+            self.inner.y,
+            self.inner.tof,
+            self.inner.tot,
+            self.inner.chip_id
         )
     }
 }
 
-/// Python wrapper for Centroid.
-#[pyclass(name = "Centroid")]
+/// Python wrapper for Neutron.
+#[pyclass(name = "Neutron")]
 #[derive(Clone)]
-pub struct PyCentroid {
-    inner: Centroid,
+pub struct PyNeutron {
+    inner: Neutron,
 }
 
 #[pymethods]
-impl PyCentroid {
+impl PyNeutron {
     #[new]
-    fn new(x: f64, y: f64, toa: u64, tot_sum: u32, cluster_size: u16) -> Self {
+    fn new(x: f64, y: f64, tof: u32, tot: u16, n_hits: u16, chip_id: u8) -> Self {
         Self {
-            inner: Centroid::new(x, y, toa, tot_sum, cluster_size),
+            inner: Neutron::new(x, y, tof, tot, n_hits, chip_id),
         }
     }
 
@@ -88,28 +108,39 @@ impl PyCentroid {
     }
 
     #[getter]
-    fn toa(&self) -> u64 {
-        self.inner.toa.as_u64()
+    fn tof(&self) -> u32 {
+        self.inner.tof
+    }
+    
+    #[getter]
+    fn tof_ns(&self) -> f64 {
+        self.inner.tof_ns()
     }
 
     #[getter]
-    fn tot_sum(&self) -> u32 {
-        self.inner.tot_sum
+    fn tot(&self) -> u16 {
+        self.inner.tot
     }
 
     #[getter]
-    fn cluster_size(&self) -> u16 {
-        self.inner.cluster_size
+    fn n_hits(&self) -> u16 {
+        self.inner.n_hits
+    }
+    
+    #[getter]
+    fn chip_id(&self) -> u8 {
+        self.inner.chip_id
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Centroid(x={:.2}, y={:.2}, toa={}, tot_sum={}, cluster_size={})",
+            "Neutron(x={:.2}, y={:.2}, tof={}, tot={}, n_hits={}, chip={})",
             self.inner.x,
             self.inner.y,
-            self.inner.toa.as_u64(),
-            self.inner.tot_sum,
-            self.inner.cluster_size
+            self.inner.tof,
+            self.inner.tot,
+            self.inner.n_hits,
+            self.inner.chip_id
         )
     }
 }
@@ -124,41 +155,48 @@ pub struct PyClusteringConfig {
 #[pymethods]
 impl PyClusteringConfig {
     #[new]
-    #[pyo3(signature = (spatial_epsilon=1.5, temporal_epsilon=1000, min_cluster_size=1, max_cluster_size=None))]
+    #[pyo3(signature = (radius=5.0, temporal_window_ns=75.0, min_cluster_size=1, max_cluster_size=None))]
     fn new(
-        spatial_epsilon: f64,
-        temporal_epsilon: u64,
-        min_cluster_size: usize,
+        radius: f64,
+        temporal_window_ns: f64,
+        min_cluster_size: u16,
         max_cluster_size: Option<usize>,
     ) -> Self {
         Self {
             inner: ClusteringConfig {
-                spatial_epsilon,
-                temporal_epsilon,
+                radius,
+                temporal_window_ns,
                 min_cluster_size,
-                max_cluster_size,
+                max_cluster_size: max_cluster_size.map(|s| s as u16),
             },
+        }
+    }
+    
+    #[staticmethod]
+    fn default() -> Self {
+        Self {
+            inner: ClusteringConfig::default(),
         }
     }
 
     #[getter]
-    fn spatial_epsilon(&self) -> f64 {
-        self.inner.spatial_epsilon
+    fn radius(&self) -> f64 {
+        self.inner.radius
     }
 
     #[getter]
-    fn temporal_epsilon(&self) -> u64 {
-        self.inner.temporal_epsilon
+    fn temporal_window_ns(&self) -> f64 {
+        self.inner.temporal_window_ns
     }
 
     #[getter]
-    fn min_cluster_size(&self) -> usize {
+    fn min_cluster_size(&self) -> u16 {
         self.inner.min_cluster_size
     }
 
     #[getter]
     fn max_cluster_size(&self) -> Option<usize> {
-        self.inner.max_cluster_size
+        self.inner.max_cluster_size.map(|s| s as usize)
     }
 }
 
@@ -174,7 +212,18 @@ fn read_tpx3_file(path: &str) -> PyResult<Vec<PyHit>> {
 
     Ok(hits
         .into_iter()
-        .map(|h| PyHit { inner: h.into() })
+        .map(|h| PyHit { 
+            inner: GenericHit {
+                x: h.x,
+                y: h.y,
+                tof: h.tof,
+                tot: h.tot,
+                timestamp: h.timestamp,
+                chip_id: h.chip_id,
+                _padding: 0,
+                cluster_id: -1,
+            }
+        })
         .collect())
 }
 
@@ -191,20 +240,23 @@ fn read_tpx3_file_numpy<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py,
     // Create separate arrays for each field
     let x: Array1<u16> = hits.iter().map(|h| h.x).collect();
     let y: Array1<u16> = hits.iter().map(|h| h.y).collect();
-    let toa: Array1<u64> = hits.iter().map(|h| h.toa).collect();
+    let tof: Array1<u32> = hits.iter().map(|h| h.tof).collect();
     let tot: Array1<u16> = hits.iter().map(|h| h.tot).collect();
+    let chip_id: Array1<u8> = hits.iter().map(|h| h.chip_id).collect();
 
     let x_arr = PyArray1::from_array(py, &x);
     let y_arr = PyArray1::from_array(py, &y);
-    let toa_arr = PyArray1::from_array(py, &toa);
+    let tof_arr = PyArray1::from_array(py, &tof);
     let tot_arr = PyArray1::from_array(py, &tot);
+    let chip_arr = PyArray1::from_array(py, &chip_id);
 
     // Return as a dictionary
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("x", x_arr)?;
     dict.set_item("y", y_arr)?;
-    dict.set_item("toa", toa_arr)?;
+    dict.set_item("tof", tof_arr)?;
     dict.set_item("tot", tot_arr)?;
+    dict.set_item("chip_id", chip_arr)?;
 
     Ok(dict.into_any())
 }
@@ -216,23 +268,40 @@ fn cluster_hits(
     hits: Vec<PyHit>,
     config: Option<PyClusteringConfig>,
     algorithm: &str,
-) -> PyResult<Vec<Vec<PyHit>>> {
-    let config = config.unwrap_or_else(|| PyClusteringConfig::new(1.5, 1000, 1, None));
-    let hit_data: Vec<HitData> = hits.iter().map(|h| h.inner).collect();
+) -> PyResult<(Vec<i32>, usize)> {
+    let config = config.unwrap_or_else(|| PyClusteringConfig::new(5.0, 75.0, 1, None));
+    let hit_data: Vec<GenericHit> = hits.iter().map(|h| h.inner).collect();
+    let mut labels = vec![0; hit_data.len()];
 
-    let clusters: Vec<Cluster<HitData>> = match algorithm.to_lowercase().as_str() {
-        "abs" => AbsClustering::new()
-            .cluster(&hit_data, &config.inner)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
-        "dbscan" => DbscanClustering::new()
-            .cluster(&hit_data, &config.inner)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
-        "graph" => GraphClustering::new()
-            .cluster(&hit_data, &config.inner)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
-        "grid" => GridClustering::new()
-            .cluster(&hit_data, &config.inner)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
+    let num_clusters = match algorithm.to_lowercase().as_str() {
+        "abs" => {
+            let mut algo = AbsClustering::default();
+            algo.configure(&config.inner);
+            let mut state = algo.create_state();
+            algo.cluster(&hit_data, &mut state, &mut labels)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        },
+        "dbscan" => {
+            let mut algo = DbscanClustering::default();
+            algo.configure(&config.inner);
+            let mut state = algo.create_state();
+            algo.cluster(&hit_data, &mut state, &mut labels)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        },
+        "graph" => {
+            let mut algo = GraphClustering::default();
+            algo.configure(&config.inner);
+            let mut state = algo.create_state();
+            algo.cluster(&hit_data, &mut state, &mut labels)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        },
+        "grid" => {
+            let mut algo = GridClustering::default();
+            algo.configure(&config.inner);
+            let mut state = algo.create_state();
+            algo.cluster(&hit_data, &mut state, &mut labels)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        },
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Unknown algorithm: {}. Use 'abs', 'dbscan', 'graph', or 'grid'",
@@ -241,101 +310,106 @@ fn cluster_hits(
         }
     };
 
-    Ok(clusters
-        .into_iter()
-        .map(|c| c.hits.into_iter().map(|h| PyHit { inner: h }).collect())
-        .collect())
+    Ok((labels, num_clusters))
 }
 
-/// Extract centroids from clusters.
+/// Extract neutrons from clustered hits.
 #[pyfunction]
-#[pyo3(signature = (clusters, tot_weighted=true))]
-fn extract_centroids(clusters: Vec<Vec<PyHit>>, tot_weighted: bool) -> PyResult<Vec<PyCentroid>> {
-    let extractor = WeightedCentroidExtractor::new();
-    let config = ExtractionConfig::new().with_tot_weighted(tot_weighted);
+#[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
+fn extract_neutrons(
+    hits: Vec<PyHit>, 
+    labels: Vec<i32>, 
+    num_clusters: usize,
+    super_resolution: f64,
+    tot_weighted: bool
+) -> PyResult<Vec<PyNeutron>> {
+    let mut extractor = SimpleCentroidExtraction::new();
+    extractor.configure(ExtractionConfig::default()
+        .with_super_resolution(super_resolution)
+        .with_weighted_by_tot(tot_weighted));
 
-    let mut centroids = Vec::with_capacity(clusters.len());
+    let hit_data: Vec<GenericHit> = hits.iter().map(|h| h.inner).collect();
 
-    for cluster_hits in clusters {
-        let hit_data: Vec<HitData> = cluster_hits.iter().map(|h| h.inner).collect();
-        let cluster: Cluster<HitData> = hit_data.into_iter().collect();
+    let neutrons = extractor
+        .extract(&hit_data, &labels, num_clusters)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-        let centroid = extractor
-            .extract(&cluster, &config)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-        centroids.push(PyCentroid { inner: centroid });
-    }
-
-    Ok(centroids)
+    Ok(neutrons.into_iter().map(|n| PyNeutron { inner: n }).collect())
 }
 
-/// Extract centroids and return as numpy arrays.
+/// Extract neutrons and return as numpy arrays.
 #[pyfunction]
-#[pyo3(signature = (clusters, tot_weighted=true))]
-fn extract_centroids_numpy<'py>(
+#[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
+fn extract_neutrons_numpy<'py>(
     py: Python<'py>,
-    clusters: Vec<Vec<PyHit>>,
+    hits: Vec<PyHit>,
+    labels: Vec<i32>,
+    num_clusters: usize,
+    super_resolution: f64,
     tot_weighted: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let centroids = extract_centroids(clusters, tot_weighted)?;
+    let neutrons = extract_neutrons(hits, labels, num_clusters, super_resolution, tot_weighted)?;
 
-    let x: Array1<f64> = centroids.iter().map(|c| c.inner.x).collect();
-    let y: Array1<f64> = centroids.iter().map(|c| c.inner.y).collect();
-    let toa: Array1<u64> = centroids.iter().map(|c| c.inner.toa.as_u64()).collect();
-    let tot_sum: Array1<u32> = centroids.iter().map(|c| c.inner.tot_sum).collect();
-    let cluster_size: Array1<u16> = centroids.iter().map(|c| c.inner.cluster_size).collect();
+    let x: Array1<f64> = neutrons.iter().map(|n| n.inner.x).collect();
+    let y: Array1<f64> = neutrons.iter().map(|n| n.inner.y).collect();
+    let tof: Array1<u32> = neutrons.iter().map(|n| n.inner.tof).collect();
+    let tot: Array1<u16> = neutrons.iter().map(|n| n.inner.tot).collect();
+    let n_hits: Array1<u16> = neutrons.iter().map(|n| n.inner.n_hits).collect();
+    let chip_id: Array1<u8> = neutrons.iter().map(|n| n.inner.chip_id).collect();
 
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("x", PyArray1::from_array(py, &x))?;
     dict.set_item("y", PyArray1::from_array(py, &y))?;
-    dict.set_item("toa", PyArray1::from_array(py, &toa))?;
-    dict.set_item("tot_sum", PyArray1::from_array(py, &tot_sum))?;
-    dict.set_item("cluster_size", PyArray1::from_array(py, &cluster_size))?;
+    dict.set_item("tof", PyArray1::from_array(py, &tof))?;
+    dict.set_item("tot", PyArray1::from_array(py, &tot))?;
+    dict.set_item("n_hits", PyArray1::from_array(py, &n_hits))?;
+    dict.set_item("chip_id", PyArray1::from_array(py, &chip_id))?;
 
     Ok(dict.into_any())
 }
 
-/// Process a TPX3 file: read, cluster, and extract centroids.
+/// Process a TPX3 file: read, cluster, and extract neutrons.
 #[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", tot_weighted=true))]
+#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true))]
 fn process_tpx3_file(
     path: &str,
     config: Option<PyClusteringConfig>,
     algorithm: &str,
+    super_resolution: f64,
     tot_weighted: bool,
-) -> PyResult<Vec<PyCentroid>> {
+) -> PyResult<Vec<PyNeutron>> {
     let hits = read_tpx3_file(path)?;
-    let clusters = cluster_hits(hits, config, algorithm)?;
-    extract_centroids(clusters, tot_weighted)
+    let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
+    extract_neutrons(hits, labels, num_clusters, super_resolution, tot_weighted)
 }
 
-/// Process a TPX3 file and return centroids as numpy arrays.
+/// Process a TPX3 file and return neutrons as numpy arrays.
 #[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", tot_weighted=true))]
+#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true))]
 fn process_tpx3_file_numpy<'py>(
     py: Python<'py>,
     path: &str,
     config: Option<PyClusteringConfig>,
     algorithm: &str,
+    super_resolution: f64,
     tot_weighted: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let hits = read_tpx3_file(path)?;
-    let clusters = cluster_hits(hits, config, algorithm)?;
-    extract_centroids_numpy(py, clusters, tot_weighted)
+    let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
+    extract_neutrons_numpy(py, hits, labels, num_clusters, super_resolution, tot_weighted)
 }
 
 /// Python module for rustpix.
 #[pymodule]
 fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHit>()?;
-    m.add_class::<PyCentroid>()?;
+    m.add_class::<PyNeutron>()?;
     m.add_class::<PyClusteringConfig>()?;
     m.add_function(wrap_pyfunction!(read_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;
-    m.add_function(wrap_pyfunction!(extract_centroids, m)?)?;
-    m.add_function(wrap_pyfunction!(extract_centroids_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_neutrons, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_neutrons_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file_numpy, m)?)?;
     Ok(())
