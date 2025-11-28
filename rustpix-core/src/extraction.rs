@@ -1,218 +1,288 @@
-//! Centroid extraction traits and types.
+//! Neutron extraction traits and configuration.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 2.4 for detailed specification.
 
-use crate::{Cluster, Error, Hit, Result, TimeOfArrival};
+use crate::error::ExtractionError;
+use crate::hit::Hit;
+use crate::neutron::Neutron;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-/// Extracted centroid data from a cluster.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct Centroid {
-    /// Centroid X coordinate (sub-pixel precision).
-    pub x: f64,
-    /// Centroid Y coordinate (sub-pixel precision).
-    pub y: f64,
-    /// Time of arrival.
-    pub toa: TimeOfArrival,
-    /// Total time over threshold (sum of all hits).
-    pub tot_sum: u32,
-    /// Number of hits in the cluster.
-    pub cluster_size: u16,
-}
-
-impl Centroid {
-    /// Creates a new centroid.
-    pub fn new(x: f64, y: f64, toa: u64, tot_sum: u32, cluster_size: u16) -> Self {
-        Self {
-            x,
-            y,
-            toa: TimeOfArrival::new(toa),
-            tot_sum,
-            cluster_size,
-        }
-    }
-}
-
-/// Configuration for centroid extraction.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Configuration for neutron extraction.
+#[derive(Clone, Debug)]
 pub struct ExtractionConfig {
-    /// Whether to weight positions by ToT (charge weighting).
-    pub tot_weighted: bool,
-    /// Whether to compute weighted average ToA.
-    pub weighted_toa: bool,
+    /// Sub-pixel resolution multiplier (default: 8.0).
+    pub super_resolution_factor: f64,
+    /// Weight centroids by TOT values.
+    pub weighted_by_tot: bool,
+    /// Minimum TOT threshold (0 = disabled).
+    pub min_tot_threshold: u16,
 }
 
 impl Default for ExtractionConfig {
     fn default() -> Self {
         Self {
-            tot_weighted: true,
-            weighted_toa: true,
+            super_resolution_factor: 8.0,
+            weighted_by_tot: true,
+            min_tot_threshold: 0,
         }
     }
 }
 
 impl ExtractionConfig {
-    /// Creates a new extraction configuration with default values.
-    pub fn new() -> Self {
+    /// Create VENUS/SNS default configuration.
+    pub fn venus_defaults() -> Self {
         Self::default()
     }
 
-    /// Sets ToT weighting.
-    pub fn with_tot_weighted(mut self, weighted: bool) -> Self {
-        self.tot_weighted = weighted;
+    /// Set super resolution factor.
+    pub fn with_super_resolution(mut self, factor: f64) -> Self {
+        self.super_resolution_factor = factor;
         self
     }
 
-    /// Sets ToA weighting.
-    pub fn with_weighted_toa(mut self, weighted: bool) -> Self {
-        self.weighted_toa = weighted;
+    /// Set TOT weighting.
+    pub fn with_weighted_by_tot(mut self, weighted: bool) -> Self {
+        self.weighted_by_tot = weighted;
+        self
+    }
+
+    /// Set minimum TOT threshold.
+    pub fn with_min_tot_threshold(mut self, threshold: u16) -> Self {
+        self.min_tot_threshold = threshold;
         self
     }
 }
 
-/// Trait for centroid extraction algorithms.
+/// Trait for neutron extraction algorithms.
 ///
-/// Centroid extractors compute the position, time, and intensity
-/// of a detection event from a cluster of hits.
-pub trait CentroidExtractor<H: Hit>: Send + Sync {
-    /// Extracts a centroid from a cluster.
-    fn extract(&self, cluster: &Cluster<H>, config: &ExtractionConfig) -> Result<Centroid>;
+/// Extracts neutron events from clustered hits by computing centroids.
+pub trait NeutronExtraction: Send + Sync {
+    /// Algorithm name.
+    fn name(&self) -> &'static str;
 
-    /// Extracts centroids from multiple clusters.
-    fn extract_all(
+    /// Configure the extraction.
+    fn configure(&mut self, config: ExtractionConfig);
+
+    /// Get current configuration.
+    fn config(&self) -> &ExtractionConfig;
+
+    /// Extract neutrons from clustered hits.
+    ///
+    /// # Arguments
+    /// * `hits` - Slice of hits (matching labels array)
+    /// * `labels` - Cluster labels from clustering algorithm
+    /// * `num_clusters` - Number of clusters found
+    ///
+    /// # Returns
+    /// Vector of extracted neutrons (one per cluster).
+    fn extract<H: Hit>(
         &self,
-        clusters: &[Cluster<H>],
-        config: &ExtractionConfig,
-    ) -> Result<Vec<Centroid>> {
-        clusters.iter().map(|c| self.extract(c, config)).collect()
-    }
+        hits: &[H],
+        labels: &[i32],
+        num_clusters: usize,
+    ) -> Result<Vec<Neutron>, ExtractionError>;
 }
 
-/// Simple centroid extractor using weighted averages.
-#[derive(Debug, Clone, Default)]
-pub struct WeightedCentroidExtractor;
+/// Simple centroid extraction using TOT-weighted averages.
+///
+/// Algorithm (see IMPLEMENTATION_PLAN.md Part 4 - Neutron Extraction):
+/// 1. Single hit: Return as-is with super-resolution scaling
+/// 2. Multi-hit: Compute TOT-weighted centroid
+/// 3. Representative TOF: Use TOF from hit with highest TOT
+/// 4. Output scaling: Multiply by super_resolution_factor
+#[derive(Clone, Debug, Default)]
+pub struct SimpleCentroidExtraction {
+    config: ExtractionConfig,
+}
 
-impl WeightedCentroidExtractor {
-    /// Creates a new weighted centroid extractor.
+impl SimpleCentroidExtraction {
+    /// Create with default configuration.
     pub fn new() -> Self {
-        Self
+        Self {
+            config: ExtractionConfig::default(),
+        }
+    }
+
+    /// Create with custom configuration.
+    pub fn with_config(config: ExtractionConfig) -> Self {
+        Self { config }
     }
 }
 
-impl<H: Hit> CentroidExtractor<H> for WeightedCentroidExtractor {
-    fn extract(&self, cluster: &Cluster<H>, config: &ExtractionConfig) -> Result<Centroid> {
-        if cluster.is_empty() {
-            return Err(Error::EmptyCluster);
+impl NeutronExtraction for SimpleCentroidExtraction {
+    fn name(&self) -> &'static str {
+        "SimpleCentroid"
+    }
+
+    fn configure(&mut self, config: ExtractionConfig) {
+        self.config = config;
+    }
+
+    fn config(&self) -> &ExtractionConfig {
+        &self.config
+    }
+
+    fn extract<H: Hit>(
+        &self,
+        hits: &[H],
+        labels: &[i32],
+        num_clusters: usize,
+    ) -> Result<Vec<Neutron>, ExtractionError> {
+        if hits.len() != labels.len() {
+            return Err(ExtractionError::LabelMismatch {
+                hits: hits.len(),
+                labels: labels.len(),
+            });
         }
 
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut sum_toa: u64 = 0;
-        let mut tot_sum: u32 = 0;
-        let mut weight_sum = 0.0;
+        let mut neutrons = Vec::with_capacity(num_clusters);
 
-        for hit in cluster.iter() {
-            let weight = if config.tot_weighted {
-                hit.tot() as f64
-            } else {
-                1.0
-            };
+        // Process each cluster
+        for cluster_id in 0..num_clusters as i32 {
+            let cluster_indices: Vec<usize> = labels
+                .iter()
+                .enumerate()
+                .filter(|(_, &label)| label == cluster_id)
+                .map(|(idx, _)| idx)
+                .collect();
 
-            sum_x += hit.x() as f64 * weight;
-            sum_y += hit.y() as f64 * weight;
-            weight_sum += weight;
-
-            if config.weighted_toa {
-                sum_toa += (hit.toa_raw() as f64 * weight) as u64;
-            } else {
-                sum_toa += hit.toa_raw();
+            if cluster_indices.is_empty() {
+                continue;
             }
 
-            tot_sum += hit.tot() as u32;
+            // Find hit with maximum TOT (for representative TOF)
+            let max_tot_idx = cluster_indices
+                .iter()
+                .max_by_key(|&&idx| hits[idx].tot())
+                .copied()
+                .unwrap();
+
+            let representative_tof = hits[max_tot_idx].tof();
+            let representative_chip = hits[max_tot_idx].chip_id();
+
+            // Calculate centroid
+            let (centroid_x, centroid_y, total_tot) = if self.config.weighted_by_tot {
+                // TOT-weighted centroid
+                let mut sum_x = 0.0;
+                let mut sum_y = 0.0;
+                let mut sum_weight = 0.0;
+                let mut sum_tot = 0u32;
+
+                for &idx in &cluster_indices {
+                    let hit = &hits[idx];
+                    let weight = hit.tot() as f64;
+                    sum_x += hit.x() as f64 * weight;
+                    sum_y += hit.y() as f64 * weight;
+                    sum_weight += weight;
+                    sum_tot += hit.tot() as u32;
+                }
+
+                (
+                    sum_x / sum_weight,
+                    sum_y / sum_weight,
+                    sum_tot.min(u16::MAX as u32) as u16,
+                )
+            } else {
+                // Simple arithmetic mean
+                let mut sum_x = 0.0;
+                let mut sum_y = 0.0;
+                let mut sum_tot = 0u32;
+                let n = cluster_indices.len() as f64;
+
+                for &idx in &cluster_indices {
+                    let hit = &hits[idx];
+                    sum_x += hit.x() as f64;
+                    sum_y += hit.y() as f64;
+                    sum_tot += hit.tot() as u32;
+                }
+
+                (
+                    sum_x / n,
+                    sum_y / n,
+                    sum_tot.min(u16::MAX as u32) as u16,
+                )
+            };
+
+            // Apply super-resolution scaling
+            let scaled_x = centroid_x * self.config.super_resolution_factor;
+            let scaled_y = centroid_y * self.config.super_resolution_factor;
+
+            neutrons.push(Neutron::new(
+                scaled_x,
+                scaled_y,
+                representative_tof,
+                total_tot,
+                cluster_indices.len() as u16,
+                representative_chip,
+            ));
         }
 
-        let cluster_size = cluster.len() as u16;
-        let centroid_x = sum_x / weight_sum;
-        let centroid_y = sum_y / weight_sum;
-        let avg_toa = if config.weighted_toa {
-            (sum_toa as f64 / weight_sum) as u64
-        } else {
-            sum_toa / cluster_size as u64
-        };
-
-        Ok(Centroid::new(
-            centroid_x,
-            centroid_y,
-            avg_toa,
-            tot_sum,
-            cluster_size,
-        ))
+        Ok(neutrons)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HitData;
+    use crate::hit::GenericHit;
 
     #[test]
-    fn test_weighted_centroid_extraction() {
-        let mut cluster = Cluster::new();
-        cluster.push(HitData::new(0, 0, 100, 10));
-        cluster.push(HitData::new(2, 0, 100, 10));
+    fn test_single_hit_extraction() {
+        let hits = vec![GenericHit::new(1000, 100, 200, 500, 50, 0)];
+        let labels = vec![0];
 
-        let extractor = WeightedCentroidExtractor::new();
-        let config = ExtractionConfig::new().with_tot_weighted(true);
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
 
-        let centroid = extractor.extract(&cluster, &config).unwrap();
-
-        // Equal weights, so centroid should be at (1, 0)
-        assert!((centroid.x - 1.0).abs() < f64::EPSILON);
-        assert!((centroid.y - 0.0).abs() < f64::EPSILON);
-        assert_eq!(centroid.tot_sum, 20);
-        assert_eq!(centroid.cluster_size, 2);
+        assert_eq!(neutrons.len(), 1);
+        assert_eq!(neutrons[0].x, 800.0); // 100 * 8
+        assert_eq!(neutrons[0].y, 1600.0); // 200 * 8
+        assert_eq!(neutrons[0].tof, 1000);
+        assert_eq!(neutrons[0].n_hits, 1);
     }
 
     #[test]
-    fn test_unweighted_centroid_extraction() {
-        let mut cluster = Cluster::new();
-        cluster.push(HitData::new(0, 0, 100, 30));
-        cluster.push(HitData::new(2, 0, 100, 10));
+    fn test_weighted_centroid() {
+        let hits = vec![
+            GenericHit::new(1000, 0, 0, 500, 30, 0),  // weight 30
+            GenericHit::new(1000, 2, 0, 500, 10, 0),  // weight 10
+        ];
+        let labels = vec![0, 0];
 
-        let extractor = WeightedCentroidExtractor::new();
-        let config = ExtractionConfig::new().with_tot_weighted(false);
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
 
-        let centroid = extractor.extract(&cluster, &config).unwrap();
-
-        // Unweighted, so centroid should be at (1, 0)
-        assert!((centroid.x - 1.0).abs() < f64::EPSILON);
-        assert!((centroid.y - 0.0).abs() < f64::EPSILON);
+        assert_eq!(neutrons.len(), 1);
+        // Weighted: (0*30 + 2*10) / 40 = 0.5, scaled by 8 = 4.0
+        assert!((neutrons[0].x - 4.0).abs() < 0.01);
+        assert_eq!(neutrons[0].n_hits, 2);
+        assert_eq!(neutrons[0].tot, 40);
     }
 
     #[test]
-    fn test_weighted_asymmetric() {
-        let mut cluster = Cluster::new();
-        cluster.push(HitData::new(0, 0, 100, 30)); // weight 30
-        cluster.push(HitData::new(2, 0, 100, 10)); // weight 10
+    fn test_multiple_clusters() {
+        let hits = vec![
+            GenericHit::new(1000, 10, 10, 500, 50, 0),
+            GenericHit::new(1000, 11, 10, 500, 50, 0),
+            GenericHit::new(2000, 100, 100, 500, 50, 1),
+        ];
+        let labels = vec![0, 0, 1];
 
-        let extractor = WeightedCentroidExtractor::new();
-        let config = ExtractionConfig::new().with_tot_weighted(true);
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract(&hits, &labels, 2).unwrap();
 
-        let centroid = extractor.extract(&cluster, &config).unwrap();
-
-        // Weighted average: (0*30 + 2*10) / 40 = 0.5
-        assert!((centroid.x - 0.5).abs() < f64::EPSILON);
+        assert_eq!(neutrons.len(), 2);
+        assert_eq!(neutrons[0].n_hits, 2);
+        assert_eq!(neutrons[1].n_hits, 1);
     }
 
     #[test]
-    fn test_empty_cluster_error() {
-        let cluster: Cluster<HitData> = Cluster::new();
-        let extractor = WeightedCentroidExtractor::new();
-        let config = ExtractionConfig::default();
+    fn test_label_mismatch_error() {
+        let hits = vec![GenericHit::new(1000, 100, 200, 500, 50, 0)];
+        let labels = vec![0, 0]; // Wrong length
 
-        let result = extractor.extract(&cluster, &config);
+        let extractor = SimpleCentroidExtraction::new();
+        let result = extractor.extract(&hits, &labels, 1);
+
         assert!(result.is_err());
     }
 }

@@ -1,138 +1,161 @@
 //! Hit traits and types for pixel detector data.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 2.1 for detailed specification.
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+/// Core trait for all detector hit types.
+///
+/// A "hit" represents a single pixel activation event from a detector.
+/// Different detector types (TPX3, TPX4, etc.) implement this trait.
+pub trait Hit: Clone + Send + Sync {
+    /// Time-of-flight in detector-native units (typically 25ns).
+    fn tof(&self) -> u32;
 
-/// Pixel coordinate on the detector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct PixelCoord {
-    /// X coordinate (column).
-    pub x: u16,
-    /// Y coordinate (row).
-    pub y: u16,
-}
+    /// X coordinate in global detector space.
+    fn x(&self) -> u16;
 
-impl PixelCoord {
-    /// Creates a new pixel coordinate.
+    /// Y coordinate in global detector space.
+    fn y(&self) -> u16;
+
+    /// Time-over-threshold (signal amplitude proxy).
+    fn tot(&self) -> u16;
+
+    /// Timestamp in detector-native units.
+    fn timestamp(&self) -> u32;
+
+    /// Chip identifier for multi-chip detectors.
+    fn chip_id(&self) -> u8;
+
+    /// TOF in nanoseconds.
     #[inline]
-    pub fn new(x: u16, y: u16) -> Self {
-        Self { x, y }
+    fn tof_ns(&self) -> f64 {
+        self.tof() as f64 * 25.0
     }
 
-    /// Computes the squared Euclidean distance to another coordinate.
+    /// Squared Euclidean distance to another hit.
     #[inline]
-    pub fn distance_squared(&self, other: &Self) -> u32 {
-        let dx = (self.x as i32 - other.x as i32).unsigned_abs();
-        let dy = (self.y as i32 - other.y as i32).unsigned_abs();
+    fn distance_squared(&self, other: &impl Hit) -> f64 {
+        let dx = self.x() as f64 - other.x() as f64;
+        let dy = self.y() as f64 - other.y() as f64;
         dx * dx + dy * dy
     }
 
-    /// Checks if this coordinate is adjacent to another (8-connectivity).
+    /// Check if within spatial radius of another hit.
     #[inline]
-    pub fn is_adjacent(&self, other: &Self) -> bool {
-        let dx = (self.x as i32 - other.x as i32).abs();
-        let dy = (self.y as i32 - other.y as i32).abs();
-        dx <= 1 && dy <= 1 && (dx != 0 || dy != 0)
+    fn within_radius(&self, other: &impl Hit, radius: f64) -> bool {
+        self.distance_squared(other) <= radius * radius
+    }
+
+    /// Check if within temporal window of another hit (in TOF units).
+    #[inline]
+    fn within_temporal_window(&self, other: &impl Hit, window_tof: u32) -> bool {
+        let diff = if self.tof() > other.tof() {
+            self.tof() - other.tof()
+        } else {
+            other.tof() - self.tof()
+        };
+        diff <= window_tof
     }
 }
 
-/// Time of arrival in detector units (typically picoseconds or nanoseconds).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct TimeOfArrival(pub u64);
+/// Hit with mutable cluster assignment.
+pub trait ClusterableHit: Hit {
+    /// Get current cluster ID (-1 = unassigned).
+    fn cluster_id(&self) -> i32;
 
-impl TimeOfArrival {
-    /// Creates a new time of arrival.
-    #[inline]
-    pub fn new(toa: u64) -> Self {
-        Self(toa)
-    }
-
-    /// Returns the raw time value.
-    #[inline]
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-
-    /// Computes the absolute time difference.
-    #[inline]
-    pub fn abs_diff(&self, other: &Self) -> u64 {
-        self.0.abs_diff(other.0)
-    }
+    /// Set cluster ID.
+    fn set_cluster_id(&mut self, id: i32);
 }
 
-/// Core data structure for a single hit event.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct HitData {
-    /// Pixel coordinate.
-    pub coord: PixelCoord,
-    /// Time of arrival.
-    pub toa: TimeOfArrival,
-    /// Time over threshold (proportional to charge/energy).
+/// Generic hit type for detector-agnostic code.
+///
+/// Memory layout optimized for cache efficiency.
+/// See IMPLEMENTATION_PLAN.md Part 2.1 for details.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct GenericHit {
+    /// Time-of-flight in 25ns units.
+    pub tof: u32,
+    /// Global X coordinate.
+    pub x: u16,
+    /// Global Y coordinate.
+    pub y: u16,
+    /// Timestamp in 25ns units.
+    pub timestamp: u32,
+    /// Time-over-threshold.
     pub tot: u16,
+    /// Chip identifier.
+    pub chip_id: u8,
+    /// Padding for alignment.
+    pub _padding: u8,
+    /// Cluster assignment (-1 = unassigned).
+    pub cluster_id: i32,
 }
 
-impl HitData {
-    /// Creates a new hit data structure.
-    #[inline]
-    pub fn new(x: u16, y: u16, toa: u64, tot: u16) -> Self {
+impl GenericHit {
+    /// Create a new hit.
+    pub fn new(tof: u32, x: u16, y: u16, timestamp: u32, tot: u16, chip_id: u8) -> Self {
         Self {
-            coord: PixelCoord::new(x, y),
-            toa: TimeOfArrival::new(toa),
+            tof,
+            x,
+            y,
+            timestamp,
             tot,
+            chip_id,
+            _padding: 0,
+            cluster_id: -1,
         }
     }
 }
 
-/// Trait for hit data from pixel detectors.
-///
-/// This trait provides a common interface for different detector types
-/// (TPX3, TPX4, etc.) to expose their hit data in a uniform way.
-pub trait Hit: Send + Sync {
-    /// Returns the pixel coordinate of the hit.
-    fn coord(&self) -> PixelCoord;
-
-    /// Returns the time of arrival.
-    fn toa(&self) -> TimeOfArrival;
-
-    /// Returns the time over threshold (charge proxy).
-    fn tot(&self) -> u16;
-
-    /// Returns the x coordinate.
+impl Hit for GenericHit {
+    #[inline]
+    fn tof(&self) -> u32 {
+        self.tof
+    }
     #[inline]
     fn x(&self) -> u16 {
-        self.coord().x
+        self.x
     }
-
-    /// Returns the y coordinate.
     #[inline]
     fn y(&self) -> u16 {
-        self.coord().y
+        self.y
     }
-
-    /// Returns the raw time of arrival value.
-    #[inline]
-    fn toa_raw(&self) -> u64 {
-        self.toa().as_u64()
-    }
-}
-
-impl Hit for HitData {
-    #[inline]
-    fn coord(&self) -> PixelCoord {
-        self.coord
-    }
-
-    #[inline]
-    fn toa(&self) -> TimeOfArrival {
-        self.toa
-    }
-
     #[inline]
     fn tot(&self) -> u16 {
         self.tot
+    }
+    #[inline]
+    fn timestamp(&self) -> u32 {
+        self.timestamp
+    }
+    #[inline]
+    fn chip_id(&self) -> u8 {
+        self.chip_id
+    }
+}
+
+impl ClusterableHit for GenericHit {
+    #[inline]
+    fn cluster_id(&self) -> i32 {
+        self.cluster_id
+    }
+    #[inline]
+    fn set_cluster_id(&mut self, id: i32) {
+        self.cluster_id = id;
+    }
+}
+
+impl Eq for GenericHit {}
+
+impl Ord for GenericHit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tof.cmp(&other.tof)
+    }
+}
+
+impl PartialOrd for GenericHit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -141,43 +164,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pixel_coord_distance() {
-        let p1 = PixelCoord::new(0, 0);
-        let p2 = PixelCoord::new(3, 4);
-        assert_eq!(p1.distance_squared(&p2), 25);
-    }
-
-    #[test]
-    fn test_pixel_coord_adjacency() {
-        let center = PixelCoord::new(5, 5);
-
-        // Adjacent pixels
-        assert!(center.is_adjacent(&PixelCoord::new(4, 4)));
-        assert!(center.is_adjacent(&PixelCoord::new(5, 4)));
-        assert!(center.is_adjacent(&PixelCoord::new(6, 6)));
-
-        // Same pixel
-        assert!(!center.is_adjacent(&center));
-
-        // Non-adjacent pixels
-        assert!(!center.is_adjacent(&PixelCoord::new(7, 5)));
-        assert!(!center.is_adjacent(&PixelCoord::new(5, 7)));
-    }
-
-    #[test]
-    fn test_time_of_arrival() {
-        let t1 = TimeOfArrival::new(1000);
-        let t2 = TimeOfArrival::new(1500);
-        assert_eq!(t1.abs_diff(&t2), 500);
-        assert_eq!(t2.abs_diff(&t1), 500);
-    }
-
-    #[test]
-    fn test_hit_data() {
-        let hit = HitData::new(10, 20, 1000, 50);
-        assert_eq!(hit.x(), 10);
-        assert_eq!(hit.y(), 20);
-        assert_eq!(hit.toa_raw(), 1000);
+    fn test_hit_creation() {
+        let hit = GenericHit::new(1000, 128, 256, 500, 50, 0);
+        assert_eq!(hit.tof(), 1000);
+        assert_eq!(hit.x(), 128);
+        assert_eq!(hit.y(), 256);
         assert_eq!(hit.tot(), 50);
+        assert_eq!(hit.chip_id(), 0);
+        assert_eq!(hit.cluster_id(), -1);
+    }
+
+    #[test]
+    fn test_tof_ns_conversion() {
+        let hit = GenericHit::new(1000, 0, 0, 0, 0, 0);
+        assert_eq!(hit.tof_ns(), 25000.0);
+    }
+
+    #[test]
+    fn test_distance_squared() {
+        let hit1 = GenericHit::new(0, 0, 0, 0, 0, 0);
+        let hit2 = GenericHit::new(0, 3, 4, 0, 0, 0);
+        assert_eq!(hit1.distance_squared(&hit2), 25.0);
+    }
+
+    #[test]
+    fn test_within_radius() {
+        let hit1 = GenericHit::new(0, 0, 0, 0, 0, 0);
+        let hit2 = GenericHit::new(0, 3, 4, 0, 0, 0);
+        assert!(hit1.within_radius(&hit2, 5.0));
+        assert!(!hit1.within_radius(&hit2, 4.9));
+    }
+
+    #[test]
+    fn test_within_temporal_window() {
+        let hit1 = GenericHit::new(1000, 0, 0, 0, 0, 0);
+        let hit2 = GenericHit::new(1003, 0, 0, 0, 0, 0);
+        assert!(hit1.within_temporal_window(&hit2, 3));
+        assert!(!hit1.within_temporal_window(&hit2, 2));
     }
 }

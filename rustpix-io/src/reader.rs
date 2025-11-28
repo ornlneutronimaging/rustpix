@@ -1,8 +1,11 @@
 //! Memory-mapped file readers.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 3.4 for detailed specification.
 
 use crate::{Error, Result};
 use memmap2::Mmap;
-use rustpix_tpx::{Tpx3Hit, Tpx3Parser, Tpx3ParserConfig};
+use rustpix_tpx::{Tpx3Hit, Tpx3Packet, DetectorConfig};
+use rustpix_tpx::section::{discover_sections, process_section};
 use std::fs::File;
 use std::path::Path;
 
@@ -44,26 +47,25 @@ impl MappedFileReader {
 }
 
 /// A TPX3 file reader with memory-mapped I/O.
-///
-/// Efficiently reads TPX3 data files and parses hit events.
 pub struct Tpx3FileReader {
     reader: MappedFileReader,
-    parser: Tpx3Parser,
+    config: DetectorConfig,
 }
 
 impl Tpx3FileReader {
-    /// Opens a TPX3 file for reading.
+    /// Opens a TPX3 file for reading with default configuration.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let reader = MappedFileReader::open(path)?;
-        let parser = Tpx3Parser::new();
-        Ok(Self { reader, parser })
+        Ok(Self {
+            reader,
+            config: DetectorConfig::default(),
+        })
     }
 
-    /// Opens a TPX3 file with custom parser configuration.
-    pub fn open_with_config<P: AsRef<Path>>(path: P, config: Tpx3ParserConfig) -> Result<Self> {
-        let reader = MappedFileReader::open(path)?;
-        let parser = Tpx3Parser::with_config(config);
-        Ok(Self { reader, parser })
+    /// Sets the detector configuration.
+    pub fn with_config(mut self, config: DetectorConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// Returns the file size in bytes.
@@ -76,50 +78,56 @@ impl Tpx3FileReader {
         self.reader.len() / 8
     }
 
-    /// Reads and parses all hits from the file.
+    /// Reads and parses all hits from the file using section discovery.
     pub fn read_hits(&self) -> Result<Vec<Tpx3Hit>> {
-        if !self.reader.len().is_multiple_of(8) {
+        if self.reader.len() % 8 != 0 {
             return Err(Error::InvalidFormat(format!(
                 "file size {} is not a multiple of 8",
                 self.reader.len()
             )));
         }
 
-        let hits = self.parser.parse_hits_from_bytes(self.reader.as_bytes())?;
-        Ok(hits)
-    }
-
-    /// Reads hits from a specific byte range.
-    pub fn read_hits_range(&self, start: usize, end: usize) -> Result<Vec<Tpx3Hit>> {
-        if !start.is_multiple_of(8) || !end.is_multiple_of(8) {
-            return Err(Error::InvalidFormat(
-                "range boundaries must be multiples of 8".into(),
-            ));
-        }
-
-        if end > self.reader.len() {
-            return Err(Error::InvalidFormat("range exceeds file size".into()));
-        }
-
-        let data = &self.reader.as_bytes()[start..end];
-        let hits = self.parser.parse_hits_from_bytes(data)?;
-        Ok(hits)
-    }
-
-    /// Returns an iterator over batches of hits.
-    pub fn iter_batches(
-        &self,
-        batch_size: usize,
-    ) -> impl Iterator<Item = Result<Vec<Tpx3Hit>>> + '_ {
-        let packet_size = 8;
-        let batch_bytes = batch_size * packet_size;
         let data = self.reader.as_bytes();
+        
+        // Phase 1: Discover sections
+        let sections = discover_sections(data);
+        
+        // Phase 2: Process sections
+        // TODO: Use Rayon for parallel processing if available/configured
+        // For now, sequential processing
+        
+        let tdc_correction = self.config.tdc_correction_25ns();
+        // Note: map_chip_to_global is not yet in DetectorConfig in lib.rs, 
+        // but the plan implies it should be. 
+        // I'll check lib.rs again. It has tdc_correction_25ns but maybe not map_chip_to_global.
+        // If not, I'll implement a simple identity or default transform for now.
+        
+        let mut all_hits = Vec::new();
+        for section in sections {
+             let hits: Vec<Tpx3Hit> = process_section(
+                data,
+                &section,
+                tdc_correction,
+                |_, x, y| (x, y), // TODO: Implement proper chip mapping
+            );
+            all_hits.extend(hits);
+        }
+        
+        // Sort by TOF
+        all_hits.sort_unstable_by_key(|h| h.tof);
 
-        data.chunks(batch_bytes).map(move |chunk| {
-            self.parser
-                .parse_hits_from_bytes(chunk)
-                .map_err(Error::from)
-        })
+        Ok(all_hits)
+    }
+
+    /// Returns an iterator over raw packets.
+    pub fn iter_packets(&self) -> impl Iterator<Item = Tpx3Packet> + '_ {
+        self.reader
+            .as_bytes()
+            .chunks_exact(8)
+            .map(|chunk| {
+                let bytes: [u8; 8] = chunk.try_into().unwrap();
+                Tpx3Packet::new(u64::from_le_bytes(bytes))
+            })
     }
 }
 

@@ -1,10 +1,12 @@
-//! rustpix-algorithms: Clustering algorithms with spatial indexing.
+//! rustpix-algorithms: Clustering algorithms for hit detection.
 //!
-//! This crate provides various clustering algorithms for hit detection:
-//! - ABS (Adjacency-Based Search)
-//! - DBSCAN (Density-Based Spatial Clustering of Applications with Noise)
-//! - Graph-based clustering
-//! - Grid-based clustering with spatial indexing
+//! This crate provides various clustering algorithms:
+//! - **ABS** (Age-Based Spatial) - O(n) average, bucket-based [primary]
+//! - **DBSCAN** - Density-based with noise handling
+//! - **Graph** - Union-Find connected components
+//! - **Grid** - Detector geometry optimized
+//!
+//! See IMPLEMENTATION_PLAN.md Part 4 for detailed algorithm specifications.
 
 mod abs;
 mod dbscan;
@@ -12,8 +14,13 @@ mod graph;
 mod grid;
 mod spatial;
 
-pub use abs::AbsClustering;
-pub use dbscan::DbscanClustering;
-pub use graph::GraphClustering;
-pub use grid::GridClustering;
-pub use spatial::SpatialIndex;
+pub use abs::{AbsClustering, AbsConfig, AbsState};
+pub use dbscan::{DbscanClustering, DbscanConfig, DbscanState};
+pub use graph::{GraphClustering, GraphConfig, GraphState};
+pub use grid::{GridClustering, GridConfig, GridState};
+pub use spatial::SpatialGrid;
+
+// Re-export core clustering traits
+pub use rustpix_core::clustering::{
+    ClusteringConfig, ClusteringState, ClusteringStatistics, HitClustering,
+};

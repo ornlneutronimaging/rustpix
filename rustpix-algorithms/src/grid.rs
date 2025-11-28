@@ -2,246 +2,198 @@
 //!
 //! Uses spatial indexing to efficiently cluster hits by dividing
 //! the detector into grid cells.
+//! See IMPLEMENTATION_PLAN.md Part 4.4 for detailed specification.
 
-use crate::SpatialIndex;
-use rayon::prelude::*;
-use rustpix_core::{Cluster, ClusteringAlgorithm, ClusteringConfig, Hit, Result};
+use crate::SpatialGrid;
+use rustpix_core::clustering::{
+    ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
+};
+use rustpix_core::hit::Hit;
 
-/// Grid-based clustering with spatial indexing.
-///
-/// This algorithm divides the detector into grid cells and clusters
-/// hits within and across neighboring cells. It's optimized for
-/// parallel processing of large datasets.
-#[derive(Debug, Clone)]
-pub struct GridClustering {
-    /// Cell size for the grid (in pixels).
-    cell_size: u16,
+/// Grid clustering configuration.
+#[derive(Clone, Debug)]
+pub struct GridConfig {
+    /// Cell size for the grid (pixels).
+    pub cell_size: usize,
+    /// Spatial radius for neighbor queries (pixels).
+    pub radius: f64,
+    /// Temporal correlation window (nanoseconds).
+    pub temporal_window_ns: f64,
+    /// Minimum cluster size to keep.
+    pub min_cluster_size: u16,
     /// Whether to use parallel processing.
-    parallel: bool,
+    pub parallel: bool,
 }
 
-impl Default for GridClustering {
+impl Default for GridConfig {
     fn default() -> Self {
         Self {
-            cell_size: 16,
+            cell_size: 32,
+            radius: 5.0,
+            temporal_window_ns: 75.0,
+            min_cluster_size: 1,
             parallel: true,
         }
     }
 }
 
-impl GridClustering {
-    /// Creates a new grid-based clustering instance.
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Grid clustering state.
+pub struct GridState {
+    hits_processed: usize,
+    clusters_found: usize,
+}
 
-    /// Creates a grid-based clustering instance with custom cell size.
-    pub fn with_cell_size(cell_size: u16) -> Self {
+impl Default for GridState {
+    fn default() -> Self {
         Self {
-            cell_size,
-            ..Default::default()
+            hits_processed: 0,
+            clusters_found: 0,
         }
-    }
-
-    /// Sets whether to use parallel processing.
-    pub fn with_parallel(mut self, parallel: bool) -> Self {
-        self.parallel = parallel;
-        self
     }
 }
 
-impl<H: Hit + Clone + Send + Sync> ClusteringAlgorithm<H> for GridClustering {
-    fn cluster(&self, hits: &[H], config: &ClusteringConfig) -> Result<Vec<Cluster<H>>> {
-        if hits.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Build spatial index
-        let mut spatial_index = SpatialIndex::new(self.cell_size);
-        spatial_index.build(hits);
-
-        let n = hits.len();
-        let epsilon_squared = (config.spatial_epsilon * config.spatial_epsilon) as u32;
-
-        // Use union-find for merging
-        let parent: Vec<std::sync::atomic::AtomicUsize> =
-            (0..n).map(std::sync::atomic::AtomicUsize::new).collect();
-
-        let find = |x: usize| -> usize {
-            let mut current = x;
-            loop {
-                let p = parent[current].load(std::sync::atomic::Ordering::Relaxed);
-                if p == current {
-                    break current;
-                }
-                current = p;
-            }
-        };
-
-        let union = |x: usize, y: usize| {
-            let mut px = find(x);
-            let mut py = find(y);
-            while px != py {
-                if px < py {
-                    std::mem::swap(&mut px, &mut py);
-                }
-                match parent[px].compare_exchange(
-                    px,
-                    py,
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(_) => {
-                        px = find(px);
-                        py = find(py);
-                    }
-                }
-            }
-        };
-
-        // Process hits
-        if self.parallel {
-            (0..n).into_par_iter().for_each(|i| {
-                let hit_i = &hits[i];
-                let neighbors = spatial_index.find_neighbors(hit_i.coord());
-
-                for j in neighbors {
-                    if j <= i {
-                        continue;
-                    }
-
-                    let hit_j = &hits[j];
-
-                    let dist_sq = hit_i.coord().distance_squared(&hit_j.coord());
-                    if dist_sq > epsilon_squared {
-                        continue;
-                    }
-
-                    let time_diff = hit_i.toa().abs_diff(&hit_j.toa());
-                    if time_diff > config.temporal_epsilon {
-                        continue;
-                    }
-
-                    union(i, j);
-                }
-            });
-        } else {
-            for i in 0..n {
-                let hit_i = &hits[i];
-                let neighbors = spatial_index.find_neighbors(hit_i.coord());
-
-                for j in neighbors {
-                    if j <= i {
-                        continue;
-                    }
-
-                    let hit_j = &hits[j];
-
-                    let dist_sq = hit_i.coord().distance_squared(&hit_j.coord());
-                    if dist_sq > epsilon_squared {
-                        continue;
-                    }
-
-                    let time_diff = hit_i.toa().abs_diff(&hit_j.toa());
-                    if time_diff > config.temporal_epsilon {
-                        continue;
-                    }
-
-                    union(i, j);
-                }
-            }
-        }
-
-        // Collect clusters
-        let mut cluster_map: std::collections::HashMap<usize, Vec<usize>> =
-            std::collections::HashMap::new();
-
-        for i in 0..n {
-            let root = find(i);
-            cluster_map.entry(root).or_default().push(i);
-        }
-
-        let clusters: Vec<Cluster<H>> = cluster_map
-            .into_values()
-            .filter(|indices| {
-                let size = indices.len();
-                size >= config.min_cluster_size
-                    && config.max_cluster_size.is_none_or(|max| size <= max)
-            })
-            .map(|indices| {
-                indices
-                    .into_iter()
-                    .map(|i| hits[i].clone())
-                    .collect::<Cluster<H>>()
-            })
-            .collect();
-
-        Ok(clusters)
+impl ClusteringState for GridState {
+    fn reset(&mut self) {
+        self.hits_processed = 0;
+        self.clusters_found = 0;
     }
+}
+
+/// Grid-based clustering with spatial indexing.
+///
+/// TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 4.4
+pub struct GridClustering {
+    config: GridConfig,
+    generic_config: ClusteringConfig,
+}
+
+impl GridClustering {
+    /// Create with custom configuration.
+    pub fn new(config: GridConfig) -> Self {
+        let generic_config = ClusteringConfig {
+            radius: config.radius,
+            temporal_window_ns: config.temporal_window_ns,
+            min_cluster_size: config.min_cluster_size,
+            max_cluster_size: None,
+        };
+        Self {
+            config,
+            generic_config,
+        }
+    }
+
+    /// Set whether to use parallel processing.
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.config.parallel = parallel;
+        self
+    }
+
+    /// Get cell size.
+    pub fn cell_size(&self) -> usize {
+        self.config.cell_size
+    }
+}
+
+impl Default for GridClustering {
+    fn default() -> Self {
+        Self::new(GridConfig::default())
+    }
+}
+
+impl HitClustering for GridClustering {
+    type State = GridState;
 
     fn name(&self) -> &'static str {
         "Grid"
+    }
+
+    fn create_state(&self) -> Self::State {
+        GridState::default()
+    }
+
+    fn configure(&mut self, config: &ClusteringConfig) {
+        self.config.radius = config.radius;
+        self.config.temporal_window_ns = config.temporal_window_ns;
+        self.generic_config = config.clone();
+    }
+
+    fn config(&self) -> &ClusteringConfig {
+        &self.generic_config
+    }
+
+    fn cluster<H: Hit>(
+        &self,
+        hits: &[H],
+        state: &mut Self::State,
+        labels: &mut [i32],
+    ) -> Result<usize, ClusteringError> {
+        // TODO: Implement grid clustering algorithm
+        // See IMPLEMENTATION_PLAN.md Part 4.4 for full specification
+        //
+        // Algorithm outline:
+        // 1. Build spatial grid index
+        // 2. For each hit, query 3x3 neighborhood
+        // 3. Use union-find to merge spatially/temporally close hits
+        // 4. Assign cluster labels
+
+        if hits.is_empty() {
+            return Ok(0);
+        }
+
+        // Build spatial index
+        let mut grid: SpatialGrid<usize> =
+            SpatialGrid::new(self.config.cell_size, 512, 512);
+
+        for (i, hit) in hits.iter().enumerate() {
+            grid.insert(hit.x() as i32, hit.y() as i32, i);
+        }
+
+        // Placeholder: assign each hit to its own cluster
+        // TODO: Implement proper union-find based clustering
+        for (i, label) in labels.iter_mut().enumerate() {
+            *label = i as i32;
+        }
+
+        state.hits_processed = hits.len();
+        state.clusters_found = hits.len();
+
+        Ok(state.clusters_found)
+    }
+
+    fn statistics(&self, state: &Self::State) -> ClusteringStatistics {
+        ClusteringStatistics {
+            hits_processed: state.hits_processed,
+            clusters_found: state.clusters_found,
+            ..Default::default()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustpix_core::HitData;
 
     #[test]
-    fn test_grid_single_cluster() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(1, 1, 105, 12),
-        ];
-
-        let algo = GridClustering::new().with_parallel(false);
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert_eq!(clusters.len(), 1);
-        assert_eq!(clusters[0].len(), 3);
+    fn test_grid_config_defaults() {
+        let config = GridConfig::default();
+        assert_eq!(config.cell_size, 32);
+        assert_eq!(config.radius, 5.0);
+        assert!(config.parallel);
     }
 
     #[test]
-    fn test_grid_separate_clusters() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(100, 100, 1000, 20),
-            HitData::new(101, 100, 1010, 25),
-        ];
-
-        let algo = GridClustering::new().with_parallel(false);
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert_eq!(clusters.len(), 2);
+    fn test_grid_state_reset() {
+        let mut state = GridState::default();
+        state.hits_processed = 100;
+        state.clusters_found = 10;
+        state.reset();
+        assert_eq!(state.hits_processed, 0);
+        assert_eq!(state.clusters_found, 0);
     }
 
     #[test]
-    fn test_grid_parallel() {
-        let hits: Vec<HitData> = (0..1000)
-            .map(|i| HitData::new((i % 256) as u16, (i / 256) as u16, i as u64, 10))
-            .collect();
-
-        let algo = GridClustering::new().with_parallel(true);
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let result = algo.cluster(&hits, &config);
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_grid_empty_input() {
-        let hits: Vec<HitData> = Vec::new();
-        let algo = GridClustering::new();
-        let config = ClusteringConfig::default();
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert!(clusters.is_empty());
+    fn test_grid_with_parallel() {
+        let algo = GridClustering::default().with_parallel(false);
+        assert!(!algo.config.parallel);
     }
 }

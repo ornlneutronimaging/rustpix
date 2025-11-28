@@ -1,137 +1,156 @@
-//! TPX3 packet types and structures.
+//! TPX3 packet parsing.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 3.1 for detailed specification.
 
-use crate::{Error, Result, Tpx3Hit};
+/// TPX3 packet wrapper providing efficient field extraction.
+///
+/// Packet format (64-bit):
+/// - Hit packets (ID 0xB*):
+///   - Bits 0-15: SPIDR time
+///   - Bits 16-19: Fine ToA (4-bit)
+///   - Bits 20-29: ToT (10-bit)
+///   - Bits 30-43: ToA (14-bit)
+///   - Bits 44-59: Pixel address (16-bit)
+///   - Bits 60-63: Packet type ID
+///
+/// - TDC packets (ID 0x6F):
+///   - Bits 12-41: 30-bit TDC timestamp
+///   - Bits 56-63: Packet type ID
+#[derive(Clone, Copy, Debug)]
+pub struct Tpx3Packet(u64);
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
+impl Tpx3Packet {
+    /// TPX3 header magic number ("TPX3" in little-endian).
+    pub const TPX3_HEADER_MAGIC: u64 = 0x33585054;
 
-/// TPX3 packet types as defined in the TPX3 documentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[repr(u8)]
-pub enum PacketType {
-    /// Pixel hit data (type 0xB).
-    PixelHit = 0xB,
-    /// TDC1 rising edge (type 0x6, subtype 0xF).
-    Tdc1Rising = 0x6F,
-    /// TDC1 falling edge (type 0x6, subtype 0xA).
-    Tdc1Falling = 0x6A,
-    /// TDC2 rising edge (type 0x6, subtype 0xE).
-    Tdc2Rising = 0x6E,
-    /// TDC2 falling edge (type 0x6, subtype 0xB).
-    Tdc2Falling = 0x6B,
-    /// Global time (type 0x4).
-    GlobalTime = 0x4,
-    /// Control packet (type 0x7).
-    Control = 0x7,
-}
+    /// Create from raw 64-bit value.
+    #[inline]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
 
-impl PacketType {
-    /// Creates a PacketType from the raw packet header nibble.
-    pub fn from_header(header: u8) -> Result<Self> {
-        match header {
-            0xB => Ok(PacketType::PixelHit),
-            0x6 => Ok(PacketType::Tdc1Rising), // Will be refined with subtype
-            0x4 => Ok(PacketType::GlobalTime),
-            0x7 => Ok(PacketType::Control),
-            _ => Err(Error::InvalidPacketType(header)),
-        }
+    /// Get raw packet value.
+    #[inline]
+    pub const fn raw(&self) -> u64 {
+        self.0
+    }
+
+    /// Check if this is a TPX3 header packet.
+    #[inline]
+    pub const fn is_header(&self) -> bool {
+        (self.0 & 0xFFFFFFFF) == Self::TPX3_HEADER_MAGIC
+    }
+
+    /// Check if this is a TDC packet (ID 0x6F).
+    #[inline]
+    pub const fn is_tdc(&self) -> bool {
+        (self.0 >> 56) & 0xFF == 0x6F
+    }
+
+    /// Check if this is a hit packet (ID 0xB*).
+    #[inline]
+    pub const fn is_hit(&self) -> bool {
+        (self.0 >> 60) & 0xF == 0xB
+    }
+
+    /// Get packet type identifier.
+    #[inline]
+    pub const fn packet_type(&self) -> u8 {
+        ((self.0 >> 56) & 0xFF) as u8
+    }
+
+    /// Get chip ID from header packet (bits 32-39).
+    #[inline]
+    pub const fn chip_id(&self) -> u8 {
+        ((self.0 >> 32) & 0xFF) as u8
+    }
+
+    /// Get 16-bit pixel address from hit packet.
+    #[inline]
+    pub const fn pixel_address(&self) -> u16 {
+        ((self.0 >> 44) & 0xFFFF) as u16
+    }
+
+    /// Get 14-bit Time of Arrival.
+    #[inline]
+    pub const fn toa(&self) -> u16 {
+        ((self.0 >> 30) & 0x3FFF) as u16
+    }
+
+    /// Get 10-bit Time over Threshold.
+    #[inline]
+    pub const fn tot(&self) -> u16 {
+        ((self.0 >> 20) & 0x3FF) as u16
+    }
+
+    /// Get 4-bit fine ToA.
+    #[inline]
+    pub const fn fine_toa(&self) -> u8 {
+        ((self.0 >> 16) & 0xF) as u8
+    }
+
+    /// Get SPIDR time (16-bit).
+    #[inline]
+    pub const fn spidr_time(&self) -> u16 {
+        (self.0 & 0xFFFF) as u16
+    }
+
+    /// Get 30-bit TDC timestamp from TDC packet.
+    #[inline]
+    pub const fn tdc_timestamp(&self) -> u32 {
+        ((self.0 >> 12) & 0x3FFFFFFF) as u32
+    }
+
+    /// Decode pixel address to local (x, y) coordinates.
+    ///
+    /// Decoding formula (see IMPLEMENTATION_PLAN.md Appendix A):
+    /// - dcol = (addr >> 8) & 0xFE
+    /// - spix = (addr >> 1) & 0xFC
+    /// - pix = addr & 0x7
+    /// - x = dcol + (pix >> 2)
+    /// - y = spix + (pix & 0x3)
+    #[inline]
+    pub const fn pixel_coordinates(&self) -> (u16, u16) {
+        let addr = self.pixel_address();
+        let dcol = ((addr & 0xFE00) >> 8) as u16;
+        let spix = ((addr & 0x1F8) >> 1) as u16;
+        let pix = (addr & 0x7) as u16;
+        let x = dcol + (pix >> 2);
+        let y = spix + (pix & 0x3);
+        (x, y)
     }
 }
 
-/// A parsed TPX3 packet.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub enum Tpx3Packet {
-    /// A pixel hit event.
-    Hit(Tpx3Hit),
-    /// TDC timestamp.
-    Tdc {
-        /// TDC type.
-        tdc_type: TdcType,
-        /// Timestamp value.
-        timestamp: u64,
-    },
-    /// Global timestamp for synchronization.
-    GlobalTime {
-        /// Global timestamp value.
-        timestamp: u64,
-    },
-    /// Control/configuration packet.
-    Control {
-        /// Control data.
-        data: u64,
-    },
-}
-
-/// TDC (Time-to-Digital Converter) types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub enum TdcType {
-    /// TDC1 rising edge.
-    Tdc1Rising,
-    /// TDC1 falling edge.
-    Tdc1Falling,
-    /// TDC2 rising edge.
-    Tdc2Rising,
-    /// TDC2 falling edge.
-    Tdc2Falling,
+impl From<u64> for Tpx3Packet {
+    fn from(raw: u64) -> Self {
+        Self::new(raw)
+    }
 }
 
 impl Tpx3Packet {
-    /// Parses a raw 64-bit packet.
-    pub fn parse(raw: u64) -> Result<Self> {
-        let header = ((raw >> 60) & 0xF) as u8;
-
-        match header {
-            0xB => {
-                // Pixel hit packet
-                let super_pixel = ((raw >> 52) & 0x3F) as u8;
-                let eoc = ((raw >> 58) & 0x3) as u8;
-                let spidr_time = ((raw >> 48) & 0xFFFF) as u16;
-                let hit = Tpx3Hit::from_raw(raw, super_pixel, eoc, spidr_time);
-                Ok(Tpx3Packet::Hit(hit))
-            }
-            0x6 => {
-                // TDC packet
-                let subtype = ((raw >> 56) & 0xF) as u8;
-                let timestamp = raw & 0x0FFF_FFFF_FFFF_FFFF;
-                let tdc_type = match subtype {
-                    0xF => TdcType::Tdc1Rising,
-                    0xA => TdcType::Tdc1Falling,
-                    0xE => TdcType::Tdc2Rising,
-                    0xB => TdcType::Tdc2Falling,
-                    _ => return Err(Error::InvalidPacketType(subtype)),
-                };
-                Ok(Tpx3Packet::Tdc {
-                    tdc_type,
-                    timestamp,
-                })
-            }
-            0x4 => {
-                // Global time packet
-                let timestamp = raw & 0x0FFF_FFFF_FFFF_FFFF;
-                Ok(Tpx3Packet::GlobalTime { timestamp })
-            }
-            0x7 => {
-                // Control packet
-                Ok(Tpx3Packet::Control { data: raw })
-            }
-            _ => Err(Error::InvalidPacketHeader(raw)),
-        }
+    /// Create from 8-byte array (little-endian).
+    #[inline]
+    pub fn from_bytes(bytes: [u8; 8]) -> Self {
+        Self::new(u64::from_le_bytes(bytes))
     }
 
-    /// Returns true if this is a hit packet.
-    pub fn is_hit(&self) -> bool {
-        matches!(self, Tpx3Packet::Hit(_))
+    /// Alias for is_hit - checks if this is pixel data.
+    #[inline]
+    pub const fn is_pixel_data(&self) -> bool {
+        self.is_hit()
     }
 
-    /// Extracts the hit if this is a hit packet.
-    pub fn as_hit(&self) -> Option<&Tpx3Hit> {
-        match self {
-            Tpx3Packet::Hit(hit) => Some(hit),
-            _ => None,
-        }
+    /// Calculate timestamp in 25ns units from SPIDR time and ToA.
+    ///
+    /// Formula: (spidr_time << 18) | (toa << 4) | (16 - fine_toa)
+    #[inline]
+    pub fn timestamp_25ns(&self) -> u32 {
+        let spidr = self.spidr_time() as u32;
+        let toa = self.toa() as u32;
+        let fine = self.fine_toa() as u32;
+
+        // Combine SPIDR time and ToA to get 25ns timestamp
+        (spidr << 18) | (toa << 4) | ((16 - fine) & 0xF)
     }
 }
 
@@ -140,27 +159,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_packet_type_from_header() {
-        assert!(matches!(
-            PacketType::from_header(0xB),
-            Ok(PacketType::PixelHit)
-        ));
-        assert!(matches!(
-            PacketType::from_header(0x4),
-            Ok(PacketType::GlobalTime)
-        ));
-        assert!(PacketType::from_header(0x0).is_err());
+    fn test_header_detection() {
+        let header = Tpx3Packet::new(0x33585054);
+        assert!(header.is_header());
+
+        let non_header = Tpx3Packet::new(0x12345678);
+        assert!(!non_header.is_header());
     }
 
     #[test]
-    fn test_packet_is_hit() {
-        let hit_packet = Tpx3Packet::Hit(Tpx3Hit::new(0, 0, 0, 0, 0, 0));
-        let tdc_packet = Tpx3Packet::Tdc {
-            tdc_type: TdcType::Tdc1Rising,
-            timestamp: 0,
-        };
+    fn test_tdc_detection() {
+        let tdc = Tpx3Packet::new(0x6F00_0000_0000_0000);
+        assert!(tdc.is_tdc());
+        assert!(!tdc.is_hit());
+    }
 
-        assert!(hit_packet.is_hit());
-        assert!(!tdc_packet.is_hit());
+    #[test]
+    fn test_hit_detection() {
+        let hit = Tpx3Packet::new(0xB000_0000_0000_0000);
+        assert!(hit.is_hit());
+        assert!(!hit.is_tdc());
+    }
+
+    #[test]
+    fn test_pixel_coordinate_decode() {
+        // Test with a known address pattern
+        // For addr = 0, we expect x=0, y=0
+        let packet = Tpx3Packet::new(0xB000_0000_0000_0000);
+        let (x, y) = packet.pixel_coordinates();
+        assert_eq!(x, 0);
+        assert_eq!(y, 0);
+    }
+
+    #[test]
+    fn test_tdc_timestamp_extraction() {
+        // TDC packet with timestamp value
+        let tdc = Tpx3Packet::new(0x6F00_0001_2345_6000);
+        let ts = tdc.tdc_timestamp();
+        // bits 12-41 should be extracted
+        assert!(ts > 0);
     }
 }

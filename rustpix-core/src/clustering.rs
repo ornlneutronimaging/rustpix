@@ -1,79 +1,32 @@
-//! Clustering traits and types.
+//! Clustering algorithm traits and configuration.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 2.3 for detailed specification.
 
-use crate::{Hit, HitData, Result};
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-/// A cluster of hits representing a single detection event.
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct Cluster<H = HitData> {
-    /// Hits belonging to this cluster.
-    pub hits: Vec<H>,
-}
-
-impl<H> Cluster<H> {
-    /// Creates an empty cluster.
-    pub fn new() -> Self {
-        Self { hits: Vec::new() }
-    }
-
-    /// Creates a cluster with pre-allocated capacity.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            hits: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Adds a hit to the cluster.
-    pub fn push(&mut self, hit: H) {
-        self.hits.push(hit);
-    }
-
-    /// Returns the number of hits in the cluster.
-    pub fn len(&self) -> usize {
-        self.hits.len()
-    }
-
-    /// Returns true if the cluster is empty.
-    pub fn is_empty(&self) -> bool {
-        self.hits.is_empty()
-    }
-
-    /// Returns an iterator over the hits.
-    pub fn iter(&self) -> impl Iterator<Item = &H> {
-        self.hits.iter()
-    }
-}
-
-impl<H> FromIterator<H> for Cluster<H> {
-    fn from_iter<I: IntoIterator<Item = H>>(iter: I) -> Self {
-        Self {
-            hits: iter.into_iter().collect(),
-        }
-    }
-}
+// Re-export ClusteringError for convenience
+pub use crate::error::ClusteringError;
+use crate::hit::Hit;
 
 /// Configuration for clustering algorithms.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+///
+/// This is a generic configuration that all clustering algorithms accept.
+/// Algorithm-specific configurations extend this.
+#[derive(Clone, Debug)]
 pub struct ClusteringConfig {
-    /// Maximum spatial distance (in pixels) for hits to be in the same cluster.
-    pub spatial_epsilon: f64,
-    /// Maximum temporal distance (in time units) for hits to be in the same cluster.
-    pub temporal_epsilon: u64,
-    /// Minimum number of hits to form a valid cluster.
-    pub min_cluster_size: usize,
-    /// Maximum number of hits in a cluster (for filtering large artifacts).
-    pub max_cluster_size: Option<usize>,
+    /// Spatial radius for neighbor detection (pixels).
+    pub radius: f64,
+    /// Temporal correlation window (nanoseconds).
+    pub temporal_window_ns: f64,
+    /// Minimum cluster size to keep.
+    pub min_cluster_size: u16,
+    /// Maximum cluster size (None = unlimited).
+    pub max_cluster_size: Option<u16>,
 }
 
 impl Default for ClusteringConfig {
     fn default() -> Self {
         Self {
-            spatial_epsilon: 1.5,   // ~1.5 pixels for 8-connectivity
-            temporal_epsilon: 1000, // 1 microsecond typical
+            radius: 5.0,
+            temporal_window_ns: 75.0,
             min_cluster_size: 1,
             max_cluster_size: None,
         }
@@ -81,48 +34,110 @@ impl Default for ClusteringConfig {
 }
 
 impl ClusteringConfig {
-    /// Creates a new clustering configuration with default values.
-    pub fn new() -> Self {
+    /// Create VENUS/SNS default configuration.
+    pub fn venus_defaults() -> Self {
         Self::default()
     }
 
-    /// Sets the spatial epsilon value.
-    pub fn with_spatial_epsilon(mut self, epsilon: f64) -> Self {
-        self.spatial_epsilon = epsilon;
+    /// Temporal window in TOF units (25ns).
+    #[inline]
+    pub fn window_tof(&self) -> u32 {
+        (self.temporal_window_ns / 25.0).ceil() as u32
+    }
+
+    /// Set spatial radius.
+    pub fn with_radius(mut self, radius: f64) -> Self {
+        self.radius = radius;
         self
     }
 
-    /// Sets the temporal epsilon value.
-    pub fn with_temporal_epsilon(mut self, epsilon: u64) -> Self {
-        self.temporal_epsilon = epsilon;
+    /// Set temporal window.
+    pub fn with_temporal_window_ns(mut self, window_ns: f64) -> Self {
+        self.temporal_window_ns = window_ns;
         self
     }
 
-    /// Sets the minimum cluster size.
-    pub fn with_min_cluster_size(mut self, size: usize) -> Self {
+    /// Set minimum cluster size.
+    pub fn with_min_cluster_size(mut self, size: u16) -> Self {
         self.min_cluster_size = size;
         self
     }
 
-    /// Sets the maximum cluster size.
-    pub fn with_max_cluster_size(mut self, size: usize) -> Self {
+    /// Set maximum cluster size.
+    pub fn with_max_cluster_size(mut self, size: u16) -> Self {
         self.max_cluster_size = Some(size);
         self
     }
 }
 
-/// Trait for clustering algorithms.
+/// Base trait for clustering algorithm state.
 ///
-/// Clustering algorithms group hits that are spatially and temporally
-/// close together into clusters representing single detection events.
-pub trait ClusteringAlgorithm<H: Hit>: Send + Sync {
-    /// Clusters the given hits into groups.
-    fn cluster(&self, hits: &[H], config: &ClusteringConfig) -> Result<Vec<Cluster<H>>>
-    where
-        H: Clone;
+/// State is separated from algorithm to enable thread-safe parallel processing.
+/// Each thread gets its own state instance.
+pub trait ClusteringState: Send {
+    /// Reset state for reuse.
+    fn reset(&mut self);
+}
 
-    /// Returns the name of the algorithm.
+/// Statistics from a clustering operation.
+#[derive(Clone, Debug, Default)]
+pub struct ClusteringStatistics {
+    pub hits_processed: usize,
+    pub clusters_found: usize,
+    pub noise_hits: usize,
+    pub largest_cluster_size: usize,
+    pub mean_cluster_size: f64,
+    pub processing_time_us: u64,
+}
+
+/// Main trait for hit clustering algorithms.
+///
+/// Design principles (see IMPLEMENTATION_PLAN.md Part 2.3):
+/// - **Stateless methods**: All mutable state passed via `ClusteringState`
+/// - **Generic over hit type**: Works with any `Hit` implementation
+/// - **Thread-safe**: Can be used from multiple threads with separate states
+///
+/// # Example
+/// ```ignore
+/// let clustering = AbsClustering::new(AbsConfig::default());
+/// let mut state = clustering.create_state();
+/// let mut labels = vec![-1i32; hits.len()];
+/// let num_clusters = clustering.cluster(&hits, &mut state, &mut labels)?;
+/// ```
+pub trait HitClustering: Send + Sync {
+    /// The state type used by this algorithm.
+    type State: ClusteringState;
+
+    /// Algorithm name for logging/debugging.
     fn name(&self) -> &'static str;
+
+    /// Create a new state instance for this algorithm.
+    fn create_state(&self) -> Self::State;
+
+    /// Configure the algorithm.
+    fn configure(&mut self, config: &ClusteringConfig);
+
+    /// Get current configuration.
+    fn config(&self) -> &ClusteringConfig;
+
+    /// Cluster a batch of hits.
+    ///
+    /// # Arguments
+    /// * `hits` - Slice of hits to cluster (should be sorted by TOF)
+    /// * `state` - Mutable algorithm state
+    /// * `labels` - Output cluster labels (-1 = noise/unclustered)
+    ///
+    /// # Returns
+    /// Number of clusters found.
+    fn cluster<H: Hit>(
+        &self,
+        hits: &[H],
+        state: &mut Self::State,
+        labels: &mut [i32],
+    ) -> Result<usize, ClusteringError>;
+
+    /// Get statistics from the last clustering operation.
+    fn statistics(&self, state: &Self::State) -> ClusteringStatistics;
 }
 
 #[cfg(test)]
@@ -130,28 +145,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cluster_operations() {
-        let mut cluster = Cluster::with_capacity(10);
-        assert!(cluster.is_empty());
-
-        cluster.push(HitData::new(0, 0, 100, 10));
-        cluster.push(HitData::new(1, 0, 110, 15));
-        cluster.push(HitData::new(0, 1, 105, 12));
-
-        assert_eq!(cluster.len(), 3);
-        assert!(!cluster.is_empty());
+    fn test_config_defaults() {
+        let config = ClusteringConfig::default();
+        assert_eq!(config.radius, 5.0);
+        assert_eq!(config.temporal_window_ns, 75.0);
+        assert_eq!(config.min_cluster_size, 1);
+        assert_eq!(config.max_cluster_size, None);
     }
 
     #[test]
-    fn test_clustering_config() {
-        let config = ClusteringConfig::new()
-            .with_spatial_epsilon(2.0)
-            .with_temporal_epsilon(500)
+    fn test_window_tof_conversion() {
+        let config = ClusteringConfig::default();
+        // 75ns / 25ns = 3
+        assert_eq!(config.window_tof(), 3);
+    }
+
+    #[test]
+    fn test_config_builder() {
+        let config = ClusteringConfig::default()
+            .with_radius(10.0)
+            .with_temporal_window_ns(100.0)
             .with_min_cluster_size(2)
             .with_max_cluster_size(100);
 
-        assert!((config.spatial_epsilon - 2.0).abs() < f64::EPSILON);
-        assert_eq!(config.temporal_epsilon, 500);
+        assert_eq!(config.radius, 10.0);
+        assert_eq!(config.temporal_window_ns, 100.0);
         assert_eq!(config.min_cluster_size, 2);
         assert_eq!(config.max_cluster_size, Some(100));
     }

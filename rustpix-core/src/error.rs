@@ -1,38 +1,80 @@
-//! Error types for rustpix-core.
+//! Error types for rustpix.
 
 use thiserror::Error;
 
-/// Result type alias for rustpix operations.
-pub type Result<T> = std::result::Result<T, Error>;
+/// Errors during clustering operations.
+#[derive(Error, Debug)]
+pub enum ClusteringError {
+    #[error("empty input: cannot cluster zero hits")]
+    EmptyInput,
 
-/// Core error types for rustpix operations.
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
+
+    #[error("state error: {0}")]
+    StateError(String),
+}
+
+/// Errors during extraction operations.
+#[derive(Error, Debug)]
+pub enum ExtractionError {
+    #[error("label count ({labels}) does not match hit count ({hits})")]
+    LabelMismatch { hits: usize, labels: usize },
+
+    #[error("empty cluster: cannot extract from zero hits")]
+    EmptyCluster,
+
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
+}
+
+/// Errors during I/O operations.
+#[derive(Error, Debug)]
+pub enum IoError {
+    #[error("file not found: {0}")]
+    FileNotFound(String),
+
+    #[error("invalid file format: {0}")]
+    InvalidFormat(String),
+
+    #[error("memory mapping failed: {0}")]
+    MmapError(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Errors during TPX3 processing.
+#[derive(Error, Debug)]
+pub enum ProcessingError {
+    #[error("I/O error: {0}")]
+    Io(#[from] IoError),
+
+    #[error("invalid packet at offset {offset}: {message}")]
+    InvalidPacket { offset: usize, message: String },
+
+    #[error("missing TDC reference for section starting at offset {0}")]
+    MissingTdc(usize),
+
+    #[error("configuration error: {0}")]
+    Config(String),
+}
+
+/// Combined error type for the library.
 #[derive(Error, Debug)]
 pub enum Error {
-    /// Invalid pixel coordinate.
-    #[error("invalid pixel coordinate: ({x}, {y})")]
-    InvalidCoordinate { x: u16, y: u16 },
-
-    /// Invalid time-of-arrival value.
-    #[error("invalid time of arrival: {0}")]
-    InvalidTimeOfArrival(u64),
-
-    /// Invalid time-over-threshold value.
-    #[error("invalid time over threshold: {0}")]
-    InvalidTimeOverThreshold(u16),
-
-    /// Clustering error.
     #[error("clustering error: {0}")]
-    ClusteringError(String),
+    Clustering(#[from] ClusteringError),
 
-    /// Extraction error.
     #[error("extraction error: {0}")]
-    ExtractionError(String),
+    Extraction(#[from] ExtractionError),
 
-    /// Configuration error.
-    #[error("configuration error: {0}")]
-    ConfigError(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] IoError),
 
-    /// Empty cluster error.
-    #[error("cannot compute centroid of empty cluster")]
-    EmptyCluster,
+    #[error("processing error: {0}")]
+    Processing(#[from] ProcessingError),
 }
+
+/// Result type alias using the combined Error.
+pub type Result<T> = std::result::Result<T, Error>;

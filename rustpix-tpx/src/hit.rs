@@ -1,118 +1,135 @@
-//! TPX3 hit data type.
+//! TPX3-specific hit type.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 3.2 for detailed specification.
 
-use rustpix_core::{Hit, HitData, PixelCoord, TimeOfArrival};
+use rustpix_core::hit::{ClusterableHit, Hit};
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-/// TPX3-specific hit data.
+/// TPX3 hit with optimized memory layout.
 ///
-/// Contains all information from a TPX3 pixel hit event,
-/// including raw timing information and derived values.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+/// Size: 20 bytes (packed)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
 pub struct Tpx3Hit {
-    /// Pixel X coordinate (0-255).
+    /// Time-of-flight in 25ns units.
+    pub tof: u32,
+    /// Global X coordinate.
     pub x: u16,
-    /// Pixel Y coordinate (0-255).
+    /// Global Y coordinate.
     pub y: u16,
-    /// Time of arrival in 1.5625 ns units (coarse + fine time).
-    pub toa: u64,
-    /// Time over threshold in 25 ns units.
+    /// Timestamp in 25ns units.
+    pub timestamp: u32,
+    /// Time-over-threshold (10-bit, stored as u16).
     pub tot: u16,
-    /// Fast time of arrival (fine time, 0-15).
-    pub ftoa: u8,
-    /// Spidertime (global timestamp from TDC).
-    pub spidr_time: u16,
+    /// Chip identifier (0-3 for quad arrangement).
+    pub chip_id: u8,
+    /// Padding for alignment.
+    pub _padding: u8,
+    /// Cluster assignment (-1 = unassigned).
+    pub cluster_id: i32,
 }
 
 impl Tpx3Hit {
-    /// Creates a new TPX3 hit.
-    pub fn new(x: u16, y: u16, toa: u64, tot: u16, ftoa: u8, spidr_time: u16) -> Self {
+    /// Create a new hit.
+    pub fn new(tof: u32, x: u16, y: u16, timestamp: u32, tot: u16, chip_id: u8) -> Self {
         Self {
+            tof,
             x,
             y,
-            toa,
+            timestamp,
             tot,
-            ftoa,
-            spidr_time,
+            chip_id,
+            _padding: 0,
+            cluster_id: -1,
         }
     }
+}
 
-    /// Creates a TPX3 hit from raw packet data.
-    ///
-    /// The raw packet format is a 64-bit value with:
-    /// - bits 44-47: packet type (should be 0xB for pixel hit)
-    /// - bits 35-43: ToT (10 bits, but only 9 used, in 25ns units)
-    /// - bits 21-34: ToA coarse (14 bits)
-    /// - bits 17-20: FToA (4 bits, fine time)
-    /// - bits 9-16: SPIDR time (8 bits of 16-bit counter)
-    /// - bits 0-8: pixel address part
-    pub fn from_raw(raw: u64, super_pixel: u8, eoc: u8, spidr_time: u16) -> Self {
-        // Extract fields from raw packet
-        let tot = ((raw >> 20) & 0x3FF) as u16;
-        let toa_coarse = (raw >> 30) & 0x3FFF;
-        let ftoa = ((raw >> 44) & 0xF) as u8;
-        let pixel_addr = (raw & 0xFF) as u16;
-
-        // Calculate pixel coordinates
-        let dcol = super_pixel * 2 + (pixel_addr >> 2) as u8 % 2;
-        let spix = (pixel_addr >> 2) as u8 / 2;
-        let pix = pixel_addr & 0x3;
-
-        let x = dcol as u16 * 2 + (pix & 0x1);
-        let y = spix as u16 * 4 + (pix >> 1) * 2 + (eoc as u16 & 0x1);
-
-        // Calculate full ToA in 1.5625ns units
-        // ToA = (coarse_time * 16 - ftoa) * 1.5625ns
-        let toa = toa_coarse * 16 - ftoa as u64;
-
-        Self {
-            x,
-            y,
-            toa,
-            tot,
-            ftoa,
-            spidr_time,
-        }
-    }
-
-    /// Returns the ToA in nanoseconds.
-    pub fn toa_ns(&self) -> f64 {
-        self.toa as f64 * 1.5625
-    }
-
-    /// Returns the ToT in nanoseconds.
-    pub fn tot_ns(&self) -> f64 {
-        self.tot as f64 * 25.0
-    }
-
-    /// Converts to a generic HitData structure.
-    pub fn to_hit_data(&self) -> HitData {
-        HitData::new(self.x, self.y, self.toa, self.tot)
+impl From<(u32, u16, u16, u32, u16, u8)> for Tpx3Hit {
+    fn from(tuple: (u32, u16, u16, u32, u16, u8)) -> Self {
+        Self::new(tuple.0, tuple.1, tuple.2, tuple.3, tuple.4, tuple.5)
     }
 }
 
 impl Hit for Tpx3Hit {
     #[inline]
-    fn coord(&self) -> PixelCoord {
-        PixelCoord::new(self.x, self.y)
+    fn tof(&self) -> u32 {
+        self.tof
     }
-
     #[inline]
-    fn toa(&self) -> TimeOfArrival {
-        TimeOfArrival::new(self.toa)
+    fn x(&self) -> u16 {
+        self.x
     }
-
+    #[inline]
+    fn y(&self) -> u16 {
+        self.y
+    }
     #[inline]
     fn tot(&self) -> u16 {
         self.tot
     }
+    #[inline]
+    fn timestamp(&self) -> u32 {
+        self.timestamp
+    }
+    #[inline]
+    fn chip_id(&self) -> u8 {
+        self.chip_id
+    }
 }
 
-impl From<Tpx3Hit> for HitData {
-    fn from(hit: Tpx3Hit) -> Self {
-        hit.to_hit_data()
+impl ClusterableHit for Tpx3Hit {
+    #[inline]
+    fn cluster_id(&self) -> i32 {
+        self.cluster_id
+    }
+    #[inline]
+    fn set_cluster_id(&mut self, id: i32) {
+        self.cluster_id = id;
+    }
+}
+
+impl Eq for Tpx3Hit {}
+
+impl Ord for Tpx3Hit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tof.cmp(&other.tof)
+    }
+}
+
+impl PartialOrd for Tpx3Hit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Timestamp rollover correction.
+///
+/// TPX3 uses 30-bit timestamps that can roll over. This function
+/// corrects the hit timestamp relative to the TDC timestamp.
+///
+/// Formula: if hit_ts + 0x400000 < tdc_ts, extend by 0x40000000
+#[inline]
+pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32 {
+    const EXTENSION_THRESHOLD: u32 = 0x400000;
+    const EXTENSION_VALUE: u32 = 0x40000000;
+
+    if hit_timestamp.wrapping_add(EXTENSION_THRESHOLD) < tdc_timestamp {
+        hit_timestamp.wrapping_add(EXTENSION_VALUE)
+    } else {
+        hit_timestamp
+    }
+}
+
+/// Calculate TOF with TDC correction.
+///
+/// If the raw TOF exceeds the TDC period, subtract one period.
+#[inline]
+pub fn calculate_tof(timestamp: u32, tdc_timestamp: u32, tdc_correction_25ns: u32) -> u32 {
+    let raw_tof = timestamp.wrapping_sub(tdc_timestamp);
+    if raw_tof > tdc_correction_25ns {
+        raw_tof.wrapping_sub(tdc_correction_25ns)
+    } else {
+        raw_tof
     }
 }
 
@@ -121,41 +138,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tpx3_hit_creation() {
-        let hit = Tpx3Hit::new(100, 150, 1000000, 50, 5, 1000);
-        assert_eq!(hit.x, 100);
-        assert_eq!(hit.y, 150);
-        assert_eq!(hit.toa, 1000000);
-        assert_eq!(hit.tot, 50);
-        assert_eq!(hit.ftoa, 5);
-        assert_eq!(hit.spidr_time, 1000);
+    fn test_hit_creation() {
+        let hit = Tpx3Hit::new(1000, 128, 256, 500, 50, 0);
+        assert_eq!(hit.tof(), 1000);
+        assert_eq!(hit.x(), 128);
+        assert_eq!(hit.y(), 256);
+        assert_eq!(hit.tot(), 50);
+        assert_eq!(hit.chip_id(), 0);
+        assert_eq!(hit.cluster_id(), -1);
     }
 
     #[test]
-    fn test_tpx3_hit_trait() {
-        let hit = Tpx3Hit::new(100, 150, 1000000, 50, 5, 1000);
-        assert_eq!(hit.x(), 100);
-        assert_eq!(hit.y(), 150);
-        assert_eq!(hit.toa_raw(), 1000000);
-        assert_eq!(Hit::tot(&hit), 50);
+    fn test_hit_trait() {
+        let hit = Tpx3Hit::new(1000, 100, 200, 500, 50, 0);
+        assert_eq!(hit.tof_ns(), 25000.0);
     }
 
     #[test]
-    fn test_tpx3_hit_timing() {
-        let hit = Tpx3Hit::new(0, 0, 64, 4, 0, 0);
-        // 64 * 1.5625 = 100 ns
-        assert!((hit.toa_ns() - 100.0).abs() < 0.001);
-        // 4 * 25 = 100 ns
-        assert!((hit.tot_ns() - 100.0).abs() < 0.001);
+    fn test_timestamp_rollover() {
+        // Normal case - no correction needed
+        assert_eq!(correct_timestamp_rollover(100, 50), 100);
+
+        // Rollover case - extension needed
+        let hit_ts = 0x100;
+        let tdc_ts = 0x500000;
+        let corrected = correct_timestamp_rollover(hit_ts, tdc_ts);
+        assert_eq!(corrected, hit_ts + 0x40000000);
     }
 
     #[test]
-    fn test_conversion_to_hit_data() {
-        let tpx3_hit = Tpx3Hit::new(100, 150, 1000000, 50, 5, 1000);
-        let hit_data: HitData = tpx3_hit.into();
-        assert_eq!(hit_data.coord.x, 100);
-        assert_eq!(hit_data.coord.y, 150);
-        assert_eq!(hit_data.toa.as_u64(), 1000000);
-        assert_eq!(hit_data.tot, 50);
+    fn test_tof_calculation() {
+        let timestamp = 1000u32;
+        let tdc_timestamp = 500u32;
+        let correction = 666667u32; // ~1/60Hz in 25ns units
+
+        let tof = calculate_tof(timestamp, tdc_timestamp, correction);
+        assert_eq!(tof, 500);
     }
 }

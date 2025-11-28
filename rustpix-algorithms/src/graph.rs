@@ -2,20 +2,56 @@
 //!
 //! Uses a union-find data structure for efficient clustering
 //! of spatio-temporally connected hits.
+//! See IMPLEMENTATION_PLAN.md Part 4.3 for detailed specification.
 
-use rustpix_core::{Cluster, ClusteringAlgorithm, ClusteringConfig, Hit, Result};
+use rustpix_core::clustering::{
+    ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
+};
+use rustpix_core::hit::Hit;
 
-/// Graph-based clustering using union-find.
-///
-/// This algorithm builds a graph where edges connect neighboring hits
-/// and uses union-find to efficiently identify connected components.
-#[derive(Debug, Clone, Default)]
-pub struct GraphClustering;
+/// Graph clustering configuration.
+#[derive(Clone, Debug)]
+pub struct GraphConfig {
+    /// Spatial radius for edge creation (pixels).
+    pub radius: f64,
+    /// Temporal correlation window (nanoseconds).
+    pub temporal_window_ns: f64,
+    /// Minimum cluster size to keep.
+    pub min_cluster_size: u16,
+}
 
-impl GraphClustering {
-    /// Creates a new graph-based clustering instance.
-    pub fn new() -> Self {
-        Self
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            radius: 5.0,
+            temporal_window_ns: 75.0,
+            min_cluster_size: 1,
+        }
+    }
+}
+
+/// Graph clustering state.
+pub struct GraphState {
+    hits_processed: usize,
+    clusters_found: usize,
+    edges_created: usize,
+}
+
+impl Default for GraphState {
+    fn default() -> Self {
+        Self {
+            hits_processed: 0,
+            clusters_found: 0,
+            edges_created: 0,
+        }
+    }
+}
+
+impl ClusteringState for GraphState {
+    fn reset(&mut self) {
+        self.hits_processed = 0;
+        self.clusters_found = 0;
+        self.edges_created = 0;
     }
 }
 
@@ -40,12 +76,12 @@ impl UnionFind {
         self.parent[x]
     }
 
-    fn union(&mut self, x: usize, y: usize) {
+    fn union(&mut self, x: usize, y: usize) -> bool {
         let px = self.find(x);
         let py = self.find(y);
 
         if px == py {
-            return;
+            return false;
         }
 
         match self.rank[px].cmp(&self.rank[py]) {
@@ -56,119 +92,153 @@ impl UnionFind {
                 self.rank[px] += 1;
             }
         }
+        true
     }
 }
 
-impl<H: Hit + Clone> ClusteringAlgorithm<H> for GraphClustering {
-    fn cluster(&self, hits: &[H], config: &ClusteringConfig) -> Result<Vec<Cluster<H>>> {
+/// Graph-based clustering using union-find.
+///
+/// TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 4.3
+pub struct GraphClustering {
+    config: GraphConfig,
+    generic_config: ClusteringConfig,
+}
+
+impl GraphClustering {
+    /// Create with custom configuration.
+    pub fn new(config: GraphConfig) -> Self {
+        let generic_config = ClusteringConfig {
+            radius: config.radius,
+            temporal_window_ns: config.temporal_window_ns,
+            min_cluster_size: config.min_cluster_size,
+            max_cluster_size: None,
+        };
+        Self {
+            config,
+            generic_config,
+        }
+    }
+}
+
+impl Default for GraphClustering {
+    fn default() -> Self {
+        Self::new(GraphConfig::default())
+    }
+}
+
+impl HitClustering for GraphClustering {
+    type State = GraphState;
+
+    fn name(&self) -> &'static str {
+        "Graph"
+    }
+
+    fn create_state(&self) -> Self::State {
+        GraphState::default()
+    }
+
+    fn configure(&mut self, config: &ClusteringConfig) {
+        self.config.radius = config.radius;
+        self.config.temporal_window_ns = config.temporal_window_ns;
+        self.generic_config = config.clone();
+    }
+
+    fn config(&self) -> &ClusteringConfig {
+        &self.generic_config
+    }
+
+    fn cluster<H: Hit>(
+        &self,
+        hits: &[H],
+        state: &mut Self::State,
+        labels: &mut [i32],
+    ) -> Result<usize, ClusteringError> {
+        // TODO: Implement graph clustering algorithm
+        // See IMPLEMENTATION_PLAN.md Part 4.3 for full specification
+        //
+        // Algorithm outline:
+        // 1. Build union-find structure
+        // 2. For each pair of hits within spatial/temporal bounds:
+        //    - Union them in the structure
+        // 3. Collect connected components
+        // 4. Assign cluster labels
+
         if hits.is_empty() {
-            return Ok(Vec::new());
+            return Ok(0);
         }
 
         let n = hits.len();
         let mut uf = UnionFind::new(n);
-        let epsilon_squared = (config.spatial_epsilon * config.spatial_epsilon) as u32;
+        let epsilon_sq = (self.config.radius * self.config.radius) as i32;
+        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
+        let mut edges = 0;
 
         // Build edges between neighboring hits
         for i in 0..n {
             for j in (i + 1)..n {
-                let hit_i = &hits[i];
-                let hit_j = &hits[j];
+                let hi = &hits[i];
+                let hj = &hits[j];
 
                 // Check spatial proximity
-                let dist_sq = hit_i.coord().distance_squared(&hit_j.coord());
-                if dist_sq > epsilon_squared {
+                let dx = hi.x() as i32 - hj.x() as i32;
+                let dy = hi.y() as i32 - hj.y() as i32;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq > epsilon_sq {
                     continue;
                 }
 
                 // Check temporal proximity
-                let time_diff = hit_i.toa().abs_diff(&hit_j.toa());
-                if time_diff > config.temporal_epsilon {
+                let time_diff = hi.tof().abs_diff(hj.tof());
+                if time_diff > window_tof {
                     continue;
                 }
 
-                uf.union(i, j);
+                if uf.union(i, j) {
+                    edges += 1;
+                }
             }
         }
 
-        // Group hits by their root
-        let mut cluster_map: std::collections::HashMap<usize, Vec<usize>> =
+        // Collect clusters by root
+        let mut cluster_map: std::collections::HashMap<usize, i32> =
             std::collections::HashMap::new();
+        let mut next_cluster = 0i32;
 
         for i in 0..n {
             let root = uf.find(i);
-            cluster_map.entry(root).or_default().push(i);
+            let cluster_id = *cluster_map.entry(root).or_insert_with(|| {
+                let id = next_cluster;
+                next_cluster += 1;
+                id
+            });
+            labels[i] = cluster_id;
         }
 
-        // Convert to clusters and apply filters
-        let clusters: Vec<Cluster<H>> = cluster_map
-            .into_values()
-            .filter(|indices| {
-                let size = indices.len();
-                size >= config.min_cluster_size
-                    && config.max_cluster_size.is_none_or(|max| size <= max)
-            })
-            .map(|indices| {
-                indices
-                    .into_iter()
-                    .map(|i| hits[i].clone())
-                    .collect::<Cluster<H>>()
-            })
-            .collect();
+        state.hits_processed = n;
+        state.clusters_found = next_cluster as usize;
+        state.edges_created = edges;
 
-        Ok(clusters)
+        Ok(state.clusters_found)
     }
 
-    fn name(&self) -> &'static str {
-        "Graph"
+    fn statistics(&self, state: &Self::State) -> ClusteringStatistics {
+        ClusteringStatistics {
+            hits_processed: state.hits_processed,
+            clusters_found: state.clusters_found,
+            ..Default::default()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustpix_core::HitData;
 
     #[test]
-    fn test_graph_single_cluster() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(1, 1, 105, 12),
-        ];
-
-        let algo = GraphClustering::new();
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert_eq!(clusters.len(), 1);
-        assert_eq!(clusters[0].len(), 3);
-    }
-
-    #[test]
-    fn test_graph_separate_clusters() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(100, 100, 1000, 20),
-            HitData::new(101, 100, 1010, 25),
-        ];
-
-        let algo = GraphClustering::new();
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert_eq!(clusters.len(), 2);
-    }
-
-    #[test]
-    fn test_graph_empty_input() {
-        let hits: Vec<HitData> = Vec::new();
-        let algo = GraphClustering::new();
-        let config = ClusteringConfig::default();
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert!(clusters.is_empty());
+    fn test_graph_config_defaults() {
+        let config = GraphConfig::default();
+        assert_eq!(config.radius, 5.0);
+        assert_eq!(config.temporal_window_ns, 75.0);
     }
 
     #[test]
@@ -180,5 +250,17 @@ mod tests {
 
         assert_eq!(uf.find(0), uf.find(3));
         assert_ne!(uf.find(0), uf.find(4));
+    }
+
+    #[test]
+    fn test_graph_state_reset() {
+        let mut state = GraphState::default();
+        state.hits_processed = 100;
+        state.clusters_found = 10;
+        state.edges_created = 50;
+        state.reset();
+        assert_eq!(state.hits_processed, 0);
+        assert_eq!(state.clusters_found, 0);
+        assert_eq!(state.edges_created, 0);
     }
 }

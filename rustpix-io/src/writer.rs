@@ -1,19 +1,21 @@
-//! File writers for TPX3 data.
+//! File writers for processed data.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 5 for output format specification.
 
 use crate::Result;
-use rustpix_core::Centroid;
+use rustpix_core::neutron::Neutron;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// Writer for TPX3 processed data output.
+/// Writer for processed data output.
 ///
-/// Writes processed neutron/centroid data to files in various formats.
-pub struct Tpx3FileWriter {
+/// Writes processed neutron data to files in various formats.
+pub struct DataFileWriter {
     writer: BufWriter<File>,
 }
 
-impl Tpx3FileWriter {
+impl DataFileWriter {
     /// Creates a new file writer.
     pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::create(path)?;
@@ -21,19 +23,15 @@ impl Tpx3FileWriter {
         Ok(Self { writer })
     }
 
-    /// Writes centroids as CSV.
-    pub fn write_centroids_csv(&mut self, centroids: &[Centroid]) -> Result<()> {
-        writeln!(self.writer, "x,y,toa,tot_sum,cluster_size")?;
+    /// Writes neutrons as CSV.
+    pub fn write_neutrons_csv(&mut self, neutrons: &[Neutron]) -> Result<()> {
+        writeln!(self.writer, "x,y,tof,tot,n_hits,chip_id")?;
 
-        for c in centroids {
+        for n in neutrons {
             writeln!(
                 self.writer,
-                "{},{},{},{},{}",
-                c.x,
-                c.y,
-                c.toa.as_u64(),
-                c.tot_sum,
-                c.cluster_size
+                "{},{},{},{},{},{}",
+                n.x, n.y, n.tof, n.tot, n.n_hits, n.chip_id
             )?;
         }
 
@@ -41,17 +39,19 @@ impl Tpx3FileWriter {
         Ok(())
     }
 
-    /// Writes centroids as binary data.
+    /// Writes neutrons as binary data.
     ///
-    /// Format: For each centroid: f64 (x) + f64 (y) + u64 (toa) + u32 (tot_sum) + u16 (cluster_size)
-    /// Total: 30 bytes per centroid
-    pub fn write_centroids_binary(&mut self, centroids: &[Centroid]) -> Result<()> {
-        for c in centroids {
-            self.writer.write_all(&c.x.to_le_bytes())?;
-            self.writer.write_all(&c.y.to_le_bytes())?;
-            self.writer.write_all(&c.toa.as_u64().to_le_bytes())?;
-            self.writer.write_all(&c.tot_sum.to_le_bytes())?;
-            self.writer.write_all(&c.cluster_size.to_le_bytes())?;
+    /// Format per neutron: f64 (x) + f64 (y) + u32 (tof) + u16 (tot) + u16 (n_hits) + u8 (chip_id) + 3 reserved
+    /// Total: 28 bytes per neutron
+    pub fn write_neutrons_binary(&mut self, neutrons: &[Neutron]) -> Result<()> {
+        for n in neutrons {
+            self.writer.write_all(&n.x.to_le_bytes())?;
+            self.writer.write_all(&n.y.to_le_bytes())?;
+            self.writer.write_all(&n.tof.to_le_bytes())?;
+            self.writer.write_all(&n.tot.to_le_bytes())?;
+            self.writer.write_all(&n.n_hits.to_le_bytes())?;
+            self.writer.write_all(&[n.chip_id])?;
+            self.writer.write_all(&[0u8; 3])?; // Reserved/padding
         }
 
         self.writer.flush()?;
@@ -71,34 +71,34 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_write_centroids_csv() {
+    fn test_write_neutrons_csv() {
         let file = NamedTempFile::new().unwrap();
-        let mut writer = Tpx3FileWriter::create(file.path()).unwrap();
+        let mut writer = DataFileWriter::create(file.path()).unwrap();
 
-        let centroids = vec![
-            Centroid::new(1.5, 2.5, 1000, 100, 5),
-            Centroid::new(10.3, 20.7, 2000, 200, 8),
+        let neutrons = vec![
+            Neutron::new(1.5, 2.5, 1000, 100, 5, 0),
+            Neutron::new(10.3, 20.7, 2000, 200, 8, 1),
         ];
 
-        writer.write_centroids_csv(&centroids).unwrap();
+        writer.write_neutrons_csv(&neutrons).unwrap();
 
         let content = std::fs::read_to_string(file.path()).unwrap();
-        assert!(content.contains("x,y,toa,tot_sum,cluster_size"));
-        assert!(content.contains("1.5,2.5,1000,100,5"));
-        assert!(content.contains("10.3,20.7,2000,200,8"));
+        assert!(content.contains("x,y,tof,tot,n_hits,chip_id"));
+        assert!(content.contains("1.5,2.5,1000,100,5,0"));
+        assert!(content.contains("10.3,20.7,2000,200,8,1"));
     }
 
     #[test]
-    fn test_write_centroids_binary() {
+    fn test_write_neutrons_binary() {
         let file = NamedTempFile::new().unwrap();
-        let mut writer = Tpx3FileWriter::create(file.path()).unwrap();
+        let mut writer = DataFileWriter::create(file.path()).unwrap();
 
-        let centroids = vec![Centroid::new(1.5, 2.5, 1000, 100, 5)];
+        let neutrons = vec![Neutron::new(1.5, 2.5, 1000, 100, 5, 0)];
 
-        writer.write_centroids_binary(&centroids).unwrap();
+        writer.write_neutrons_binary(&neutrons).unwrap();
 
         let data = std::fs::read(file.path()).unwrap();
-        // 8 (f64) + 8 (f64) + 8 (u64) + 4 (u32) + 2 (u16) = 30 bytes
-        assert_eq!(data.len(), 30);
+        // 8 (f64) + 8 (f64) + 4 (u32) + 2 (u16) + 2 (u16) + 1 (u8) + 3 (reserved) = 28 bytes
+        assert_eq!(data.len(), 28);
     }
 }

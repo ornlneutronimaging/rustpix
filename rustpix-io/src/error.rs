@@ -23,8 +23,4 @@ pub enum Error {
     /// Core library error.
     #[error("core error: {0}")]
     CoreError(#[from] rustpix_core::Error),
-
-    /// TPX error.
-    #[error("TPX error: {0}")]
-    TpxError(#[from] rustpix_tpx::Error),
 }

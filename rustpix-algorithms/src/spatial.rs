@@ -1,133 +1,78 @@
 //! Spatial indexing for efficient neighbor lookup.
+//!
+//! See IMPLEMENTATION_PLAN.md Part 4 for detailed specification.
 
-use rustpix_core::{Hit, PixelCoord};
 use std::collections::HashMap;
 
-/// Spatial index for efficient 2D neighbor queries.
+/// Spatial grid for efficient 2D neighbor queries.
 ///
-/// Uses a grid-based approach where the detector area is divided
-/// into cells. Each cell contains a list of hit indices that fall
-/// within that cell.
-#[derive(Debug)]
-pub struct SpatialIndex {
-    /// Cell size (in pixels).
-    cell_size: u16,
-    /// Map from cell coordinates to list of hit indices.
-    cells: HashMap<(u16, u16), Vec<usize>>,
-    /// Detector width.
-    width: u16,
-    /// Detector height.
-    height: u16,
+/// Uses a grid-based approach where the detector area is divided into cells.
+#[derive(Debug, Default)]
+pub struct SpatialGrid<T> {
+    cell_size: usize,
+    cells: HashMap<(i32, i32), Vec<T>>,
 }
 
-impl SpatialIndex {
-    /// Creates a new spatial index with the given cell size.
-    pub fn new(cell_size: u16) -> Self {
+impl<T: Clone> SpatialGrid<T> {
+    /// Create a new spatial grid.
+    pub fn new(cell_size: usize, _width: usize, _height: usize) -> Self {
         Self {
             cell_size,
             cells: HashMap::new(),
-            width: 256,
-            height: 256,
         }
     }
 
-    /// Creates a new spatial index with custom detector dimensions.
-    pub fn with_dimensions(cell_size: u16, width: u16, height: u16) -> Self {
-        Self {
-            cell_size,
-            cells: HashMap::new(),
-            width,
-            height,
-        }
-    }
-
-    /// Builds the spatial index from a slice of hits.
-    pub fn build<H: Hit>(&mut self, hits: &[H]) {
+    /// Clear all data.
+    pub fn clear(&mut self) {
         self.cells.clear();
+    }
 
-        for (idx, hit) in hits.iter().enumerate() {
-            let cell = self.coord_to_cell(hit.coord());
-            self.cells.entry(cell).or_default().push(idx);
+    /// Insert a value at the given coordinates.
+    pub fn insert(&mut self, x: i32, y: i32, value: T) {
+        let cell = (x / self.cell_size as i32, y / self.cell_size as i32);
+        self.cells.entry(cell).or_default().push(value);
+    }
+
+    /// Remove a value from the given coordinates.
+    pub fn remove(&mut self, x: i32, y: i32, _value: T) {
+        let cell = (x / self.cell_size as i32, y / self.cell_size as i32);
+        if let Some(values) = self.cells.get_mut(&cell) {
+            values.pop(); // Simplified removal
         }
     }
 
-    /// Converts a pixel coordinate to a cell coordinate.
-    #[inline]
-    fn coord_to_cell(&self, coord: PixelCoord) -> (u16, u16) {
-        (coord.x / self.cell_size, coord.y / self.cell_size)
-    }
+    /// Query the 3x3 neighborhood around a point.
+    pub fn query_neighborhood(&self, x: i32, y: i32) -> Vec<&T> {
+        let cx = x / self.cell_size as i32;
+        let cy = y / self.cell_size as i32;
+        let mut result = Vec::new();
 
-    /// Finds all hit indices within the spatial neighborhood of a coordinate.
-    ///
-    /// Returns indices of hits in the same cell and all neighboring cells.
-    pub fn find_neighbors(&self, coord: PixelCoord) -> Vec<usize> {
-        let (cx, cy) = self.coord_to_cell(coord);
-        let mut neighbors = Vec::new();
-
-        let cell_x_max = self.width / self.cell_size;
-        let cell_y_max = self.height / self.cell_size;
-
-        for dx in 0..=2 {
-            for dy in 0..=2 {
-                let nx = (cx as i32 + dx - 1) as u16;
-                let ny = (cy as i32 + dy - 1) as u16;
-
-                if nx < cell_x_max && ny < cell_y_max {
-                    if let Some(indices) = self.cells.get(&(nx, ny)) {
-                        neighbors.extend(indices);
-                    }
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(values) = self.cells.get(&(cx + dx, cy + dy)) {
+                    result.extend(values.iter());
                 }
             }
         }
 
-        neighbors
-    }
-
-    /// Returns the number of cells in the index.
-    pub fn cell_count(&self) -> usize {
-        self.cells.len()
-    }
-
-    /// Returns the total number of indexed hits.
-    pub fn hit_count(&self) -> usize {
-        self.cells.values().map(|v| v.len()).sum()
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustpix_core::HitData;
 
     #[test]
-    fn test_spatial_index_build() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(5, 5, 110, 15),
-            HitData::new(100, 100, 120, 20),
-        ];
+    fn test_spatial_grid() {
+        let mut grid: SpatialGrid<usize> = SpatialGrid::new(32, 512, 512);
+        grid.insert(100, 100, 0);
+        grid.insert(105, 105, 1);
+        grid.insert(300, 300, 2);
 
-        let mut index = SpatialIndex::new(16);
-        index.build(&hits);
-
-        assert_eq!(index.hit_count(), 3);
-    }
-
-    #[test]
-    fn test_spatial_index_neighbors() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(100, 100, 120, 20),
-        ];
-
-        let mut index = SpatialIndex::new(16);
-        index.build(&hits);
-
-        // Hits at (0,0) and (1,0) should be in the same cell
-        let neighbors = index.find_neighbors(PixelCoord::new(0, 0));
-        assert!(neighbors.contains(&0));
-        assert!(neighbors.contains(&1));
-        assert!(!neighbors.contains(&2));
+        let neighbors = grid.query_neighborhood(100, 100);
+        assert!(neighbors.contains(&&0));
+        assert!(neighbors.contains(&&1));
+        assert!(!neighbors.contains(&&2));
     }
 }

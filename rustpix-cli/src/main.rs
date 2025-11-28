@@ -1,15 +1,13 @@
 //! rustpix-cli: Command-line interface for rustpix.
 //!
-//! This binary provides a CLI for processing pixel detector data.
+//! TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 6
+//!
+//! This binary will provide a CLI for processing pixel detector data.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rayon::prelude::*;
 use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
-use rustpix_core::{
-    CentroidExtractor, ClusteringAlgorithm, ClusteringConfig, ExtractionConfig,
-    WeightedCentroidExtractor,
-};
-use rustpix_io::{Tpx3FileReader, Tpx3FileWriter};
+use rustpix_algorithms::HitClustering;
+use rustpix_io::Tpx3FileReader;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
@@ -28,33 +26,19 @@ enum CliError {
 
     #[error("Core error: {0}")]
     Core(#[from] rustpix_core::Error),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 /// Clustering algorithm selection.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Algorithm {
-    /// Adjacency-Based Search clustering
+    /// Age-Based Spatial clustering (primary, O(n) average)
     Abs,
     /// DBSCAN clustering
     Dbscan,
-    /// Graph-based clustering
+    /// Graph-based clustering (union-find)
     Graph,
     /// Grid-based clustering with spatial indexing
     Grid,
-}
-
-/// Output format selection.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum OutputFormat {
-    /// CSV format
-    Csv,
-    /// Binary format
-    Binary,
-    /// JSON format
-    Json,
 }
 
 /// High-performance pixel detector data processor.
@@ -82,33 +66,17 @@ enum Commands {
         #[arg(short, long, value_enum, default_value = "abs")]
         algorithm: Algorithm,
 
-        /// Output format
-        #[arg(short, long, value_enum, default_value = "csv")]
-        format: OutputFormat,
+        /// Spatial radius for clustering (pixels)
+        #[arg(long, default_value = "5.0")]
+        radius: f64,
 
-        /// Spatial epsilon for clustering (pixels)
-        #[arg(long, default_value = "1.5")]
-        spatial_epsilon: f64,
-
-        /// Temporal epsilon for clustering (time units)
-        #[arg(long, default_value = "1000")]
-        temporal_epsilon: u64,
+        /// Temporal window for clustering (nanoseconds)
+        #[arg(long, default_value = "75.0")]
+        temporal_window_ns: f64,
 
         /// Minimum cluster size
         #[arg(long, default_value = "1")]
-        min_cluster_size: usize,
-
-        /// Maximum cluster size (optional)
-        #[arg(long)]
-        max_cluster_size: Option<usize>,
-
-        /// Use ToT weighting for centroid calculation
-        #[arg(long, default_value = "true")]
-        tot_weighted: bool,
-
-        /// Number of threads (0 for auto)
-        #[arg(short = 'j', long, default_value = "0")]
-        threads: usize,
+        min_cluster_size: u16,
 
         /// Verbose output
         #[arg(short, long)]
@@ -140,41 +108,30 @@ fn main() -> Result<()> {
             input,
             output,
             algorithm,
-            format,
-            spatial_epsilon,
-            temporal_epsilon,
+            radius,
+            temporal_window_ns,
             min_cluster_size,
-            max_cluster_size,
-            tot_weighted,
-            threads,
             verbose,
         } => {
-            // Configure thread pool
-            if threads > 0 {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .build_global()
-                    .ok();
-            }
-
-            let clustering_config = ClusteringConfig {
-                spatial_epsilon,
-                temporal_epsilon,
-                min_cluster_size,
-                max_cluster_size,
-            };
-
-            let extraction_config = ExtractionConfig::new().with_tot_weighted(tot_weighted);
+            // TODO: Implement processing pipeline
+            // See IMPLEMENTATION_PLAN.md Part 6 for full specification
+            //
+            // Pipeline:
+            // 1. Read TPX3 file(s) with section discovery
+            // 2. Parse hits with TDC propagation
+            // 3. Cluster hits using selected algorithm
+            // 4. Extract neutrons from clusters
+            // 5. Write output
 
             if verbose {
                 eprintln!("Processing {} file(s)...", input.len());
                 eprintln!("Algorithm: {:?}", algorithm);
-                eprintln!("Spatial epsilon: {}", spatial_epsilon);
-                eprintln!("Temporal epsilon: {}", temporal_epsilon);
+                eprintln!("Radius: {} pixels", radius);
+                eprintln!("Temporal window: {} ns", temporal_window_ns);
+                eprintln!("Min cluster size: {}", min_cluster_size);
             }
 
             let start = Instant::now();
-            let mut all_centroids = Vec::new();
 
             for path in &input {
                 if verbose {
@@ -188,88 +145,26 @@ fn main() -> Result<()> {
                     eprintln!("  {} hits read", hits.len());
                 }
 
-                // Convert to HitData
-                let hit_data: Vec<rustpix_core::HitData> =
-                    hits.into_iter().map(|h| h.into()).collect();
-
-                // Cluster
-                let clusters = match algorithm {
-                    Algorithm::Abs => {
-                        AbsClustering::new().cluster(&hit_data, &clustering_config)?
-                    }
-                    Algorithm::Dbscan => {
-                        DbscanClustering::new().cluster(&hit_data, &clustering_config)?
-                    }
-                    Algorithm::Graph => {
-                        GraphClustering::new().cluster(&hit_data, &clustering_config)?
-                    }
-                    Algorithm::Grid => {
-                        GridClustering::new().cluster(&hit_data, &clustering_config)?
-                    }
+                // TODO: Implement actual clustering and extraction
+                // For now, just count hits
+                let _algorithm_name = match algorithm {
+                    Algorithm::Abs => AbsClustering::default().name(),
+                    Algorithm::Dbscan => DbscanClustering::default().name(),
+                    Algorithm::Graph => GraphClustering::default().name(),
+                    Algorithm::Grid => GridClustering::default().name(),
                 };
-
-                if verbose {
-                    eprintln!("  {} clusters found", clusters.len());
-                }
-
-                // Extract centroids
-                let extractor = WeightedCentroidExtractor::new();
-                let centroids: Vec<_> = clusters
-                    .par_iter()
-                    .filter_map(|c| extractor.extract(c, &extraction_config).ok())
-                    .collect();
-
-                all_centroids.extend(centroids);
             }
 
             let elapsed = start.elapsed();
 
-            if verbose {
-                eprintln!(
-                    "Total: {} centroids extracted in {:.2}s",
-                    all_centroids.len(),
-                    elapsed.as_secs_f64()
-                );
-            }
-
-            // Write output
-            match format {
-                OutputFormat::Csv => {
-                    let mut writer = Tpx3FileWriter::create(&output)?;
-                    writer.write_centroids_csv(&all_centroids)?;
-                }
-                OutputFormat::Binary => {
-                    let mut writer = Tpx3FileWriter::create(&output)?;
-                    writer.write_centroids_binary(&all_centroids)?;
-                }
-                OutputFormat::Json => {
-                    let json = serde_json::to_string_pretty(
-                        &all_centroids
-                            .iter()
-                            .map(|c| {
-                                serde_json::json!({
-                                    "x": c.x,
-                                    "y": c.y,
-                                    "toa": c.toa.as_u64(),
-                                    "tot_sum": c.tot_sum,
-                                    "cluster_size": c.cluster_size
-                                })
-                            })
-                            .collect::<Vec<_>>(),
-                    )?;
-                    std::fs::write(&output, json)?;
-                }
-            }
+            // Placeholder output
+            std::fs::write(&output, "# TODO: Implement output\n")?;
 
             if verbose {
                 eprintln!("Output written to: {}", output.display());
             }
 
-            println!(
-                "Processed {} centroids in {:.2}s",
-                all_centroids.len(),
-                elapsed.as_secs_f64()
-            );
+            println!("Processed in {:.2}s (stub implementation)", elapsed.as_secs_f64());
         }
 
         Commands::Info { input } => {
@@ -289,62 +184,35 @@ fn main() -> Result<()> {
             println!("Hits: {}", hits.len());
 
             if !hits.is_empty() {
-                let min_toa = hits.iter().map(|h| h.toa).min().unwrap();
-                let max_toa = hits.iter().map(|h| h.toa).max().unwrap();
-                println!("ToA range: {} - {}", min_toa, max_toa);
+                use rustpix_core::hit::Hit;
+                let min_tof = hits.iter().map(|h| h.tof()).min().unwrap();
+                let max_tof = hits.iter().map(|h| h.tof()).max().unwrap();
+                println!("TOF range: {} - {}", min_tof, max_tof);
 
-                let min_x = hits.iter().map(|h| h.x).min().unwrap();
-                let max_x = hits.iter().map(|h| h.x).max().unwrap();
-                let min_y = hits.iter().map(|h| h.y).min().unwrap();
-                let max_y = hits.iter().map(|h| h.y).max().unwrap();
+                let min_x = hits.iter().map(|h| h.x()).min().unwrap();
+                let max_x = hits.iter().map(|h| h.x()).max().unwrap();
+                let min_y = hits.iter().map(|h| h.y()).min().unwrap();
+                let max_y = hits.iter().map(|h| h.y()).max().unwrap();
                 println!("X range: {} - {}", min_x, max_x);
                 println!("Y range: {} - {}", min_y, max_y);
             }
         }
 
         Commands::Benchmark { input, iterations } => {
+            // TODO: Implement benchmarking
+            // See IMPLEMENTATION_PLAN.md Part 6 for specification
+
             let reader = Tpx3FileReader::open(&input)?;
             let hits = reader.read_hits()?;
-            let hit_data: Vec<rustpix_core::HitData> = hits.into_iter().map(|h| h.into()).collect();
 
             println!(
                 "Benchmarking with {} hits, {} iterations",
-                hit_data.len(),
+                hits.len(),
                 iterations
             );
 
-            let config = ClusteringConfig::default();
-
-            for (name, algorithm) in [
-                (
-                    "ABS",
-                    Box::new(AbsClustering::new())
-                        as Box<dyn ClusteringAlgorithm<rustpix_core::HitData>>,
-                ),
-                ("DBSCAN", Box::new(DbscanClustering::new())),
-                ("Graph", Box::new(GraphClustering::new())),
-                ("Grid", Box::new(GridClustering::new())),
-            ] {
-                let start = Instant::now();
-                let mut cluster_count = 0;
-
-                for _ in 0..iterations {
-                    let clusters = algorithm.cluster(&hit_data, &config)?;
-                    cluster_count = clusters.len();
-                }
-
-                let elapsed = start.elapsed();
-                let per_iter = elapsed.as_secs_f64() / iterations as f64;
-                let hits_per_sec = hit_data.len() as f64 / per_iter;
-
-                println!(
-                    "{:8}: {:.3}s/iter, {:.1}M hits/sec, {} clusters",
-                    name,
-                    per_iter,
-                    hits_per_sec / 1_000_000.0,
-                    cluster_count
-                );
-            }
+            println!("TODO: Implement actual benchmarking");
+            println!("See IMPLEMENTATION_PLAN.md Part 6 for specification");
         }
     }
 

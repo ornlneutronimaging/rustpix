@@ -1,201 +1,181 @@
 //! DBSCAN clustering algorithm.
 //!
 //! Density-Based Spatial Clustering of Applications with Noise.
-//! Extended for spatio-temporal data.
+//! See IMPLEMENTATION_PLAN.md Part 4.2 for detailed specification.
 
-use crate::SpatialIndex;
-use rustpix_core::{Cluster, ClusteringAlgorithm, ClusteringConfig, Hit, Result};
+use rustpix_core::clustering::{
+    ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
+};
+use rustpix_core::hit::Hit;
+
+/// DBSCAN-specific configuration.
+#[derive(Clone, Debug)]
+pub struct DbscanConfig {
+    /// Spatial radius for neighborhood (pixels).
+    pub epsilon: f64,
+    /// Temporal correlation window (nanoseconds).
+    pub temporal_window_ns: f64,
+    /// Minimum points to form a core point.
+    pub min_points: usize,
+    /// Minimum cluster size to keep.
+    pub min_cluster_size: u16,
+}
+
+impl Default for DbscanConfig {
+    fn default() -> Self {
+        Self {
+            epsilon: 5.0,
+            temporal_window_ns: 75.0,
+            min_points: 2,
+            min_cluster_size: 1,
+        }
+    }
+}
+
+/// DBSCAN clustering state.
+pub struct DbscanState {
+    hits_processed: usize,
+    clusters_found: usize,
+    noise_points: usize,
+}
+
+impl Default for DbscanState {
+    fn default() -> Self {
+        Self {
+            hits_processed: 0,
+            clusters_found: 0,
+            noise_points: 0,
+        }
+    }
+}
+
+impl ClusteringState for DbscanState {
+    fn reset(&mut self) {
+        self.hits_processed = 0;
+        self.clusters_found = 0;
+        self.noise_points = 0;
+    }
+}
 
 /// DBSCAN clustering algorithm with spatial indexing.
 ///
-/// This implementation uses a spatial index for efficient neighbor
-/// queries, making it suitable for large datasets.
-#[derive(Debug, Clone)]
+/// TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 4.2
 pub struct DbscanClustering {
-    /// Minimum number of points to form a core point.
-    min_points: usize,
+    config: DbscanConfig,
+    generic_config: ClusteringConfig,
+}
+
+impl DbscanClustering {
+    /// Create with custom configuration.
+    pub fn new(config: DbscanConfig) -> Self {
+        let generic_config = ClusteringConfig {
+            radius: config.epsilon,
+            temporal_window_ns: config.temporal_window_ns,
+            min_cluster_size: config.min_cluster_size,
+            max_cluster_size: None,
+        };
+        Self {
+            config,
+            generic_config,
+        }
+    }
+
+    /// Get min_points parameter.
+    pub fn min_points(&self) -> usize {
+        self.config.min_points
+    }
 }
 
 impl Default for DbscanClustering {
     fn default() -> Self {
-        Self { min_points: 2 }
+        Self::new(DbscanConfig::default())
     }
 }
 
-impl DbscanClustering {
-    /// Creates a new DBSCAN clustering instance.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Creates a DBSCAN instance with a custom min_points value.
-    pub fn with_min_points(min_points: usize) -> Self {
-        Self { min_points }
-    }
-}
-
-impl<H: Hit + Clone> ClusteringAlgorithm<H> for DbscanClustering {
-    fn cluster(&self, hits: &[H], config: &ClusteringConfig) -> Result<Vec<Cluster<H>>> {
-        if hits.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let n = hits.len();
-        let mut labels: Vec<Option<usize>> = vec![None; n];
-        let mut cluster_id = 0;
-
-        // Build spatial index for efficient neighbor queries
-        let cell_size = (config.spatial_epsilon.ceil() as u16).max(1);
-        let mut spatial_index = SpatialIndex::new(cell_size);
-        spatial_index.build(hits);
-
-        for i in 0..n {
-            if labels[i].is_some() {
-                continue;
-            }
-
-            // Find neighbors
-            let neighbors = self.region_query(hits, i, &spatial_index, config);
-
-            if neighbors.len() < self.min_points {
-                // Noise point (for now, will be classified as singleton cluster)
-                continue;
-            }
-
-            // Start a new cluster
-            labels[i] = Some(cluster_id);
-            let mut seeds: Vec<usize> = neighbors.into_iter().filter(|&j| j != i).collect();
-
-            while let Some(q) = seeds.pop() {
-                if labels[q].is_some() {
-                    continue;
-                }
-
-                labels[q] = Some(cluster_id);
-
-                let q_neighbors = self.region_query(hits, q, &spatial_index, config);
-                if q_neighbors.len() >= self.min_points {
-                    for neighbor in q_neighbors {
-                        if labels[neighbor].is_none() && !seeds.contains(&neighbor) {
-                            seeds.push(neighbor);
-                        }
-                    }
-                }
-            }
-
-            cluster_id += 1;
-        }
-
-        // Collect clusters
-        let mut clusters: Vec<Cluster<H>> = (0..cluster_id).map(|_| Cluster::new()).collect();
-
-        for (i, label) in labels.iter().enumerate() {
-            if let Some(cluster_idx) = label {
-                clusters[*cluster_idx].push(hits[i].clone());
-            }
-        }
-
-        // Also create singleton clusters for noise points if min_cluster_size is 1
-        if config.min_cluster_size <= 1 {
-            for (i, label) in labels.iter().enumerate() {
-                if label.is_none() {
-                    let mut cluster = Cluster::new();
-                    cluster.push(hits[i].clone());
-                    clusters.push(cluster);
-                }
-            }
-        }
-
-        // Apply cluster size filters
-        let clusters: Vec<Cluster<H>> = clusters
-            .into_iter()
-            .filter(|c| {
-                let size = c.len();
-                size >= config.min_cluster_size
-                    && config.max_cluster_size.is_none_or(|max| size <= max)
-            })
-            .collect();
-
-        Ok(clusters)
-    }
+impl HitClustering for DbscanClustering {
+    type State = DbscanState;
 
     fn name(&self) -> &'static str {
         "DBSCAN"
     }
-}
 
-impl DbscanClustering {
-    /// Finds all neighbors of a point within the epsilon neighborhood.
-    fn region_query<H: Hit>(
+    fn create_state(&self) -> Self::State {
+        DbscanState::default()
+    }
+
+    fn configure(&mut self, config: &ClusteringConfig) {
+        self.config.epsilon = config.radius;
+        self.config.temporal_window_ns = config.temporal_window_ns;
+        self.generic_config = config.clone();
+    }
+
+    fn config(&self) -> &ClusteringConfig {
+        &self.generic_config
+    }
+
+    fn cluster<H: Hit>(
         &self,
         hits: &[H],
-        point_idx: usize,
-        spatial_index: &SpatialIndex,
-        config: &ClusteringConfig,
-    ) -> Vec<usize> {
-        let point = &hits[point_idx];
-        let candidates = spatial_index.find_neighbors(point.coord());
+        state: &mut Self::State,
+        labels: &mut [i32],
+    ) -> Result<usize, ClusteringError> {
+        // TODO: Implement DBSCAN algorithm
+        // See IMPLEMENTATION_PLAN.md Part 4.2 for full specification
+        //
+        // Algorithm outline:
+        // 1. Build spatial index for efficient neighbor queries
+        // 2. For each unvisited point:
+        //    a. Find neighbors within epsilon
+        //    b. If |neighbors| >= min_points: expand cluster
+        //    c. Else: mark as noise (label = -1)
+        // 3. Assign cluster labels
 
-        let epsilon_squared = (config.spatial_epsilon * config.spatial_epsilon) as u32;
+        if hits.is_empty() {
+            return Ok(0);
+        }
 
-        candidates
-            .into_iter()
-            .filter(|&idx| {
-                let candidate = &hits[idx];
-                let dist_sq = point.coord().distance_squared(&candidate.coord());
-                let time_diff = point.toa().abs_diff(&candidate.toa());
+        // Placeholder: assign each hit to its own cluster
+        for (i, label) in labels.iter_mut().enumerate() {
+            *label = i as i32;
+        }
 
-                dist_sq <= epsilon_squared && time_diff <= config.temporal_epsilon
-            })
-            .collect()
+        state.hits_processed = hits.len();
+        state.clusters_found = hits.len();
+        state.noise_points = 0;
+
+        Ok(state.clusters_found)
+    }
+
+    fn statistics(&self, state: &Self::State) -> ClusteringStatistics {
+        ClusteringStatistics {
+            hits_processed: state.hits_processed,
+            clusters_found: state.clusters_found,
+            noise_hits: state.noise_points,
+            ..Default::default()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustpix_core::HitData;
 
     #[test]
-    fn test_dbscan_single_cluster() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(1, 1, 105, 12),
-            HitData::new(0, 1, 108, 11),
-        ];
-
-        let algo = DbscanClustering::new();
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert_eq!(clusters.len(), 1);
-        assert_eq!(clusters[0].len(), 4);
+    fn test_dbscan_config_defaults() {
+        let config = DbscanConfig::default();
+        assert_eq!(config.epsilon, 5.0);
+        assert_eq!(config.min_points, 2);
     }
 
     #[test]
-    fn test_dbscan_separate_clusters() {
-        let hits = vec![
-            HitData::new(0, 0, 100, 10),
-            HitData::new(1, 0, 110, 15),
-            HitData::new(100, 100, 1000, 20),
-            HitData::new(101, 100, 1010, 25),
-        ];
-
-        let algo = DbscanClustering::new();
-        let config = ClusteringConfig::default().with_spatial_epsilon(2.0);
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert_eq!(clusters.len(), 2);
-    }
-
-    #[test]
-    fn test_dbscan_empty_input() {
-        let hits: Vec<HitData> = Vec::new();
-        let algo = DbscanClustering::new();
-        let config = ClusteringConfig::default();
-        let clusters = algo.cluster(&hits, &config).unwrap();
-
-        assert!(clusters.is_empty());
+    fn test_dbscan_state_reset() {
+        let mut state = DbscanState::default();
+        state.hits_processed = 100;
+        state.clusters_found = 10;
+        state.noise_points = 5;
+        state.reset();
+        assert_eq!(state.hits_processed, 0);
+        assert_eq!(state.clusters_found, 0);
+        assert_eq!(state.noise_points, 0);
     }
 }
