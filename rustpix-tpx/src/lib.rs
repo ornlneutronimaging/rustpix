@@ -63,7 +63,7 @@ impl ChipTransform {
 
     /// Apply transform to local coordinates.
     ///
-    /// # Safety
+    /// # Note
     /// This method assumes the transform has been validated via `validate_bounds()`.
     /// Using an unvalidated transform may cause incorrect results due to integer overflow.
     #[inline]
@@ -266,7 +266,18 @@ impl DetectorConfig {
     fn from_json_config(config: JsonConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let detector = config.detector;
 
-        let chip_size = detector.chip_layout.chip_size_x;
+        let chip_size_x = detector.chip_layout.chip_size_x;
+        let chip_size_y = detector.chip_layout.chip_size_y;
+
+        if chip_size_x != chip_size_y {
+            return Err(format!(
+                "Only square chips are supported: chip_size_x ({}) != chip_size_y ({})",
+                chip_size_x, chip_size_y
+            )
+            .into());
+        }
+
+        let chip_size = chip_size_x;
 
         // Use VENUS defaults if no transformations specified (like C++)
         let transforms = match detector.chip_transformations {
@@ -541,5 +552,20 @@ mod tests {
             ty: 0,
         };
         assert!(invalid.validate_bounds(256).is_err());
+    }
+    #[test]
+    fn test_json_rejects_non_square_chips() {
+        let json = r#"{
+            "detector": {
+                "chip_layout": {
+                    "chip_size_x": 256,
+                    "chip_size_y": 128
+                }
+            }
+        }"#;
+
+        let result = DetectorConfig::from_json(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("square"));
     }
 }
