@@ -1,6 +1,5 @@
 //! rustpix-cli: Command-line interface for rustpix.
 //!
-//! Command-line interface for rustpix.
 //!
 //! This binary will provide a CLI for processing pixel detector data.
 
