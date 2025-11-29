@@ -52,8 +52,6 @@ impl ClusteringState for GridState {
 }
 
 /// Grid-based clustering with spatial indexing.
-///
-/// TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 4.4
 pub struct GridClustering {
     config: GridConfig,
     generic_config: ClusteringConfig,
@@ -191,18 +189,31 @@ impl HitClustering for GridClustering {
             }
         }
 
+        // Count cluster sizes
+        let mut cluster_sizes = std::collections::HashMap::new();
+        for i in 0..n {
+            let root = find(&mut parent, i);
+            *cluster_sizes.entry(root).or_insert(0) += 1;
+        }
+
         // Assign cluster labels
         let mut root_to_label = std::collections::HashMap::new();
         let mut next_label = 0;
 
         for (i, label) in labels.iter_mut().enumerate() {
             let root = find(&mut parent, i);
-            let label_id = *root_to_label.entry(root).or_insert_with(|| {
-                let l = next_label;
-                next_label += 1;
-                l
-            });
-            *label = label_id;
+            let size = *cluster_sizes.get(&root).unwrap_or(&0);
+
+            if size < self.config.min_cluster_size as usize {
+                *label = -1; // Noise
+            } else {
+                let label_id = *root_to_label.entry(root).or_insert_with(|| {
+                    let l = next_label;
+                    next_label += 1;
+                    l
+                });
+                *label = label_id;
+            }
         }
 
         state.hits_processed = n;

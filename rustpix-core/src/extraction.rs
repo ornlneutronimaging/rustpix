@@ -22,7 +22,7 @@ impl Default for ExtractionConfig {
         Self {
             super_resolution_factor: 8.0,
             weighted_by_tot: true,
-            min_tot_threshold: 0,
+            min_tot_threshold: 10,
         }
     }
 }
@@ -143,6 +143,14 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                 .enumerate()
                 .filter(|(_, &label)| label == cluster_id)
                 .map(|(idx, _)| idx)
+                .filter(|&idx| {
+                    // Apply TOT filtering if enabled
+                    if self.config.min_tot_threshold > 0 {
+                        hits[idx].tot() >= self.config.min_tot_threshold
+                    } else {
+                        true
+                    }
+                })
                 .collect();
 
             if cluster_indices.is_empty() {

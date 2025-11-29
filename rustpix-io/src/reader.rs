@@ -93,25 +93,19 @@ impl Tpx3FileReader {
         let sections = discover_sections(data);
 
         // Phase 2: Process sections
-        // TODO: Use Rayon for parallel processing if available/configured
-        // For now, sequential processing
-
         let tdc_correction = self.config.tdc_correction_25ns();
-        // Note: map_chip_to_global is not yet in DetectorConfig in lib.rs,
-        // but the plan implies it should be.
-        // I'll check lib.rs again. It has tdc_correction_25ns but maybe not map_chip_to_global.
-        // If not, I'll implement a simple identity or default transform for now.
+        let config = &self.config;
 
-        let mut all_hits = Vec::new();
-        for section in sections {
-            let hits: Vec<Tpx3Hit> = process_section(
-                data,
-                &section,
-                tdc_correction,
-                |_, x, y| (x, y), // TODO: Implement proper chip mapping
-            );
-            all_hits.extend(hits);
-        }
+        use rayon::prelude::*;
+
+        let mut all_hits: Vec<Tpx3Hit> = sections
+            .par_iter()
+            .flat_map(|section| {
+                process_section(data, section, tdc_correction, |chip_id, x, y| {
+                    config.map_chip_to_global(chip_id, x, y)
+                })
+            })
+            .collect();
 
         // Sort by TOF
         all_hits.sort_unstable_by_key(|h| h.tof);

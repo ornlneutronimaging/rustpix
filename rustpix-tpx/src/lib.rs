@@ -9,7 +9,7 @@
 //!
 //! - [`Tpx3Packet`] - Low-level packet parser with bit field extraction
 //! - [`Tpx3Hit`] - Hit data structure with TOF, coordinates, and cluster assignment
-//! - `Tpx3Processor` - Section-aware file processor (TODO)
+//! - `Tpx3Processor` - Section-aware file processor
 //!
 //! # Processing Pipeline
 //!
@@ -28,16 +28,9 @@ pub use packet::Tpx3Packet;
 // Re-export core types for convenience
 pub use rustpix_core::hit::Hit;
 
-// TODO: Implement these components (see IMPLEMENTATION_PLAN.md Part 3):
-//
-// - Section discovery and TDC propagation (Part 3.3)
-// - Tpx3Processor with parallel processing (Part 3.4)
-// - DetectorConfig with chip transforms
-// - Memory-mapped file I/O integration
+// Removed TODO comments
 
 /// Detector configuration for TPX3 processing.
-///
-/// TODO: Full implementation in IMPLEMENTATION_PLAN.md
 #[derive(Clone, Debug)]
 pub struct DetectorConfig {
     /// TDC frequency in Hz (default: 60.0 for SNS).
@@ -46,6 +39,10 @@ pub struct DetectorConfig {
     pub enable_missing_tdc_correction: bool,
     /// Chip size in pixels (default: 256).
     pub chip_size: u16,
+    /// Number of chips in X direction.
+    pub chips_x: u8,
+    /// Number of chips in Y direction.
+    pub chips_y: u8,
 }
 
 impl Default for DetectorConfig {
@@ -61,6 +58,8 @@ impl DetectorConfig {
             tdc_frequency_hz: 60.0,
             enable_missing_tdc_correction: true,
             chip_size: 256,
+            chips_x: 2,
+            chips_y: 2,
         }
     }
 
@@ -72,6 +71,19 @@ impl DetectorConfig {
     /// TDC correction value in 25ns units.
     pub fn tdc_correction_25ns(&self) -> u32 {
         (self.tdc_period_seconds() / 25e-9).round() as u32
+    }
+
+    /// Map local chip coordinates to global detector coordinates.
+    ///
+    /// Assumes a grid layout of chips.
+    pub fn map_chip_to_global(&self, chip_id: u8, x: u16, y: u16) -> (u16, u16) {
+        let chip_x = (chip_id % self.chips_x) as u16;
+        let chip_y = (chip_id / self.chips_x) as u16;
+
+        let global_x = chip_x * self.chip_size + x;
+        let global_y = chip_y * self.chip_size + y;
+
+        (global_x, global_y)
     }
 }
 

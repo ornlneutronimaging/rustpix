@@ -78,8 +78,6 @@ impl ClusteringState for DbscanState {
 }
 
 /// DBSCAN clustering algorithm with spatial indexing.
-///
-/// TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 4.2
 pub struct DbscanClustering {
     config: DbscanConfig,
     generic_config: ClusteringConfig,
@@ -158,7 +156,6 @@ impl DbscanClustering {
                 continue;
             }
             state.visited[neighbor_idx] = true;
-            state.hits_processed += 1;
 
             let neighbors = self.find_neighbors(hits, neighbor_idx, epsilon_sq, window_tof, state);
 
@@ -252,10 +249,10 @@ impl HitClustering for DbscanClustering {
                 );
                 cluster_id += 1;
             }
-            state.hits_processed += 1;
         }
 
         state.clusters_found = cluster_id as usize;
+        state.hits_processed = n;
         Ok(state.clusters_found)
     }
 
