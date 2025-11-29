@@ -268,12 +268,12 @@ impl PyDetectorConfig {
         chip_size_x: u16,
         chip_size_y: u16,
         chip_transforms: Option<Vec<PyChipTransform>>,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let transforms = chip_transforms
             .map(|v| v.into_iter().map(|t| t.inner).collect())
             .unwrap_or_default();
 
-        Self {
+        let config = Self {
             inner: rustpix_tpx::DetectorConfig {
                 tdc_frequency_hz,
                 enable_missing_tdc_correction,
@@ -281,7 +281,14 @@ impl PyDetectorConfig {
                 chip_size_y,
                 chip_transforms: transforms,
             },
-        }
+        };
+
+        config
+            .inner
+            .validate_transforms()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        Ok(config)
     }
 
     #[staticmethod]
