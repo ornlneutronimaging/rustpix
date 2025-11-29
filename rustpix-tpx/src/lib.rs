@@ -79,20 +79,16 @@ impl ChipTransform {
     }
 
     /// Validate that this transform produces valid u16 coordinates
-    /// for all inputs in the range [0, chip_size).
+    /// for all inputs in the range [0, chip_size_x) x [0, chip_size_y).
     ///
     /// This checks all 4 corners of the input space, which is sufficient
     /// because affine transforms are linear (extremes occur at corners).
-    pub fn validate_bounds(&self, chip_size: u16) -> Result<(), String> {
-        let max_coord = (chip_size.saturating_sub(1)) as i32;
+    pub fn validate_bounds(&self, chip_size_x: u16, chip_size_y: u16) -> Result<(), String> {
+        let max_x = (chip_size_x.saturating_sub(1)) as i32;
+        let max_y = (chip_size_y.saturating_sub(1)) as i32;
 
         // Check all 4 corners of the input space
-        let corners = [
-            (0, 0),
-            (max_coord, 0),
-            (0, max_coord),
-            (max_coord, max_coord),
-        ];
+        let corners = [(0, 0), (max_x, 0), (0, max_y), (max_x, max_y)];
 
         for (x, y) in corners {
             let gx = self.a * x + self.b * y + self.tx;
@@ -125,8 +121,10 @@ pub struct DetectorConfig {
     pub tdc_frequency_hz: f64,
     /// Enable missing TDC correction.
     pub enable_missing_tdc_correction: bool,
-    /// Chip size in pixels (default: 256).
-    pub chip_size: u16,
+    /// Chip size X in pixels (default: 256).
+    pub chip_size_x: u16,
+    /// Chip size Y in pixels (default: 256).
+    pub chip_size_y: u16,
     /// Per-chip affine transforms.
     pub chip_transforms: Vec<ChipTransform>,
 }
@@ -240,7 +238,8 @@ impl DetectorConfig {
         Self {
             tdc_frequency_hz: 60.0,
             enable_missing_tdc_correction: true,
-            chip_size: 256,
+            chip_size_x: 256,
+            chip_size_y: 256,
             chip_transforms: transforms,
         }
     }
@@ -268,16 +267,6 @@ impl DetectorConfig {
 
         let chip_size_x = detector.chip_layout.chip_size_x;
         let chip_size_y = detector.chip_layout.chip_size_y;
-
-        if chip_size_x != chip_size_y {
-            return Err(format!(
-                "Only square chips are supported: chip_size_x ({}) != chip_size_y ({})",
-                chip_size_x, chip_size_y
-            )
-            .into());
-        }
-
-        let chip_size = chip_size_x;
 
         // Use VENUS defaults if no transformations specified (like C++)
         let transforms = match detector.chip_transformations {
@@ -310,7 +299,8 @@ impl DetectorConfig {
         let config = Self {
             tdc_frequency_hz: detector.timing.tdc_frequency_hz,
             enable_missing_tdc_correction: detector.timing.enable_missing_tdc_correction,
-            chip_size,
+            chip_size_x,
+            chip_size_y,
             chip_transforms: transforms,
         };
 
@@ -327,7 +317,7 @@ impl DetectorConfig {
     pub fn validate_transforms(&self) -> Result<(), Box<dyn std::error::Error>> {
         for (i, transform) in self.chip_transforms.iter().enumerate() {
             transform
-                .validate_bounds(self.chip_size)
+                .validate_bounds(self.chip_size_x, self.chip_size_y)
                 .map_err(|e| format!("Chip {} transform invalid: {}", i, e))?;
         }
         Ok(())
@@ -433,7 +423,8 @@ mod tests {
 
         assert_eq!(config.tdc_frequency_hz, 14.0);
         assert!(!config.enable_missing_tdc_correction);
-        assert_eq!(config.chip_size, 256);
+        assert_eq!(config.chip_size_x, 256);
+        assert_eq!(config.chip_size_y, 256);
         assert_eq!(config.chip_transforms.len(), 2);
 
         // Check Chip 0: Identity + Translation (100, 200)
@@ -463,7 +454,8 @@ mod tests {
 
         assert_eq!(config.tdc_frequency_hz, 14.0); // Changed
         assert!(config.enable_missing_tdc_correction); // Default: true
-        assert_eq!(config.chip_size, 256); // Default
+        assert_eq!(config.chip_size_x, 256); // Default
+        assert_eq!(config.chip_size_y, 256); // Default
         assert_eq!(config.chip_transforms.len(), 4); // VENUS defaults
     }
 
@@ -528,7 +520,7 @@ mod tests {
     fn test_transform_validate_bounds_directly() {
         // Valid identity transform
         let identity = ChipTransform::identity();
-        assert!(identity.validate_bounds(256).is_ok());
+        assert!(identity.validate_bounds(256, 256).is_ok());
 
         // Valid VENUS chip 1 transform (180° rotation)
         let chip1 = ChipTransform {
@@ -539,7 +531,7 @@ mod tests {
             tx: 513,
             ty: 513,
         };
-        assert!(chip1.validate_bounds(256).is_ok());
+        assert!(chip1.validate_bounds(256, 256).is_ok());
 
         // Invalid: negative output at corner (255, 0)
         // gx = -1*255 + 0*0 + 100 = -155
@@ -551,10 +543,10 @@ mod tests {
             tx: 100,
             ty: 0,
         };
-        assert!(invalid.validate_bounds(256).is_err());
+        assert!(invalid.validate_bounds(256, 256).is_err());
     }
     #[test]
-    fn test_json_rejects_non_square_chips() {
+    fn test_json_accepts_non_square_chips() {
         let json = r#"{
             "detector": {
                 "chip_layout": {
@@ -564,8 +556,8 @@ mod tests {
             }
         }"#;
 
-        let result = DetectorConfig::from_json(json);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("square"));
+        let config = DetectorConfig::from_json(json).expect("Should accept non-square chips");
+        assert_eq!(config.chip_size_x, 256);
+        assert_eq!(config.chip_size_y, 128);
     }
 }

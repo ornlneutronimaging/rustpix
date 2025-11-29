@@ -261,11 +261,12 @@ pub struct PyDetectorConfig {
 #[pymethods]
 impl PyDetectorConfig {
     #[new]
-    #[pyo3(signature = (tdc_frequency_hz=60.0, enable_missing_tdc_correction=true, chip_size=256, chip_transforms=None))]
+    #[pyo3(signature = (tdc_frequency_hz=60.0, enable_missing_tdc_correction=true, chip_size_x=256, chip_size_y=256, chip_transforms=None))]
     fn new(
         tdc_frequency_hz: f64,
         enable_missing_tdc_correction: bool,
-        chip_size: u16,
+        chip_size_x: u16,
+        chip_size_y: u16,
         chip_transforms: Option<Vec<PyChipTransform>>,
     ) -> Self {
         let transforms = chip_transforms
@@ -276,7 +277,8 @@ impl PyDetectorConfig {
             inner: rustpix_tpx::DetectorConfig {
                 tdc_frequency_hz,
                 enable_missing_tdc_correction,
-                chip_size,
+                chip_size_x,
+                chip_size_y,
                 chip_transforms: transforms,
             },
         }
