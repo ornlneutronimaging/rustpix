@@ -28,7 +28,6 @@ pub use packet::Tpx3Packet;
 // Re-export core types for convenience
 pub use rustpix_core::hit::Hit;
 
-// Removed TODO comments
 
 /// Detector configuration for TPX3 processing.
 #[derive(Clone, Debug)]
