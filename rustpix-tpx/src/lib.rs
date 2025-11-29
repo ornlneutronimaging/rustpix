@@ -62,6 +62,11 @@ impl ChipTransform {
     }
 
     /// Apply transform to local coordinates.
+    ///
+    /// # Safety
+    /// This method assumes the transform has been validated via `validate_bounds()`.
+    /// Using an unvalidated transform may cause incorrect results due to integer overflow.
+    #[inline]
     pub fn apply(&self, x: u16, y: u16) -> (u16, u16) {
         let x = x as i32;
         let y = y as i32;
@@ -69,7 +74,47 @@ impl ChipTransform {
         let gx = self.a * x + self.b * y + self.tx;
         let gy = self.c * x + self.d * y + self.ty;
 
+        // Safety: bounds validated upfront via validate_bounds()
         (gx as u16, gy as u16)
+    }
+
+    /// Validate that this transform produces valid u16 coordinates
+    /// for all inputs in the range [0, chip_size).
+    ///
+    /// This checks all 4 corners of the input space, which is sufficient
+    /// because affine transforms are linear (extremes occur at corners).
+    pub fn validate_bounds(&self, chip_size: u16) -> Result<(), String> {
+        let max_coord = (chip_size.saturating_sub(1)) as i32;
+
+        // Check all 4 corners of the input space
+        let corners = [
+            (0, 0),
+            (max_coord, 0),
+            (0, max_coord),
+            (max_coord, max_coord),
+        ];
+
+        for (x, y) in corners {
+            let gx = self.a * x + self.b * y + self.tx;
+            let gy = self.c * x + self.d * y + self.ty;
+
+            if gx < 0 || gx > u16::MAX as i32 {
+                return Err(format!(
+                    "Transform produces out-of-bounds x={} for input ({}, {}). \
+                     Valid range is [0, 65535].",
+                    gx, x, y
+                ));
+            }
+            if gy < 0 || gy > u16::MAX as i32 {
+                return Err(format!(
+                    "Transform produces out-of-bounds y={} for input ({}, {}). \
+                     Valid range is [0, 65535].",
+                    gy, x, y
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -201,21 +246,27 @@ impl DetectorConfig {
     }
 
     /// Load configuration from a JSON file (C++ compatible schema).
+    ///
+    /// Validates all chip transforms to ensure they produce valid coordinates.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let json_config: JsonConfig = serde_json::from_reader(reader)?;
-        Ok(Self::from_json_config(json_config))
+        Self::from_json_config(json_config)
     }
 
     /// Load configuration from a JSON string (C++ compatible schema).
+    ///
+    /// Validates all chip transforms to ensure they produce valid coordinates.
     pub fn from_json(json: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let json_config: JsonConfig = serde_json::from_str(json)?;
-        Ok(Self::from_json_config(json_config))
+        Self::from_json_config(json_config)
     }
 
-    fn from_json_config(config: JsonConfig) -> Self {
+    fn from_json_config(config: JsonConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let detector = config.detector;
+
+        let chip_size = detector.chip_layout.chip_size_x;
 
         // Use VENUS defaults if no transformations specified (like C++)
         let transforms = match detector.chip_transformations {
@@ -240,17 +291,35 @@ impl DetectorConfig {
                 t_vec
             }
             _ => {
-                // Fall back to VENUS defaults
+                // Fall back to VENUS defaults (already validated)
                 Self::venus_defaults().chip_transforms
             }
         };
 
-        Self {
+        let config = Self {
             tdc_frequency_hz: detector.timing.tdc_frequency_hz,
             enable_missing_tdc_correction: detector.timing.enable_missing_tdc_correction,
-            chip_size: detector.chip_layout.chip_size_x,
+            chip_size,
             chip_transforms: transforms,
+        };
+
+        // Validate transforms once at load time (not per-hit)
+        config.validate_transforms()?;
+
+        Ok(config)
+    }
+
+    /// Validate all chip transforms produce valid u16 coordinates.
+    ///
+    /// This is called automatically when loading from JSON.
+    /// For programmatically created configs, call this before processing.
+    pub fn validate_transforms(&self) -> Result<(), Box<dyn std::error::Error>> {
+        for (i, transform) in self.chip_transforms.iter().enumerate() {
+            transform
+                .validate_bounds(self.chip_size)
+                .map_err(|e| format!("Chip {} transform invalid: {}", i, e))?;
         }
+        Ok(())
     }
 
     /// TDC period in seconds.
@@ -413,5 +482,64 @@ mod tests {
 
         assert_eq!(config.tdc_frequency_hz, 60.0); // Default
         assert_eq!(config.chip_transforms[0].tx, 260); // Custom
+    }
+
+    #[test]
+    fn test_venus_transforms_valid() {
+        // VENUS defaults should always pass validation
+        let config = DetectorConfig::venus_defaults();
+        assert!(config.validate_transforms().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_transform_negative_output() {
+        // Transform that produces negative coordinates should be rejected
+        // a=-1, tx=50 means x=100 -> gx = -100 + 50 = -50 (invalid!)
+        let json = r#"{
+            "detector": {
+                "chip_transformations": [
+                    {"chip_id": 0, "matrix": [[-1, 0, 50], [0, 1, 0]]}
+                ]
+            }
+        }"#;
+
+        let result = DetectorConfig::from_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("out-of-bounds"),
+            "Error should mention out-of-bounds: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_transform_validate_bounds_directly() {
+        // Valid identity transform
+        let identity = ChipTransform::identity();
+        assert!(identity.validate_bounds(256).is_ok());
+
+        // Valid VENUS chip 1 transform (180° rotation)
+        let chip1 = ChipTransform {
+            a: -1,
+            b: 0,
+            c: 0,
+            d: -1,
+            tx: 513,
+            ty: 513,
+        };
+        assert!(chip1.validate_bounds(256).is_ok());
+
+        // Invalid: negative output at corner (255, 0)
+        // gx = -1*255 + 0*0 + 100 = -155
+        let invalid = ChipTransform {
+            a: -1,
+            b: 0,
+            c: 0,
+            d: 1,
+            tx: 100,
+            ty: 0,
+        };
+        assert!(invalid.validate_bounds(256).is_err());
     }
 }
