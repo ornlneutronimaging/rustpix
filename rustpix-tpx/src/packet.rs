@@ -140,17 +140,17 @@ impl Tpx3Packet {
         self.is_hit()
     }
 
-    /// Calculate timestamp in 25ns units from SPIDR time and ToA.
+    /// Calculate coarse timestamp in 25ns units from SPIDR time and ToA.
     ///
-    /// Formula: (spidr_time << 18) | (toa << 4) | (16 - fine_toa)
+    /// Formula: (spidr_time << 14) | toa
+    /// Matches C++ reference implementation.
     #[inline]
-    pub fn timestamp_25ns(&self) -> u32 {
+    pub fn timestamp_coarse(&self) -> u32 {
         let spidr = self.spidr_time() as u32;
         let toa = self.toa() as u32;
-        let fine = self.fine_toa() as u32;
 
         // Combine SPIDR time and ToA to get 25ns timestamp
-        (spidr << 18) | (toa << 4) | ((16 - fine) & 0xF)
+        (spidr << 14) | toa
     }
 }
 

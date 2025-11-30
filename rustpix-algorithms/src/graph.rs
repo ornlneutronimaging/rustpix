@@ -88,8 +88,6 @@ impl UnionFind {
 }
 
 /// Graph-based clustering using union-find.
-///
-/// TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 4.3
 pub struct GraphClustering {
     config: GraphConfig,
     generic_config: ClusteringConfig,
@@ -144,16 +142,6 @@ impl HitClustering for GraphClustering {
         state: &mut Self::State,
         labels: &mut [i32],
     ) -> Result<usize, ClusteringError> {
-        // TODO: Implement graph clustering algorithm
-        // See IMPLEMENTATION_PLAN.md Part 4.3 for full specification
-        //
-        // Algorithm outline:
-        // 1. Build union-find structure
-        // 2. For each pair of hits within spatial/temporal bounds:
-        //    - Union them in the structure
-        // 3. Collect connected components
-        // 4. Assign cluster labels
-
         if hits.is_empty() {
             return Ok(0);
         }
@@ -164,22 +152,38 @@ impl HitClustering for GraphClustering {
         let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
         let mut edges = 0;
 
-        // Build edges between neighboring hits
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let hi = &hits[i];
+        // 1. Build spatial index
+        // Use a fixed grid size for now, similar to other algorithms
+        let mut grid: crate::spatial::SpatialGrid<usize> =
+            crate::spatial::SpatialGrid::new(32, 512, 512);
+        for (i, hit) in hits.iter().enumerate() {
+            grid.insert(hit.x() as i32, hit.y() as i32, i);
+        }
+
+        // 2. Build edges between neighboring hits using spatial index
+        for (i, hit) in hits.iter().enumerate() {
+            let x = hit.x() as i32;
+            let y = hit.y() as i32;
+
+            for &j in grid.query_neighborhood(x, y) {
+                // Only check pairs once (i < j) to avoid double work and self-checks
+                if i >= j {
+                    continue;
+                }
+
                 let hj = &hits[j];
 
                 // Check spatial proximity
-                let dx = hi.x() as i32 - hj.x() as i32;
-                let dy = hi.y() as i32 - hj.y() as i32;
+                // Note: query_neighborhood returns candidates in 3x3 grid, need precise check
+                let dx = x - hj.x() as i32;
+                let dy = y - hj.y() as i32;
                 let dist_sq = dx * dx + dy * dy;
                 if dist_sq > epsilon_sq {
                     continue;
                 }
 
                 // Check temporal proximity
-                let time_diff = hi.tof().abs_diff(hj.tof());
+                let time_diff = hit.tof().abs_diff(hj.tof());
                 if time_diff > window_tof {
                     continue;
                 }
@@ -190,19 +194,31 @@ impl HitClustering for GraphClustering {
             }
         }
 
-        // Collect clusters by root
-        let mut cluster_map: std::collections::HashMap<usize, i32> =
-            std::collections::HashMap::new();
+        // 3. Collect cluster sizes to filter by min_cluster_size
+        let mut cluster_sizes = std::collections::HashMap::new();
+        for i in 0..n {
+            let root = uf.find(i);
+            *cluster_sizes.entry(root).or_insert(0) += 1;
+        }
+
+        // 4. Assign cluster labels
+        let mut root_to_label = std::collections::HashMap::new();
         let mut next_cluster = 0i32;
 
         for (i, label) in labels.iter_mut().enumerate() {
             let root = uf.find(i);
-            let cluster_id = *cluster_map.entry(root).or_insert_with(|| {
-                let id = next_cluster;
-                next_cluster += 1;
-                id
-            });
-            *label = cluster_id;
+            let size = *cluster_sizes.get(&root).unwrap_or(&0);
+
+            if size < self.config.min_cluster_size as usize {
+                *label = -1; // Noise
+            } else {
+                let cluster_id = *root_to_label.entry(root).or_insert_with(|| {
+                    let id = next_cluster;
+                    next_cluster += 1;
+                    id
+                });
+                *label = cluster_id;
+            }
         }
 
         state.hits_processed = n;

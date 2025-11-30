@@ -1,6 +1,3 @@
-//! rustpix-cli: Command-line interface for rustpix.
-//!
-//! TODO: Full implementation in IMPLEMENTATION_PLAN.md Part 6
 //!
 //! This binary will provide a CLI for processing pixel detector data.
 
@@ -120,10 +117,7 @@ fn main() -> Result<()> {
             min_cluster_size,
             verbose,
         } => {
-            // TODO: Implement processing pipeline
-            // See IMPLEMENTATION_PLAN.md Part 6 for full specification
-            //
-            // Pipeline:
+            // Processing pipeline:
             // 1. Read TPX3 file(s) with section discovery
             // 2. Parse hits with TDC propagation
             // 3. Cluster hits using selected algorithm

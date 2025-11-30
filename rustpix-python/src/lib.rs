@@ -196,11 +196,133 @@ impl PyClusteringConfig {
     }
 }
 
+/// Python wrapper for ChipTransform.
+#[pyclass(name = "ChipTransform")]
+#[derive(Clone)]
+pub struct PyChipTransform {
+    inner: rustpix_tpx::ChipTransform,
+}
+
+#[pymethods]
+impl PyChipTransform {
+    #[new]
+    #[pyo3(signature = (a=1, b=0, c=0, d=1, tx=0, ty=0))]
+    fn new(a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32) -> Self {
+        Self {
+            inner: rustpix_tpx::ChipTransform { a, b, c, d, tx, ty },
+        }
+    }
+
+    #[staticmethod]
+    fn identity() -> Self {
+        Self {
+            inner: rustpix_tpx::ChipTransform::identity(),
+        }
+    }
+
+    #[getter]
+    fn a(&self) -> i32 {
+        self.inner.a
+    }
+
+    #[getter]
+    fn b(&self) -> i32 {
+        self.inner.b
+    }
+
+    #[getter]
+    fn c(&self) -> i32 {
+        self.inner.c
+    }
+
+    #[getter]
+    fn d(&self) -> i32 {
+        self.inner.d
+    }
+
+    #[getter]
+    fn tx(&self) -> i32 {
+        self.inner.tx
+    }
+
+    #[getter]
+    fn ty(&self) -> i32 {
+        self.inner.ty
+    }
+}
+
+/// Python wrapper for DetectorConfig.
+#[pyclass(name = "DetectorConfig")]
+#[derive(Clone)]
+pub struct PyDetectorConfig {
+    inner: rustpix_tpx::DetectorConfig,
+}
+
+#[pymethods]
+impl PyDetectorConfig {
+    #[new]
+    #[pyo3(signature = (tdc_frequency_hz=60.0, enable_missing_tdc_correction=true, chip_size_x=256, chip_size_y=256, chip_transforms=None))]
+    fn new(
+        tdc_frequency_hz: f64,
+        enable_missing_tdc_correction: bool,
+        chip_size_x: u16,
+        chip_size_y: u16,
+        chip_transforms: Option<Vec<PyChipTransform>>,
+    ) -> PyResult<Self> {
+        let transforms = chip_transforms
+            .map(|v| v.into_iter().map(|t| t.inner).collect())
+            .unwrap_or_default();
+
+        let config = Self {
+            inner: rustpix_tpx::DetectorConfig {
+                tdc_frequency_hz,
+                enable_missing_tdc_correction,
+                chip_size_x,
+                chip_size_y,
+                chip_transforms: transforms,
+            },
+        };
+
+        config
+            .inner
+            .validate_transforms()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        Ok(config)
+    }
+
+    #[staticmethod]
+    fn venus_defaults() -> Self {
+        Self {
+            inner: rustpix_tpx::DetectorConfig::venus_defaults(),
+        }
+    }
+
+    #[staticmethod]
+    fn from_file(path: &str) -> PyResult<Self> {
+        rustpix_tpx::DetectorConfig::from_file(path)
+            .map(|config| Self { inner: config })
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    }
+
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        rustpix_tpx::DetectorConfig::from_json(json)
+            .map(|config| Self { inner: config })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+}
+
 /// Read hits from a TPX3 file.
 #[pyfunction]
-fn read_tpx3_file(path: &str) -> PyResult<Vec<PyHit>> {
-    let reader = Tpx3FileReader::open(path)
+#[pyo3(signature = (path, detector_config=None))]
+fn read_tpx3_file(path: &str, detector_config: Option<PyDetectorConfig>) -> PyResult<Vec<PyHit>> {
+    let mut reader = Tpx3FileReader::open(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+    if let Some(config) = detector_config {
+        reader = reader.with_config(config.inner);
+    }
 
     let hits = reader
         .read_hits()
@@ -225,9 +347,18 @@ fn read_tpx3_file(path: &str) -> PyResult<Vec<PyHit>> {
 
 /// Read hits from a TPX3 file and return as numpy structured arrays.
 #[pyfunction]
-fn read_tpx3_file_numpy<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyAny>> {
-    let reader = Tpx3FileReader::open(path)
+#[pyo3(signature = (path, detector_config=None))]
+fn read_tpx3_file_numpy<'py>(
+    py: Python<'py>,
+    path: &str,
+    detector_config: Option<PyDetectorConfig>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let mut reader = Tpx3FileReader::open(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+    if let Some(config) = detector_config {
+        reader = reader.with_config(config.inner);
+    }
 
     let hits: Vec<Tpx3Hit> = reader
         .read_hits()
@@ -371,22 +502,23 @@ fn extract_neutrons_numpy<'py>(
 
 /// Process a TPX3 file: read, cluster, and extract neutrons.
 #[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true))]
+#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true, detector_config=None))]
 fn process_tpx3_file(
     path: &str,
     config: Option<PyClusteringConfig>,
     algorithm: &str,
     super_resolution: f64,
     tot_weighted: bool,
+    detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Vec<PyNeutron>> {
-    let hits = read_tpx3_file(path)?;
+    let hits = read_tpx3_file(path, detector_config)?;
     let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
     extract_neutrons(hits, labels, num_clusters, super_resolution, tot_weighted)
 }
 
 /// Process a TPX3 file and return neutrons as numpy arrays.
 #[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true))]
+#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true, detector_config=None))]
 fn process_tpx3_file_numpy<'py>(
     py: Python<'py>,
     path: &str,
@@ -394,8 +526,9 @@ fn process_tpx3_file_numpy<'py>(
     algorithm: &str,
     super_resolution: f64,
     tot_weighted: bool,
+    detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let hits = read_tpx3_file(path)?;
+    let hits = read_tpx3_file(path, detector_config)?;
     let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
     extract_neutrons_numpy(
         py,
@@ -413,6 +546,8 @@ fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHit>()?;
     m.add_class::<PyNeutron>()?;
     m.add_class::<PyClusteringConfig>()?;
+    m.add_class::<PyChipTransform>()?;
+    m.add_class::<PyDetectorConfig>()?;
     m.add_function(wrap_pyfunction!(read_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;

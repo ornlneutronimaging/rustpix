@@ -123,6 +123,13 @@ pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32
 /// Calculate TOF with TDC correction.
 ///
 /// If the raw TOF exceeds the TDC period, subtract one period.
+///
+/// # Arguments
+///
+/// * `timestamp` - Hit timestamp in 25ns units.
+/// * `tdc_timestamp` - TDC timestamp in 25ns units.
+/// * `tdc_correction_25ns` - The TDC period in 25ns units (1 / TDC_frequency).
+///   For SNS (60Hz), this is approximately 666,667 units (16.67ms / 25ns).
 #[inline]
 pub fn calculate_tof(timestamp: u32, tdc_timestamp: u32, tdc_correction_25ns: u32) -> u32 {
     let raw_tof = timestamp.wrapping_sub(tdc_timestamp);

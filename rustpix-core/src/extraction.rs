@@ -22,7 +22,7 @@ impl Default for ExtractionConfig {
         Self {
             super_resolution_factor: 8.0,
             weighted_by_tot: true,
-            min_tot_threshold: 0,
+            min_tot_threshold: 10,
         }
     }
 }
@@ -143,6 +143,14 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                 .enumerate()
                 .filter(|(_, &label)| label == cluster_id)
                 .map(|(idx, _)| idx)
+                .filter(|&idx| {
+                    // Apply TOT filtering if enabled
+                    if self.config.min_tot_threshold > 0 {
+                        hits[idx].tot() >= self.config.min_tot_threshold
+                    } else {
+                        true
+                    }
+                })
                 .collect();
 
             if cluster_indices.is_empty() {
@@ -280,5 +288,86 @@ mod tests {
         let result = extractor.extract(&hits, &labels, 1);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tot_threshold_filters_low_tot_hits() {
+        // Create hits with varying TOT values
+        let hits = vec![
+            GenericHit::new(1000, 0, 0, 500, 5, 0), // TOT=5, below threshold
+            GenericHit::new(1000, 10, 0, 500, 15, 0), // TOT=15, above threshold
+            GenericHit::new(1000, 20, 0, 500, 20, 0), // TOT=20, above threshold
+        ];
+        let labels = vec![0, 0, 0]; // All in same cluster
+
+        // Default threshold is 10
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+
+        assert_eq!(neutrons.len(), 1);
+        // Only hits with TOT >= 10 should be included (2 hits)
+        assert_eq!(neutrons[0].n_hits, 2);
+        // TOT sum should be 15 + 20 = 35 (not including the TOT=5 hit)
+        assert_eq!(neutrons[0].tot, 35);
+        // Centroid should be weighted by (10, 0) with TOT=15 and (20, 0) with TOT=20
+        // weighted_x = (10*15 + 20*20) / (15 + 20) = (150 + 400) / 35 = 15.71
+        // scaled by 8 = 125.71
+        assert!((neutrons[0].x - 125.71).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_tot_threshold_skips_empty_clusters_after_filtering() {
+        // All hits in cluster have TOT below threshold
+        let hits = vec![
+            GenericHit::new(1000, 0, 0, 500, 5, 0), // TOT=5, below default threshold of 10
+            GenericHit::new(1000, 1, 0, 500, 8, 0), // TOT=8, below threshold
+        ];
+        let labels = vec![0, 0];
+
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+
+        // Cluster should be skipped because all hits are filtered out
+        assert_eq!(neutrons.len(), 0);
+    }
+
+    #[test]
+    fn test_tot_threshold_disabled_when_zero() {
+        let hits = vec![
+            GenericHit::new(1000, 0, 0, 500, 5, 0),  // TOT=5
+            GenericHit::new(1000, 10, 0, 500, 3, 0), // TOT=3
+        ];
+        let labels = vec![0, 0];
+
+        // Disable TOT filtering by setting threshold to 0
+        let mut extractor = SimpleCentroidExtraction::new();
+        extractor.configure(ExtractionConfig::default().with_min_tot_threshold(0));
+
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+
+        // All hits should be included
+        assert_eq!(neutrons.len(), 1);
+        assert_eq!(neutrons[0].n_hits, 2);
+        assert_eq!(neutrons[0].tot, 8); // 5 + 3
+    }
+
+    #[test]
+    fn test_representative_tof_from_max_tot_after_filtering() {
+        // Verify that representative TOF is selected from remaining hits after filtering
+        let hits = vec![
+            GenericHit::new(1000, 0, 0, 500, 5, 0), // TOT=5, filtered out, TOF=1000
+            GenericHit::new(2000, 10, 0, 500, 15, 0), // TOT=15, kept, TOF=2000
+            GenericHit::new(3000, 20, 0, 500, 25, 0), // TOT=25 (max), kept, TOF=3000
+        ];
+        let labels = vec![0, 0, 0];
+
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+
+        assert_eq!(neutrons.len(), 1);
+        // Representative TOF should be from the hit with max TOT (25), which is 3000
+        assert_eq!(neutrons[0].tof, 3000);
+        // Verify it's not using the filtered hit's TOF
+        assert_ne!(neutrons[0].tof, 1000);
     }
 }
