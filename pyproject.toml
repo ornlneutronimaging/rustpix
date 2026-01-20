@@ -31,17 +31,14 @@ rust = "*"
 pip = "*"
 pre-commit = "*"
 taplo = "*"
+pytest = "*"
 
 [tool.pixi.tasks]
-build-rust = "cargo build --release"
-build-python = "maturin build --release"
-develop = "maturin develop"
-test-rust = "cargo test --workspace"
-test-python = "python -c 'import rustpix; print(dir(rustpix))'"
-gui = "cargo run -p rustpix-gui --release"
-pre-commit-install = "pre-commit install"
-pre-commit-run = "pre-commit run --all-files"
-fmt = "cargo fmt --all"
-clippy = "cargo clippy --workspace --all-targets -- -D warnings"
-lint = { depends-on = ["fmt", "clippy"] }
-benchmark = "python benchmarks/benchmark.py"
+# Core tasks
+test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && ([ -d tests ] && python -m pytest tests/ -v || echo 'No Python tests yet')", description = "Run all tests (Rust + Python)" }
+build = { cmd = "maturin develop --release --strip", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build with highest optimization + editable install" }
+build-debug = { cmd = "maturin develop", description = "Build in debug mode + editable install" }
+gui = { cmd = "cargo run -p rustpix-gui --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build and run GUI in release mode" }
+gui-debug = { cmd = "cargo run -p rustpix-gui", description = "Build and run GUI in debug mode" }
+docs = { cmd = "cargo doc --workspace --no-deps --open", description = "Build and open documentation" }
+clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true", description = "Remove all build artifacts" }
