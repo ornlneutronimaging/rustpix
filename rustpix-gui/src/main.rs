@@ -62,7 +62,7 @@ impl std::fmt::Display for Colormap {
 
 enum AppMessage {
     LoadProgress(f32, String), // Progress, Status text
-    LoadComplete(HitBatch, Vec<u32>, Vec<u64>, Duration, String), // batch, counts, hist, dur, debug_info
+    LoadComplete(Box<HitBatch>, Vec<u32>, Vec<u64>, Duration, String), // batch, counts, hist, dur, debug_info
     LoadError(String),
 
     ProcessingProgress(f32, String),
@@ -351,7 +351,7 @@ impl RustpixApp {
             }
 
             tx.send(AppMessage::LoadComplete(
-                full_batch,
+                Box::new(full_batch),
                 counts,
                 hist,
                 start.elapsed(),
@@ -545,7 +545,7 @@ impl eframe::App for RustpixApp {
 
                     self.hit_counts = Some(counts);
                     self.tof_hist_full = Some(hist); // Cached full histogram
-                    self.hit_batch = Some(batch);
+                    self.hit_batch = Some(*batch);
                     // self.debug_info = dbg; // Removed
 
                     // Generate texture

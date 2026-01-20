@@ -35,6 +35,12 @@ struct DbscanContext<'a> {
     window_tof: u32,
 }
 
+/// Mutable tracking state used during DBSCAN clustering.
+struct TrackingState<'a> {
+    visited: &'a mut [bool],
+    noise: &'a mut [bool],
+}
+
 impl SoADbscanClustering {
     pub fn new(config: SoADbscanConfig) -> Self {
         Self { config }
@@ -90,7 +96,7 @@ impl SoADbscanClustering {
 
         let mut current_cluster_id = 0;
         let mut visited = vec![false; n];
-        let mut noise = vec![false; n]; // or just leave cluster_id = -1
+        let mut noise = vec![false; n];
 
         for i in 0..n {
             if visited[i] {
@@ -104,15 +110,11 @@ impl SoADbscanClustering {
                 noise[i] = true;
             } else {
                 batch.cluster_id[i] = current_cluster_id;
-                self.expand_cluster(
-                    &ctx,
-                    i,
-                    neighbors,
-                    current_cluster_id,
-                    batch,
-                    &mut visited,
-                    &mut noise,
-                );
+                let mut tracking = TrackingState {
+                    visited: &mut visited,
+                    noise: &mut noise,
+                };
+                self.expand_cluster(&ctx, neighbors, current_cluster_id, batch, &mut tracking);
                 current_cluster_id += 1;
             }
         }
@@ -161,25 +163,23 @@ impl SoADbscanClustering {
     fn expand_cluster(
         &self,
         ctx: &DbscanContext,
-        _root: usize,
         mut seeds: Vec<usize>,
         cluster_id: i32,
         batch: &mut HitBatch,
-        visited: &mut [bool],
-        noise: &mut [bool],
+        tracking: &mut TrackingState,
     ) {
         let mut i = 0;
         while i < seeds.len() {
             let current_p = seeds[i];
             i += 1;
 
-            if noise[current_p] {
-                noise[current_p] = false;
+            if tracking.noise[current_p] {
+                tracking.noise[current_p] = false;
                 batch.cluster_id[current_p] = cluster_id;
             }
 
-            if !visited[current_p] {
-                visited[current_p] = true;
+            if !tracking.visited[current_p] {
+                tracking.visited[current_p] = true;
                 batch.cluster_id[current_p] = cluster_id;
 
                 let neighbors = self.region_query(ctx, current_p, batch);

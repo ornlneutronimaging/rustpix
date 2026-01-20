@@ -2,6 +2,9 @@
 //!
 //! Identifies logical sections in the file based on TPX3 headers.
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// A section of the TPX3 file belonging to a specific chip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
