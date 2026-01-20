@@ -116,7 +116,12 @@ impl DbscanClustering {
         let y = hit.y() as i32;
         let mut neighbors = Vec::new();
 
-        for &neighbor_idx in state.spatial_grid.query_neighborhood(x, y) {
+        let mut potential_neighbors = Vec::with_capacity(16);
+        state
+            .spatial_grid
+            .query_neighborhood(x, y, &mut potential_neighbors);
+
+        for &neighbor_idx in potential_neighbors.iter() {
             if point_idx == neighbor_idx {
                 continue;
             }

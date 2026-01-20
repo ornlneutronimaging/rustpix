@@ -12,12 +12,18 @@ mod abs;
 mod dbscan;
 mod graph;
 mod grid;
-mod spatial;
+pub mod soa_abs;
+pub mod soa_dbscan;
+pub mod soa_grid;
+pub mod spatial;
 
-pub use abs::{AbsClustering, AbsConfig, AbsState};
+pub use abs::{AbsClustering, AbsConfig};
 pub use dbscan::{DbscanClustering, DbscanConfig, DbscanState};
-pub use graph::{GraphClustering, GraphConfig, GraphState};
+pub use graph::GraphClustering;
 pub use grid::{GridClustering, GridConfig, GridState};
+pub use soa_abs::{SoAAbsClustering, SoAAbsConfig, SoAAbsState};
+pub use soa_dbscan::{SoADbscanClustering, SoADbscanConfig};
+pub use soa_grid::SoAGridClustering;
 pub use spatial::SpatialGrid;
 
 // Re-export core clustering traits

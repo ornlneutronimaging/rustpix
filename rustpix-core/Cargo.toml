@@ -9,7 +9,7 @@ description = "Core traits and types for rustpix pixel detector processing"
 
 [dependencies]
 thiserror.workspace = true
-serde = { workspace = true, optional = true }
+serde = { workspace = true, optional = true, features = ["derive"] }
 
 [dev-dependencies]
 approx.workspace = true

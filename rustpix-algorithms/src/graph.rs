@@ -161,11 +161,15 @@ impl HitClustering for GraphClustering {
         }
 
         // 2. Build edges between neighboring hits using spatial index
+        let mut neighbors = Vec::with_capacity(16);
         for (i, hit) in hits.iter().enumerate() {
             let x = hit.x() as i32;
             let y = hit.y() as i32;
 
-            for &j in grid.query_neighborhood(x, y) {
+            neighbors.clear();
+            grid.query_neighborhood(x, y, &mut neighbors);
+
+            for &j in neighbors.iter() {
                 // Only check pairs once (i < j) to avoid double work and self-checks
                 if i >= j {
                     continue;

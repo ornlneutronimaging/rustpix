@@ -40,8 +40,8 @@ impl Default for GridConfig {
 /// Grid clustering state.
 #[derive(Default)]
 pub struct GridState {
-    hits_processed: usize,
-    clusters_found: usize,
+    pub hits_processed: usize,
+    pub clusters_found: usize,
 }
 
 impl ClusteringState for GridState {
@@ -143,6 +143,82 @@ impl HitClustering for GridClustering {
         let mut parent: Vec<usize> = (0..n).collect();
         let mut rank: Vec<usize> = vec![0; n];
 
+        // We can't easily parallelize the Union-Find operations directly.
+        // Strategy:
+        // 1. Find all edges (pairs of connected hits) in parallel.
+        // 2. Perform union operations sequentially.
+
+        use rayon::prelude::*;
+
+        let radius_sq = self.config.radius * self.config.radius;
+        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
+
+        let cell_size = self.config.cell_size as i32;
+
+        let find_edges_in_cell =
+            |i: usize, hit: &H, cell: &[usize], edges: &mut Vec<(usize, usize)>| {
+                // Find start index: first element > i
+                // Since hits are sorted by TOF and processed in order, indices in cell are sorted.
+                let start = cell.partition_point(|&idx| idx <= i);
+
+                // Find end index: first element where tof > limit
+                let limit_tof = hit.tof().saturating_add(window_tof);
+                // We only search in the slice starting from `start`
+                let end_rel = cell[start..].partition_point(|&idx| hits[idx].tof() <= limit_tof);
+                let end = start + end_rel;
+
+                for &neighbor_idx in &cell[start..end] {
+                    let neighbor = &hits[neighbor_idx];
+                    if hit.distance_squared(neighbor) <= radius_sq {
+                        edges.push((i, neighbor_idx));
+                    }
+                }
+            };
+
+        let edges: Vec<(usize, usize)> = if self.config.parallel {
+            hits.par_iter()
+                .enumerate()
+                .map_init(
+                    || Vec::with_capacity(16),
+                    |local_edges, (i, hit)| {
+                        local_edges.clear();
+                        let x = hit.x() as i32;
+                        let y = hit.y() as i32;
+
+                        for dy in -1..=1 {
+                            for dx in -1..=1 {
+                                let px = x + dx * cell_size;
+                                let py = y + dy * cell_size;
+                                if let Some(cell) = grid.get_cell_slice(px, py) {
+                                    find_edges_in_cell(i, hit, cell, local_edges);
+                                }
+                            }
+                        }
+                        local_edges.clone()
+                    },
+                )
+                .flatten()
+                .collect()
+        } else {
+            // Sequential fallback
+            let mut edge_list = Vec::new();
+            for (i, hit) in hits.iter().enumerate() {
+                let x = hit.x() as i32;
+                let y = hit.y() as i32;
+
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let px = x + dx * cell_size;
+                        let py = y + dy * cell_size;
+                        if let Some(cell) = grid.get_cell_slice(px, py) {
+                            find_edges_in_cell(i, hit, cell, &mut edge_list);
+                        }
+                    }
+                }
+            }
+            edge_list
+        };
+
         let find = |parent: &mut Vec<usize>, mut i: usize| -> usize {
             while i != parent[i] {
                 parent[i] = parent[parent[i]];
@@ -166,27 +242,9 @@ impl HitClustering for GridClustering {
             }
         };
 
-        let radius_sq = self.config.radius * self.config.radius;
-        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
-
-        // Iterate over all hits and connect neighbors
-        for (i, hit) in hits.iter().enumerate() {
-            let x = hit.x() as i32;
-            let y = hit.y() as i32;
-
-            // Query neighbors
-            for &neighbor_idx in grid.query_neighborhood(x, y) {
-                if neighbor_idx <= i {
-                    continue; // Avoid duplicate checks
-                }
-
-                let neighbor = &hits[neighbor_idx];
-                if hit.within_temporal_window(neighbor, window_tof)
-                    && hit.distance_squared(neighbor) <= radius_sq
-                {
-                    union(&mut parent, &mut rank, i, neighbor_idx);
-                }
-            }
+        // Process edges
+        for (u, v) in edges {
+            union(&mut parent, &mut rank, u, v);
         }
 
         // Count cluster sizes

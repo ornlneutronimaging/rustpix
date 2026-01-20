@@ -3086,6 +3086,8 @@ dependencies = [
  "egui_plot",
  "env_logger",
  "log",
+ "memmap2",
+ "rayon",
  "rfd",
  "rustpix-algorithms",
  "rustpix-core",
@@ -3101,6 +3103,7 @@ dependencies = [
  "rayon",
  "rustpix-core",
  "rustpix-tpx",
+ "serde",
  "tempfile",
  "thiserror 2.0.17",
 ]
@@ -3111,6 +3114,7 @@ version = "0.1.0"
 dependencies = [
  "numpy",
  "pyo3",
+ "rayon",
  "rustpix-algorithms",
  "rustpix-core",
  "rustpix-io",

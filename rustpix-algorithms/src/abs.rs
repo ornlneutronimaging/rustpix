@@ -218,8 +218,11 @@ impl AbsClustering {
         let x = hit.x() as i32;
         let y = hit.y() as i32;
 
+        let mut neighbors = Vec::with_capacity(16);
+        state.spatial_grid.query_neighborhood(x, y, &mut neighbors);
+
         // Search in spatial neighborhood
-        for &bucket_idx in state.spatial_grid.query_neighborhood(x, y) {
+        for &bucket_idx in neighbors.iter() {
             let bucket = &state.bucket_pool[bucket_idx];
             if bucket.is_active
                 && bucket.fits_spatially(hit, self.config.radius)

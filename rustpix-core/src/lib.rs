@@ -10,6 +10,7 @@ pub mod error;
 pub mod extraction;
 pub mod hit;
 pub mod neutron;
+pub mod soa;
 
 pub use clustering::{ClusteringConfig, ClusteringState, ClusteringStatistics, HitClustering};
 pub use error::{ClusteringError, Error, ExtractionError, IoError, ProcessingError, Result};

@@ -18,6 +18,7 @@ rustpix-algorithms.workspace = true
 rustpix-io.workspace = true
 pyo3.workspace = true
 numpy.workspace = true
+rayon.workspace = true
 
 [features]
 default = []

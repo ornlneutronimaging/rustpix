@@ -13,6 +13,7 @@ use rustpix_core::hit::GenericHit;
 use rustpix_core::neutron::Neutron;
 use rustpix_io::Tpx3FileReader;
 use rustpix_tpx::Tpx3Hit;
+pub mod streaming;
 
 /// Python wrapper for GenericHit.
 #[pyclass(name = "Hit")]
@@ -548,6 +549,7 @@ fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyClusteringConfig>()?;
     m.add_class::<PyChipTransform>()?;
     m.add_class::<PyDetectorConfig>()?;
+    m.add_class::<streaming::MeasurementStream>()?;
     m.add_function(wrap_pyfunction!(read_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;

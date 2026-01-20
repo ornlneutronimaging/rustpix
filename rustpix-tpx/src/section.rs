@@ -156,6 +156,76 @@ pub fn process_section<H: From<(u32, u16, u16, u32, u16, u8)>>(
     hits
 }
 
+/// Process a single section into a HitBatch (SoA).
+pub fn process_section_into_batch(
+    data: &[u8],
+    section: &Tpx3Section,
+    tdc_correction_25ns: u32,
+    chip_transform: impl Fn(u8, u16, u16) -> (u16, u16),
+    batch: &mut rustpix_core::soa::HitBatch,
+) -> Option<u32> {
+    use super::hit::{calculate_tof, correct_timestamp_rollover};
+
+    const PACKET_SIZE: usize = 8;
+
+    let section_data = &data[section.start_offset..section.end_offset];
+    let num_packets = section_data.len() / PACKET_SIZE;
+
+    let mut current_tdc = section.initial_tdc;
+
+    for i in 0..num_packets {
+        let offset = i * PACKET_SIZE;
+        let raw = u64::from_le_bytes(
+            section_data[offset..offset + PACKET_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        let packet = Tpx3Packet::new(raw);
+
+        if packet.is_tdc() {
+            current_tdc = Some(packet.tdc_timestamp());
+        } else if packet.is_hit() {
+            // Skip hits until we have a TDC reference
+            let Some(tdc_ts) = current_tdc else { continue };
+
+            let (local_x, local_y) = packet.pixel_coordinates();
+            let (global_x, global_y) = chip_transform(section.chip_id, local_x, local_y);
+
+            // Calculate timestamp with rollover correction
+            let raw_timestamp = packet.timestamp_coarse();
+            let timestamp = correct_timestamp_rollover(raw_timestamp, tdc_ts);
+            let tof = calculate_tof(timestamp, tdc_ts, tdc_correction_25ns);
+
+            batch.push(
+                global_x,
+                global_y,
+                tof,
+                packet.tot(),
+                timestamp,
+                section.chip_id,
+            );
+        }
+    }
+
+    current_tdc
+}
+
+/// Scans a section to find the final TDC timestamp.
+/// Used for state propagation before full processing.
+pub fn scan_section_tdc(data: &[u8], section: &Tpx3Section) -> Option<u32> {
+    let section_data = &data[section.start_offset..section.end_offset];
+    const PACKET_SIZE: usize = 8;
+    let mut final_tdc = section.initial_tdc;
+
+    for chunk in section_data.chunks_exact(PACKET_SIZE) {
+        let raw = u64::from_le_bytes(chunk.try_into().unwrap());
+        if ((raw >> 56) & 0xFF) == 0x6F {
+            final_tdc = Some(((raw >> 12) & 0x3FFF_FFFF) as u32);
+        }
+    }
+    final_tdc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +339,38 @@ mod tests {
         // Verify TOF calculation roughly
         // ToA 1100 -> timestamp 1100 (SPIDR=0). TDC 1000. Diff 100.
         assert_eq!(hits[0].tof, 100);
+    }
+
+    #[test]
+    fn test_process_section_into_batch() {
+        use rustpix_core::soa::HitBatch;
+
+        let mut data = Vec::new();
+        // Header
+
+        let tdc_val = 1000;
+        data.extend_from_slice(&make_tdc(tdc_val).to_le_bytes());
+
+        // Hit: ToA=1100, ToT=10, Addr=0
+        data.extend_from_slice(&make_hit(1100, 10, 0).to_le_bytes());
+
+        let section = Tpx3Section {
+            start_offset: 0,
+            end_offset: data.len(),
+            chip_id: 0,
+            initial_tdc: None,
+            final_tdc: None,
+        };
+
+        let mut batch = HitBatch::default();
+        let end_tdc =
+            process_section_into_batch(&data, &section, 1_000_000, |_, x, y| (x, y), &mut batch);
+
+        assert_eq!(end_tdc, Some(1000));
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.tot[0], 10);
+        assert_eq!(batch.tof[0], 100);
+        assert_eq!(batch.chip_id[0], 0);
     }
 }

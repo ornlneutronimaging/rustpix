@@ -12,6 +12,8 @@ rustpix-core.workspace = true
 rustpix-io.workspace = true
 rustpix-algorithms.workspace = true
 rustpix-tpx.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
 
 # GUI
 eframe = "0.29"
