@@ -28,8 +28,8 @@ impl<T: Clone> SpatialGrid<T> {
         let cell_size = cell_size.max(1);
 
         // Calculate grid dimensions
-        let width_cells = (width + cell_size - 1) / cell_size;
-        let height_cells = (height + cell_size - 1) / cell_size;
+        let width_cells = width.div_ceil(cell_size);
+        let height_cells = height.div_ceil(cell_size);
         let total_cells = width_cells * height_cells;
 
         // Pre-allocate cells
@@ -67,7 +67,11 @@ impl<T: Clone> SpatialGrid<T> {
 
         if cx < self.width_cells && cy < self.height_cells {
             let idx = cy * self.width_cells + cx;
-            // SAFETY: Bounds checked above
+            // SAFETY: bounds checked above. `idx` is guaranteed to be < total_cells because:
+            // 1. cx < width_cells and cy < height_cells (checked by if conditions).
+            // 2. idx = cy * width_cells + cx.
+            // 3. total_cells = width_cells * height_cells.
+            // Therefore idx < total_cells.
             unsafe {
                 self.cells.get_unchecked_mut(idx).push(value);
             }

@@ -145,6 +145,10 @@ pub struct AbsState {
     hits_processed: usize,
     /// Clusters found counter.
     clusters_found: usize,
+    /// Detector width
+    pub width: usize,
+    /// Detector height
+    pub height: usize,
 }
 
 impl Default for AbsState {
@@ -157,6 +161,19 @@ impl Default for AbsState {
             next_cluster_id: 0,
             hits_processed: 0,
             clusters_found: 0,
+            width: 512,
+            height: 512,
+        }
+    }
+}
+
+impl AbsState {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            spatial_grid: SpatialGrid::new(32, width, height),
+            ..Default::default()
         }
     }
 }
@@ -203,6 +220,12 @@ impl AbsClustering {
             idx
         } else {
             let idx = state.bucket_pool.len();
+            // Sanity check for unbounded growth
+            debug_assert!(
+                idx < 1_000_000,
+                "ABS Bucket Pool growing too large: {}",
+                idx
+            );
             state.bucket_pool.push(Bucket::new());
             idx
         }
@@ -318,6 +341,8 @@ impl HitClustering for AbsClustering {
             next_cluster_id: 0,
             hits_processed: 0,
             clusters_found: 0,
+            width: 512,
+            height: 512,
         }
     }
 

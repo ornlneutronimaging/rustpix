@@ -74,6 +74,17 @@ impl ChipTransform {
         let gx = self.a * x + self.b * y + self.tx;
         let gy = self.c * x + self.d * y + self.ty;
 
+        debug_assert!(
+            gx >= 0 && gx <= u16::MAX as i32,
+            "ChipTransform: X out of bounds: {}",
+            gx
+        );
+        debug_assert!(
+            gy >= 0 && gy <= u16::MAX as i32,
+            "ChipTransform: Y out of bounds: {}",
+            gy
+        );
+
         // Safety: bounds validated upfront via validate_bounds()
         (gx as u16, gy as u16)
     }

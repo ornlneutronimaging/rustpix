@@ -397,6 +397,14 @@ fn cluster_hits(
     config: Option<PyClusteringConfig>,
     algorithm: &str,
 ) -> PyResult<(Vec<i32>, usize)> {
+    cluster_hits_impl(&hits, config, algorithm)
+}
+
+fn cluster_hits_impl(
+    hits: &[PyHit],
+    config: Option<PyClusteringConfig>,
+    algorithm: &str,
+) -> PyResult<(Vec<i32>, usize)> {
     let config = config.unwrap_or_else(|| PyClusteringConfig::new(5.0, 75.0, 1, None));
     let hit_data: Vec<GenericHit> = hits.iter().map(|h| h.inner).collect();
     let mut labels = vec![0; hit_data.len()];
@@ -513,7 +521,7 @@ fn process_tpx3_file(
     detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Vec<PyNeutron>> {
     let hits = read_tpx3_file(path, detector_config)?;
-    let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
+    let (labels, num_clusters) = cluster_hits_impl(&hits, config, algorithm)?;
     extract_neutrons(hits, labels, num_clusters, super_resolution, tot_weighted)
 }
 
@@ -530,7 +538,7 @@ fn process_tpx3_file_numpy<'py>(
     detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let hits = read_tpx3_file(path, detector_config)?;
-    let (labels, num_clusters) = cluster_hits(hits.clone(), config, algorithm)?;
+    let (labels, num_clusters) = cluster_hits_impl(&hits, config, algorithm)?;
     extract_neutrons_numpy(
         py,
         hits,

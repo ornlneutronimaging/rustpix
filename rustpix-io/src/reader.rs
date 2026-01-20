@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use rustpix_tpx::section::{discover_sections, process_section};
 use rustpix_tpx::{DetectorConfig, Tpx3Hit, Tpx3Packet};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A memory-mapped file reader.
 ///
@@ -15,14 +15,20 @@ use std::path::Path;
 /// loading the entire file into memory.
 pub struct MappedFileReader {
     mmap: Mmap,
+    path: PathBuf,
 }
 
 impl MappedFileReader {
     /// Opens a file for memory-mapped reading.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path)?;
+        let file = File::open(&path)?;
+        // SAFETY: The file is opened read-only and we assume it is not modified concurrently.
+        // This is the standard safety contract for memory mapping.
         let mmap = unsafe { Mmap::map(&file)? };
-        Ok(Self { mmap })
+        Ok(Self {
+            mmap,
+            path: path.as_ref().to_path_buf(),
+        })
     }
 
     /// Returns the file contents as a byte slice.
@@ -82,8 +88,9 @@ impl Tpx3FileReader {
     pub fn read_hits(&self) -> Result<Vec<Tpx3Hit>> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
-                "file size {} is not a multiple of 8",
-                self.reader.len()
+                "file size {} is not a multiple of 8 (file: {})",
+                self.reader.len(),
+                self.reader.path.display()
             )));
         }
 

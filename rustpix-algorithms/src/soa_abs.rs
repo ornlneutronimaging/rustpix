@@ -108,7 +108,7 @@ impl SoAAbsClustering {
         batch: &mut HitBatch,
         state: &mut SoAAbsState,
     ) -> Result<usize, ClusteringError> {
-        if batch.len() == 0 {
+        if batch.is_empty() {
             return Ok(0);
         }
 

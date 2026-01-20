@@ -91,6 +91,7 @@ struct RustpixApp {
 
     // Config
     tdc_frequency: f64,
+    log_plot: bool,
 
     // App Logic
     rx: Receiver<AppMessage>,
@@ -134,6 +135,7 @@ impl Default for RustpixApp {
 
             // Config
             tdc_frequency: 60.0,
+            log_plot: false,
 
             rx,
             tx,
@@ -729,36 +731,64 @@ impl eframe::App for RustpixApp {
         if self.show_histogram {
             egui::Window::new("TOF Histogram").show(ctx, |ui| {
                 // Use pre-computed histogram ONLY. No heavy calculation here.
+                // Use pre-computed histogram ONLY. No heavy calculation here.
                 if let Some(full) = &self.tof_hist_full {
                     // Recompute conversion for display
                     let tdc_period = 1.0 / self.tdc_frequency; // s
-                    let max_ticks = tdc_period / 25e-9;
+                    let max_us = tdc_period * 1e6; // microseconds
+                                                   // max_ticks removed
                     let n_bins = full.len();
-                    let bin_width = max_ticks / n_bins as f64;
+                    let bin_width_us = max_us / n_bins as f64;
+                    // bin_width_ticks removed
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.log_plot, "Log Scale");
+                        ui.label(format!(
+                            "Range: 0 - {:.0} µs ({:.1} Hz)",
+                            max_us, self.tdc_frequency
+                        ));
+                    });
 
                     Plot::new("tof_hist")
-                        .x_axis_label("Time-of-Flight (25ns ticks)")
-                        .y_axis_label("Counts")
-                        .show(ui, |plot_ui| {
+                        .x_axis_label("Time-of-Flight (µs)")
+                        .y_axis_label(if self.log_plot {
+                            "Log10(Counts)"
+                        } else {
+                            "Counts"
+                        })
+                        .include_x(0.0)
+                        .include_x(max_us)
+                        .include_y(0.0) // Start Y at 0
+                        .show(ui, |plot_ui: &mut egui_plot::PlotUi| {
                             // Plot full (Blue)
                             let bars: Vec<Bar> = full
                                 .iter()
                                 .enumerate()
                                 .map(|(i, &c)| {
-                                    // Scale x to ticks
-                                    let x = i as f64 * bin_width;
-                                    Bar::new(x, c as f64)
-                                        .width(bin_width)
+                                    // Scale x to microseconds
+                                    let x = i as f64 * bin_width_us;
+
+                                    // Manual log adjustment
+                                    // For log plot, we take log10(c). If c=0, use 0.
+                                    let val = if self.log_plot {
+                                        if c > 0 {
+                                            (c as f64).log10()
+                                        } else {
+                                            0.0
+                                        }
+                                    } else {
+                                        c as f64
+                                    };
+
+                                    Bar::new(x, val)
+                                        .width(bin_width_us)
                                         .fill(egui::Color32::BLUE)
                                 })
                                 .collect();
                             plot_ui.bar_chart(BarChart::new(bars).name("Full"));
                         });
 
-                    ui.label(format!(
-                        "Range: 0 - {:.0} ticks ({:.1} Hz)",
-                        max_ticks, self.tdc_frequency
-                    ));
+                    // ui.label(...) moved to top
                 } else {
                     ui.label("No Data");
                 }

@@ -65,11 +65,7 @@ impl SoAGridClustering {
                 return false;
             }
 
-            let dt = if batch.tof[i] > batch.tof[j] {
-                batch.tof[i] - batch.tof[j]
-            } else {
-                batch.tof[j] - batch.tof[i]
-            };
+            let dt = batch.tof[i].abs_diff(batch.tof[j]);
 
             dt <= window_tof
         };
