@@ -17,6 +17,7 @@
 //!
 
 mod hit;
+pub mod ordering;
 mod packet;
 pub mod section;
 
