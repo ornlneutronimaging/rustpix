@@ -125,7 +125,7 @@ impl ChipStats {
         }
 
         // Sample timestamps (first 100 and last 100)
-        if self.tdc_count <= 100 || self.tdc_count % 1000 == 0 {
+        if self.tdc_count <= 100 || self.tdc_count.is_multiple_of(1000) {
             self.tdc_timestamps.push(ts);
         }
 
@@ -144,7 +144,7 @@ impl ChipStats {
         }
 
         // Sample timestamps
-        if self.hit_count <= 100 || self.hit_count % 10000 == 0 {
+        if self.hit_count <= 100 || self.hit_count.is_multiple_of(10000) {
             self.hit_timestamps.push(ts);
         }
 

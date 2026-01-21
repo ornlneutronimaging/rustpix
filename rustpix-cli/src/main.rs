@@ -450,11 +450,7 @@ fn main() -> Result<()> {
 
             // Verify hit counts match
             if !hits_std.is_empty() {
-                assert_eq!(
-                    hits_std.len(),
-                    hits_stream.len(),
-                    "Hit counts must match"
-                );
+                assert_eq!(hits_std.len(), hits_stream.len(), "Hit counts must match");
                 println!("Hit counts match: {}", hits_std.len());
             }
         }
