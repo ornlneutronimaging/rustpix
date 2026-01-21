@@ -2,7 +2,7 @@
 
 use numpy::PyArray1;
 use pyo3::prelude::*;
-use rustpix_algorithms::{GridConfig, GridState, SoAGridClustering};
+use rustpix_algorithms::{GridClustering, GridConfig, GridState};
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
 use rustpix_core::hit::GenericHit;
@@ -167,12 +167,15 @@ impl MeasurementStream {
         if n > 0 {
             match slf.algorithm.as_str() {
                 "grid" => {
-                    let algo = SoAGridClustering::new(GridConfig {
+                    let algo = GridClustering::new(GridConfig {
                         cell_size: 32,
                         radius: slf.clustering_config.radius,
                         temporal_window_ns: slf.clustering_config.temporal_window_ns,
                         min_cluster_size: slf.clustering_config.min_cluster_size,
-                        parallel: true,
+                        max_cluster_size: slf
+                            .clustering_config
+                            .max_cluster_size
+                            .map(|s| s as usize),
                     });
                     let mut state = GridState::default();
                     algo.cluster(&mut combined_batch, &mut state)

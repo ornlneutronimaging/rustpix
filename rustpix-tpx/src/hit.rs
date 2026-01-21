@@ -1,6 +1,5 @@
 //! TPX3-specific hit type.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 3.2 for detailed specification.
 
 use rustpix_core::hit::{ClusterableHit, Hit};
 

@@ -1,6 +1,5 @@
 //! Spatial indexing for efficient neighbor lookup.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 4 for detailed specification.
 
 /// Spatial grid for efficient 2D neighbor queries.
 ///

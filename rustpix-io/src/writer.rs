@@ -1,6 +1,5 @@
 //! File writers for processed data.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 5 for output format specification.
 
 use crate::Result;
 use rustpix_core::neutron::Neutron;

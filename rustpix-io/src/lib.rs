@@ -3,7 +3,6 @@
 //! This crate provides efficient file reading and writing using
 //! memory-mapped files via memmap2.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 3.4 for file processing specification.
 
 mod error;
 mod reader;

@@ -2,9 +2,12 @@
 //! This binary will provide a CLI for processing pixel detector data.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use rustpix_algorithms::HitClustering;
-use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
+
+use rustpix_algorithms::{
+    AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
+};
 use rustpix_core::extraction::NeutronExtraction;
+use rustpix_core::soa::HitBatch;
 use rustpix_io::Tpx3FileReader;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -39,8 +42,6 @@ enum Algorithm {
     Abs,
     /// DBSCAN clustering
     Dbscan,
-    /// Graph-based clustering (union-find)
-    Graph,
     /// Grid-based clustering with spatial indexing
     Grid,
 }
@@ -135,14 +136,6 @@ fn main() -> Result<()> {
             let start = Instant::now();
             let mut all_neutrons = Vec::new();
 
-            // Configure clustering
-            let config = rustpix_core::clustering::ClusteringConfig {
-                radius,
-                temporal_window_ns,
-                min_cluster_size,
-                max_cluster_size: None,
-            };
-
             // Configure extraction
             let extraction_config = rustpix_core::extraction::ExtractionConfig::default();
             let mut extractor = rustpix_core::extraction::SimpleCentroidExtraction::new();
@@ -160,33 +153,47 @@ fn main() -> Result<()> {
                     eprintln!("  {} hits read", hits.len());
                 }
 
-                let mut labels = vec![0; hits.len()];
+                // Convert to HitBatch for SoA clustering
+                let mut batch = HitBatch::with_capacity(hits.len());
+                for hit in &hits {
+                    batch.push(hit.x, hit.y, hit.tof, hit.tot, hit.timestamp, hit.chip_id);
+                }
 
                 // Perform clustering
                 let num_clusters = match algorithm {
                     Algorithm::Abs => {
-                        let mut algo = AbsClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        algo.cluster(&hits, &mut state, &mut labels)?
+                        let algo_config = rustpix_algorithms::AbsConfig {
+                            radius,
+                            neutron_correlation_window_ns: temporal_window_ns,
+                            min_cluster_size,
+                            scan_interval: 100,
+                        };
+                        let algo = AbsClustering::new(algo_config);
+                        let mut state = AbsState::default();
+                        algo.cluster(&mut batch, &mut state)?
                     }
                     Algorithm::Dbscan => {
-                        let mut algo = DbscanClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        algo.cluster(&hits, &mut state, &mut labels)?
-                    }
-                    Algorithm::Graph => {
-                        let mut algo = GraphClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        algo.cluster(&hits, &mut state, &mut labels)?
+                        let algo_config = rustpix_algorithms::DbscanConfig {
+                            epsilon: radius,
+                            temporal_window_ns,
+                            min_points: 2,
+                            min_cluster_size,
+                        };
+                        let algo = DbscanClustering::new(algo_config);
+                        let mut state = DbscanState::default();
+                        algo.cluster(&mut batch, &mut state)?
                     }
                     Algorithm::Grid => {
-                        let mut algo = GridClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        algo.cluster(&hits, &mut state, &mut labels)?
+                        let algo_config = rustpix_algorithms::GridConfig {
+                            radius,
+                            temporal_window_ns,
+                            min_cluster_size,
+                            cell_size: 32,
+                            max_cluster_size: None,
+                        };
+                        let algo = GridClustering::new(algo_config);
+                        let mut state = GridState::default();
+                        algo.cluster(&mut batch, &mut state)?
                     }
                 };
 
@@ -195,6 +202,8 @@ fn main() -> Result<()> {
                 }
 
                 // Perform extraction
+                // Need to extract labels from batch
+                let labels = batch.cluster_id.clone();
                 let neutrons = extractor.extract(&hits, &labels, num_clusters)?;
 
                 if verbose {
@@ -280,17 +289,8 @@ fn main() -> Result<()> {
             let algorithms = [
                 (Algorithm::Abs, "ABS"),
                 (Algorithm::Dbscan, "DBSCAN"),
-                (Algorithm::Graph, "Graph"),
                 (Algorithm::Grid, "Grid"),
             ];
-
-            // Default config for benchmarking
-            let config = rustpix_core::clustering::ClusteringConfig {
-                radius: 5.0,
-                temporal_window_ns: 75.0,
-                min_cluster_size: 1,
-                max_cluster_size: None,
-            };
 
             println!(
                 "{:<10} | {:<15} | {:<15} | {:<15}",
@@ -301,63 +301,102 @@ fn main() -> Result<()> {
             for (algo_enum, name) in algorithms {
                 let mut times = Vec::with_capacity(iterations);
 
+                // Config
+                // We construct config inside loop or here
+
                 // Warmup
-                let mut labels = vec![0; hits.len()];
-                match algo_enum {
-                    Algorithm::Abs => {
-                        let mut algo = AbsClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        let _ = algo.cluster(&hits, &mut state, &mut labels);
+                {
+                    let mut batch = HitBatch::with_capacity(hits.len());
+                    for hit in &hits {
+                        batch.push(hit.x, hit.y, hit.tof, hit.tot, hit.timestamp, hit.chip_id);
                     }
-                    Algorithm::Dbscan => {
-                        let mut algo = DbscanClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        let _ = algo.cluster(&hits, &mut state, &mut labels);
-                    }
-                    Algorithm::Graph => {
-                        let mut algo = GraphClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        let _ = algo.cluster(&hits, &mut state, &mut labels);
-                    }
-                    Algorithm::Grid => {
-                        let mut algo = GridClustering::default();
-                        algo.configure(&config);
-                        let mut state = algo.create_state();
-                        let _ = algo.cluster(&hits, &mut state, &mut labels);
+                    match algo_enum {
+                        Algorithm::Abs => {
+                            let algo_config = rustpix_algorithms::AbsConfig {
+                                radius: 5.0,
+                                neutron_correlation_window_ns: 75.0,
+                                min_cluster_size: 1,
+                                scan_interval: 100,
+                            };
+                            let algo = AbsClustering::new(algo_config);
+                            let mut state = AbsState::default();
+                            let _ = algo.cluster(&mut batch, &mut state);
+                        }
+                        Algorithm::Dbscan => {
+                            let algo_config = rustpix_algorithms::DbscanConfig {
+                                epsilon: 5.0,
+                                temporal_window_ns: 75.0,
+                                min_points: 2,
+                                min_cluster_size: 1,
+                            };
+                            let algo = DbscanClustering::new(algo_config);
+                            let mut state = DbscanState::default();
+                            let _ = algo.cluster(&mut batch, &mut state);
+                        }
+                        Algorithm::Grid => {
+                            let algo_config = rustpix_algorithms::GridConfig {
+                                radius: 5.0,
+                                temporal_window_ns: 75.0,
+                                min_cluster_size: 1,
+                                cell_size: 32,
+                                max_cluster_size: None,
+                            };
+                            let algo = GridClustering::new(algo_config);
+                            let mut state = GridState::default();
+                            let _ = algo.cluster(&mut batch, &mut state);
+                        }
                     }
                 }
 
                 for _ in 0..iterations {
-                    let mut labels = vec![0; hits.len()];
+                    // Re-create batch for each iteration to be fair?
+                    // Or just assume batch population part of overhead?
+                    // Old benchmark included `create_state`.
+                    // We should include batch creation OR exclude it?
+                    // The requirement compares "0.14s" which likely includes batch work.
+                    // But strictly speaking clustering time is what we want.
+                    // I will include batch creation to mimic real pipeline.
                     let start = Instant::now();
+
+                    let mut batch = HitBatch::with_capacity(hits.len());
+                    for hit in &hits {
+                        batch.push(hit.x, hit.y, hit.tof, hit.tot, hit.timestamp, hit.chip_id);
+                    }
 
                     match algo_enum {
                         Algorithm::Abs => {
-                            let mut algo = AbsClustering::default();
-                            algo.configure(&config);
-                            let mut state = algo.create_state();
-                            let _ = algo.cluster(&hits, &mut state, &mut labels)?;
+                            let algo_config = rustpix_algorithms::AbsConfig {
+                                radius: 5.0,
+                                neutron_correlation_window_ns: 75.0,
+                                min_cluster_size: 1,
+                                scan_interval: 100,
+                            };
+                            let algo = AbsClustering::new(algo_config);
+                            let mut state = AbsState::default();
+                            let _ = algo.cluster(&mut batch, &mut state)?;
                         }
                         Algorithm::Dbscan => {
-                            let mut algo = DbscanClustering::default();
-                            algo.configure(&config);
-                            let mut state = algo.create_state();
-                            let _ = algo.cluster(&hits, &mut state, &mut labels)?;
-                        }
-                        Algorithm::Graph => {
-                            let mut algo = GraphClustering::default();
-                            algo.configure(&config);
-                            let mut state = algo.create_state();
-                            let _ = algo.cluster(&hits, &mut state, &mut labels)?;
+                            let algo_config = rustpix_algorithms::DbscanConfig {
+                                epsilon: 5.0,
+                                temporal_window_ns: 75.0,
+                                min_points: 2,
+                                min_cluster_size: 1,
+                            };
+                            let algo = DbscanClustering::new(algo_config);
+                            let mut state = DbscanState::default();
+                            let _ = algo.cluster(&mut batch, &mut state)?;
                         }
                         Algorithm::Grid => {
-                            let mut algo = GridClustering::default();
-                            algo.configure(&config);
-                            let mut state = algo.create_state();
-                            let _ = algo.cluster(&hits, &mut state, &mut labels)?;
+                            let algo_config = rustpix_algorithms::GridConfig {
+                                radius: 5.0,
+                                temporal_window_ns: 75.0,
+                                min_cluster_size: 1,
+                                cell_size: 32,
+                                max_cluster_size: None,
+                            };
+                            let algo = GridClustering::new(algo_config);
+                            let mut state = GridState::default();
+                            let _ = algo.cluster(&mut batch, &mut state)?;
                         }
                     }
 

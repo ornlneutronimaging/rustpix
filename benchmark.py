@@ -30,7 +30,7 @@ def benchmark():
     # 1M hits
     hits_1m = generate_large_data(1_000_000)
     
-    algorithms = ["grid", "abs", "dbscan", "graph"]
+    algorithms = ["grid", "abs", "dbscan"]
     
     print("\nBenchmarking 1M hits:")
     print("-" * 40)

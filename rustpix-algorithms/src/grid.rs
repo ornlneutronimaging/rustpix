@@ -1,248 +1,131 @@
-//! Grid-based clustering algorithm.
+//! SoA-based Grid Clustering.
 //!
-//! Uses spatial indexing to efficiently cluster hits by dividing
-//! the detector into grid cells.
-//! See IMPLEMENTATION_PLAN.md Part 4.4 for detailed specification.
+//! Adapted from generic GridClustering to work directly on HitBatch (SoA).
 
 use crate::SpatialGrid;
-use rustpix_core::clustering::{
-    ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
-};
-use rustpix_core::hit::Hit;
+use rustpix_core::clustering::ClusteringError;
+use rustpix_core::soa::HitBatch;
 
-/// Grid clustering configuration.
 #[derive(Clone, Debug)]
 pub struct GridConfig {
-    /// Cell size for the grid (pixels).
-    pub cell_size: usize,
-    /// Spatial radius for neighbor queries (pixels).
     pub radius: f64,
-    /// Temporal correlation window (nanoseconds).
     pub temporal_window_ns: f64,
-    /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
-    /// Whether to use parallel processing.
-    pub parallel: bool,
+    pub max_cluster_size: Option<usize>,
+    pub cell_size: usize,
 }
 
 impl Default for GridConfig {
     fn default() -> Self {
         Self {
-            cell_size: 32,
             radius: 5.0,
             temporal_window_ns: 75.0,
             min_cluster_size: 1,
-            parallel: true,
+            max_cluster_size: None,
+            cell_size: 32,
         }
     }
 }
 
-/// Grid clustering state.
 #[derive(Default)]
 pub struct GridState {
     pub hits_processed: usize,
     pub clusters_found: usize,
 }
 
-impl ClusteringState for GridState {
-    fn reset(&mut self) {
-        self.hits_processed = 0;
-        self.clusters_found = 0;
-    }
-}
-
-/// Grid-based clustering with spatial indexing.
+/// SoA-optimized Grid Clustering.
 pub struct GridClustering {
     config: GridConfig,
-    generic_config: ClusteringConfig,
 }
 
 impl GridClustering {
     /// Create with custom configuration.
     pub fn new(config: GridConfig) -> Self {
-        let generic_config = ClusteringConfig {
-            radius: config.radius,
-            temporal_window_ns: config.temporal_window_ns,
-            min_cluster_size: config.min_cluster_size,
-            max_cluster_size: None,
-        };
-        Self {
-            config,
-            generic_config,
-        }
+        Self { config }
     }
 
-    /// Set whether to use parallel processing.
-    pub fn with_parallel(mut self, parallel: bool) -> Self {
-        self.config.parallel = parallel;
-        self
-    }
-
-    /// Get cell size.
-    pub fn cell_size(&self) -> usize {
-        self.config.cell_size
-    }
-}
-
-impl Default for GridClustering {
-    fn default() -> Self {
-        Self::new(GridConfig::default())
-    }
-}
-
-impl HitClustering for GridClustering {
-    type State = GridState;
-
-    fn name(&self) -> &'static str {
-        "Grid"
-    }
-
-    fn create_state(&self) -> Self::State {
-        GridState::default()
-    }
-
-    fn configure(&mut self, config: &ClusteringConfig) {
-        self.config.radius = config.radius;
-        self.config.temporal_window_ns = config.temporal_window_ns;
-        self.generic_config = config.clone();
-    }
-
-    fn config(&self) -> &ClusteringConfig {
-        &self.generic_config
-    }
-
-    fn cluster<H: Hit>(
+    /// Cluster a batch of hits in-place.
+    ///
+    /// Updates `cluster_id` field in `batch`.
+    pub fn cluster(
         &self,
-        hits: &[H],
-        state: &mut Self::State,
-        labels: &mut [i32],
+        batch: &mut HitBatch,
+        state: &mut GridState,
     ) -> Result<usize, ClusteringError> {
-        if hits.is_empty() {
+        if batch.is_empty() {
             return Ok(0);
         }
 
-        let n = hits.len();
+        let n = batch.len();
 
         // Reset state
         state.hits_processed = 0;
         state.clusters_found = 0;
 
-        // Initialize labels
-        labels.iter_mut().for_each(|l| *l = -1);
+        // Initialize labels to -1
+        batch.cluster_id.fill(-1);
 
         // Build spatial index
         let mut max_x = 0;
         let mut max_y = 0;
-        for hit in hits {
-            let x = hit.x();
-            let y = hit.y();
-            if x > max_x {
-                max_x = x;
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            if (x as usize) > max_x {
+                max_x = x as usize;
             }
-            if y > max_y {
-                max_y = y;
+            if (y as usize) > max_y {
+                max_y = y as usize;
             }
         }
 
-        let mut grid: SpatialGrid<usize> = SpatialGrid::new(
-            self.config.cell_size,
-            (max_x as usize) + 32,
-            (max_y as usize) + 32,
-        );
+        // Using dynamic grid size
+        let mut grid: SpatialGrid<usize> =
+            SpatialGrid::new(self.config.cell_size, max_x + 32, max_y + 32);
 
-        for (i, hit) in hits.iter().enumerate() {
-            grid.insert(hit.x() as i32, hit.y() as i32, i);
+        for i in 0..n {
+            grid.insert(batch.x[i] as i32, batch.y[i] as i32, i);
         }
 
         // Union-Find structure
         let mut parent: Vec<usize> = (0..n).collect();
         let mut rank: Vec<usize> = vec![0; n];
 
-        // We can't easily parallelize the Union-Find operations directly.
-        // Strategy:
-        // 1. Find all edges (pairs of connected hits) in parallel.
-        // 2. Perform union operations sequentially.
-
-        use rayon::prelude::*;
-
         let radius_sq = self.config.radius * self.config.radius;
         let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
-
         let cell_size = self.config.cell_size as i32;
 
-        let find_edges_in_cell =
-            |i: usize, hit: &H, cell: &[usize], edges: &mut Vec<(usize, usize)>| {
-                // Find start index: first element > i
-                // Since hits are sorted by TOF and processed in order, indices in cell are sorted.
-                let start = cell.partition_point(|&idx| idx <= i);
+        // Helper to check distance using SoA vectors
+        let check_connection = |i: usize, j: usize| -> bool {
+            let dx = batch.x[i] as f64 - batch.x[j] as f64;
+            let dy = batch.y[i] as f64 - batch.y[j] as f64;
+            let dist_sq = dx * dx + dy * dy;
 
-                // Find end index: first element where tof > limit
-                let limit_tof = hit.tof().saturating_add(window_tof);
-                // We only search in the slice starting from `start`
-                let end_rel = cell[start..].partition_point(|&idx| hits[idx].tof() <= limit_tof);
-                let end = start + end_rel;
-
-                for &neighbor_idx in &cell[start..end] {
-                    let neighbor = &hits[neighbor_idx];
-                    if hit.distance_squared(neighbor) <= radius_sq {
-                        edges.push((i, neighbor_idx));
-                    }
-                }
-            };
-
-        let edges: Vec<(usize, usize)> = if self.config.parallel {
-            hits.par_iter()
-                .enumerate()
-                .map_init(
-                    || Vec::with_capacity(16),
-                    |local_edges, (i, hit)| {
-                        local_edges.clear();
-                        let x = hit.x() as i32;
-                        let y = hit.y() as i32;
-
-                        for dy in -1..=1 {
-                            for dx in -1..=1 {
-                                let px = x + dx * cell_size;
-                                let py = y + dy * cell_size;
-                                if let Some(cell) = grid.get_cell_slice(px, py) {
-                                    find_edges_in_cell(i, hit, cell, local_edges);
-                                }
-                            }
-                        }
-                        local_edges.clone()
-                    },
-                )
-                .flatten()
-                .collect()
-        } else {
-            // Sequential fallback
-            let mut edge_list = Vec::new();
-            for (i, hit) in hits.iter().enumerate() {
-                let x = hit.x() as i32;
-                let y = hit.y() as i32;
-
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        let px = x + dx * cell_size;
-                        let py = y + dy * cell_size;
-                        if let Some(cell) = grid.get_cell_slice(px, py) {
-                            find_edges_in_cell(i, hit, cell, &mut edge_list);
-                        }
-                    }
-                }
+            if dist_sq > radius_sq {
+                return false;
             }
-            edge_list
+
+            let dt = batch.tof[i].abs_diff(batch.tof[j]);
+
+            dt <= window_tof
         };
 
-        let find = |parent: &mut Vec<usize>, mut i: usize| -> usize {
-            while i != parent[i] {
-                parent[i] = parent[parent[i]];
-                i = parent[i];
+        // Union-Find Operations
+        fn find(parent: &mut [usize], i: usize) -> usize {
+            let mut root = i;
+            while root != parent[root] {
+                root = parent[root];
             }
-            i
-        };
+            let mut curr = i;
+            while curr != root {
+                let next = parent[curr];
+                parent[curr] = root;
+                curr = next;
+            }
+            root
+        }
 
-        let union = |parent: &mut Vec<usize>, rank: &mut Vec<usize>, i: usize, j: usize| {
+        fn union_sets(parent: &mut [usize], rank: &mut [usize], i: usize, j: usize) {
             let root_i = find(parent, i);
             let root_j = find(parent, j);
             if root_i != root_j {
@@ -255,11 +138,33 @@ impl HitClustering for GridClustering {
                     }
                 }
             }
-        };
+        }
 
-        // Process edges
-        for (u, v) in edges {
-            union(&mut parent, &mut rank, u, v);
+        // Direct Sequential Clustering (Memory Efficient)
+        // We iterate hits and merge with neighbors immediately.
+        // This avoids allocating a massive edge list (which causes OOM/Swap on large data).
+        for i in 0..n {
+            let x = batch.x[i] as i32;
+            let y = batch.y[i] as i32;
+
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let px = x + dx * cell_size;
+                    let py = y + dy * cell_size;
+
+                    if let Some(cell) = grid.get_cell_slice(px, py) {
+                        // Only check neighbors with index > i (to avoid double checking and self-loop)
+                        // Assuming cell indices are sorted because we inserted them in order 0..n
+                        let start = cell.partition_point(|&idx| idx <= i);
+
+                        for &j in &cell[start..] {
+                            if check_connection(i, j) {
+                                union_sets(&mut parent, &mut rank, i, j);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Count cluster sizes
@@ -273,19 +178,19 @@ impl HitClustering for GridClustering {
         let mut root_to_label = std::collections::HashMap::new();
         let mut next_label = 0;
 
-        for (i, label) in labels.iter_mut().enumerate() {
+        for i in 0..n {
             let root = find(&mut parent, i);
             let size = *cluster_sizes.get(&root).unwrap_or(&0);
 
             if size < self.config.min_cluster_size as usize {
-                *label = -1; // Noise
+                batch.cluster_id[i] = -1;
             } else {
                 let label_id = *root_to_label.entry(root).or_insert_with(|| {
                     let l = next_label;
                     next_label += 1;
                     l
                 });
-                *label = label_id;
+                batch.cluster_id[i] = label_id;
             }
         }
 
@@ -294,88 +199,41 @@ impl HitClustering for GridClustering {
 
         Ok(state.clusters_found)
     }
+}
 
-    fn statistics(&self, state: &Self::State) -> ClusteringStatistics {
-        ClusteringStatistics {
-            hits_processed: state.hits_processed,
-            clusters_found: state.clusters_found,
-            ..Default::default()
-        }
+impl Default for GridClustering {
+    fn default() -> Self {
+        Self::new(GridConfig::default())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustpix_core::soa::HitBatch;
 
     #[test]
-    fn test_grid_config_defaults() {
-        let config = GridConfig::default();
-        assert_eq!(config.cell_size, 32);
-        assert_eq!(config.radius, 5.0);
-        assert!(config.parallel);
-    }
+    fn test_soa_clustering() {
+        let mut batch = HitBatch::default();
+        // Cluster 1
+        batch.push(10, 10, 100, 5, 0, 0);
+        batch.push(11, 11, 102, 5, 0, 0); // Close in space and time
 
-    #[test]
-    fn test_grid_state_reset() {
-        let mut state = GridState {
-            hits_processed: 100,
-            clusters_found: 10,
-        };
-        state.reset();
-        assert_eq!(state.hits_processed, 0);
-        assert_eq!(state.clusters_found, 0);
-    }
+        // Cluster 2
+        batch.push(50, 50, 100, 5, 0, 0); // Far in space
 
-    #[test]
-    fn test_grid_with_parallel() {
-        let algo = GridClustering::default().with_parallel(false);
-        assert!(!algo.config.parallel);
-    }
+        // Noise
+        batch.push(100, 100, 10000, 5, 0, 0); // Far in time
 
-    #[test]
-    fn test_grid_clustering_basic() {
-        use rustpix_core::hit::GenericHit;
+        let algo = GridClustering::default();
+        let mut state = GridState::default();
 
-        let clustering = GridClustering::default();
-        let mut state = clustering.create_state();
+        let count = algo.cluster(&mut batch, &mut state).unwrap();
 
-        // Create two clusters of hits
-        let hits = vec![
-            // Cluster 1: (10, 10)
-            GenericHit {
-                x: 10,
-                y: 10,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 11,
-                y: 11,
-                tof: 100,
-                ..Default::default()
-            },
-            // Cluster 2: (50, 50)
-            GenericHit {
-                x: 50,
-                y: 50,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 51,
-                y: 51,
-                tof: 100,
-                ..Default::default()
-            },
-        ];
+        assert_eq!(count, 3); // 1, 2, and 3 (noise is usually single-hit cluster if min_size=1)
+                              // With default min_cluster_size=1, noise is a cluster.
 
-        let mut labels = vec![0; hits.len()];
-        let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
-
-        assert_eq!(count, 2);
-        assert_eq!(labels[0], labels[1]);
-        assert_eq!(labels[2], labels[3]);
-        assert_ne!(labels[0], labels[2]);
+        assert_eq!(batch.cluster_id[0], batch.cluster_id[1]);
+        assert_ne!(batch.cluster_id[0], batch.cluster_id[2]);
     }
 }

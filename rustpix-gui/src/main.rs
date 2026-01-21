@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 // Logic Imports
 use rustpix_algorithms::{
-    GridConfig as SoAGridConfig, GridState as SoAGridState, SoAAbsClustering, SoAAbsConfig,
-    SoAAbsState, SoADbscanClustering, SoADbscanConfig, SoAGridClustering,
+    AbsClustering, AbsConfig, AbsState, DbscanClustering, DbscanConfig, DbscanState,
+    GridClustering, GridConfig, GridState,
 };
 
 use rustpix_core::neutron::Neutron;
@@ -384,37 +384,38 @@ impl RustpixApp {
 
                 let num_clusters = match algo_type {
                     AlgorithmType::Grid => {
-                        let cfg = SoAGridConfig {
+                        let cfg = GridConfig {
                             cell_size: 32,
                             radius,
                             temporal_window_ns: window,
                             min_cluster_size: min_size,
-                            parallel: true,
+                            max_cluster_size: None,
                         };
-                        let algo = SoAGridClustering::new(cfg);
-                        let mut state = SoAGridState::default();
+                        let algo = GridClustering::new(cfg);
+                        let mut state = GridState::default();
                         algo.cluster(&mut working_batch, &mut state)
                     }
                     AlgorithmType::Abs => {
-                        let cfg = SoAAbsConfig {
+                        let cfg = AbsConfig {
                             radius,
                             neutron_correlation_window_ns: window,
                             min_cluster_size: min_size,
                             scan_interval: 100,
                         };
-                        let algo = SoAAbsClustering::new(cfg);
-                        let mut state = SoAAbsState::default();
+                        let algo = AbsClustering::new(cfg);
+                        let mut state = AbsState::default();
                         algo.cluster(&mut working_batch, &mut state)
                     }
                     AlgorithmType::Dbscan => {
-                        let cfg = SoADbscanConfig {
+                        let cfg = DbscanConfig {
                             epsilon: radius,
                             temporal_window_ns: window,
                             min_points,
                             min_cluster_size: min_size,
                         };
-                        let algo = SoADbscanClustering::new(cfg);
-                        algo.cluster(&mut working_batch)
+                        let algo = DbscanClustering::new(cfg);
+                        let mut state = DbscanState::default();
+                        algo.cluster(&mut working_batch, &mut state)
                     }
                 };
 

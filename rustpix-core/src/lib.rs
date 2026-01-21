@@ -3,7 +3,6 @@
 //! This crate provides the foundational abstractions for hit detection,
 //! neutron processing, clustering, and centroid extraction.
 //!
-//! See IMPLEMENTATION_PLAN.md for detailed architecture documentation.
 
 pub mod clustering;
 pub mod error;
@@ -12,7 +11,7 @@ pub mod hit;
 pub mod neutron;
 pub mod soa;
 
-pub use clustering::{ClusteringConfig, ClusteringState, ClusteringStatistics, HitClustering};
+pub use clustering::{ClusteringConfig, ClusteringStatistics};
 pub use error::{ClusteringError, Error, ExtractionError, IoError, ProcessingError, Result};
 pub use extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
 pub use hit::{ClusterableHit, GenericHit, Hit};

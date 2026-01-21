@@ -1,6 +1,5 @@
 //! TPX3 packet parsing.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 3.1 for detailed specification.
 
 /// TPX3 packet wrapper providing efficient field extraction.
 ///
@@ -103,7 +102,6 @@ impl Tpx3Packet {
 
     /// Decode pixel address to local (x, y) coordinates.
     ///
-    /// Decoding formula (see IMPLEMENTATION_PLAN.md Appendix A):
     /// - dcol = (addr >> 8) & 0xFE
     /// - spix = (addr >> 1) & 0xFC
     /// - pix = addr & 0x7

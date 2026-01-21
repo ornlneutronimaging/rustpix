@@ -1,6 +1,5 @@
 //! Memory-mapped file readers.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 3.4 for detailed specification.
 
 use crate::{Error, Result};
 use memmap2::Mmap;

@@ -1,10 +1,8 @@
 //! Clustering algorithm traits and configuration.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 2.3 for detailed specification.
 
 // Re-export ClusteringError for convenience
 pub use crate::error::ClusteringError;
-use crate::hit::Hit;
 
 /// Configuration for clustering algorithms.
 ///
@@ -70,15 +68,6 @@ impl ClusteringConfig {
     }
 }
 
-/// Base trait for clustering algorithm state.
-///
-/// State is separated from algorithm to enable thread-safe parallel processing.
-/// Each thread gets its own state instance.
-pub trait ClusteringState: Send {
-    /// Reset state for reuse.
-    fn reset(&mut self);
-}
-
 /// Statistics from a clustering operation.
 #[derive(Clone, Debug, Default)]
 pub struct ClusteringStatistics {
@@ -88,56 +77,6 @@ pub struct ClusteringStatistics {
     pub largest_cluster_size: usize,
     pub mean_cluster_size: f64,
     pub processing_time_us: u64,
-}
-
-/// Main trait for hit clustering algorithms.
-///
-/// Design principles (see IMPLEMENTATION_PLAN.md Part 2.3):
-/// - **Stateless methods**: All mutable state passed via `ClusteringState`
-/// - **Generic over hit type**: Works with any `Hit` implementation
-/// - **Thread-safe**: Can be used from multiple threads with separate states
-///
-/// # Example
-/// ```ignore
-/// let clustering = AbsClustering::new(AbsConfig::default());
-/// let mut state = clustering.create_state();
-/// let mut labels = vec![-1i32; hits.len()];
-/// let num_clusters = clustering.cluster(&hits, &mut state, &mut labels)?;
-/// ```
-pub trait HitClustering: Send + Sync {
-    /// The state type used by this algorithm.
-    type State: ClusteringState;
-
-    /// Algorithm name for logging/debugging.
-    fn name(&self) -> &'static str;
-
-    /// Create a new state instance for this algorithm.
-    fn create_state(&self) -> Self::State;
-
-    /// Configure the algorithm.
-    fn configure(&mut self, config: &ClusteringConfig);
-
-    /// Get current configuration.
-    fn config(&self) -> &ClusteringConfig;
-
-    /// Cluster a batch of hits.
-    ///
-    /// # Arguments
-    /// * `hits` - Slice of hits to cluster (should be sorted by TOF)
-    /// * `state` - Mutable algorithm state
-    /// * `labels` - Output cluster labels (-1 = noise/unclustered)
-    ///
-    /// # Returns
-    /// Number of clusters found.
-    fn cluster<H: Hit>(
-        &self,
-        hits: &[H],
-        state: &mut Self::State,
-        labels: &mut [i32],
-    ) -> Result<usize, ClusteringError>;
-
-    /// Get statistics from the last clustering operation.
-    fn statistics(&self, state: &Self::State) -> ClusteringStatistics;
 }
 
 #[cfg(test)]

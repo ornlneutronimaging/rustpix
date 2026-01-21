@@ -3,7 +3,6 @@
 //! This crate provides TPX3-specific data structures and parsing logic
 //! for Timepix3 pixel detector data.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 3 for detailed specification.
 //!
 //! # Key Components
 //!
@@ -16,7 +15,6 @@
 //! 1. **Phase 1 (Sequential)**: Discover sections, propagate TDC state
 //! 2. **Phase 2 (Parallel)**: Process sections into hits
 //!
-//! See IMPLEMENTATION_PLAN.md Part 3.3-3.4 for algorithm details.
 
 mod hit;
 mod packet;

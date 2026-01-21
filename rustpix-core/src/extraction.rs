@@ -1,6 +1,5 @@
 //! Neutron extraction traits and configuration.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 2.4 for detailed specification.
 
 use crate::error::ExtractionError;
 use crate::hit::Hit;
@@ -84,7 +83,6 @@ pub trait NeutronExtraction: Send + Sync {
 
 /// Simple centroid extraction using TOT-weighted averages.
 ///
-/// Algorithm (see IMPLEMENTATION_PLAN.md Part 4 - Neutron Extraction):
 /// 1. Single hit: Return as-is with super-resolution scaling
 /// 2. Multi-hit: Compute TOT-weighted centroid
 /// 3. Representative TOF: Use TOF from hit with highest TOT

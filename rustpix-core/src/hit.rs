@@ -1,6 +1,5 @@
 //! Hit traits and types for pixel detector data.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 2.1 for detailed specification.
 
 /// Core trait for all detector hit types.
 ///
@@ -69,7 +68,6 @@ pub trait ClusterableHit: Hit {
 /// Generic hit type for detector-agnostic code.
 ///
 /// Memory layout optimized for cache efficiency.
-/// See IMPLEMENTATION_PLAN.md Part 2.1 for details.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[repr(C)]
 pub struct GenericHit {

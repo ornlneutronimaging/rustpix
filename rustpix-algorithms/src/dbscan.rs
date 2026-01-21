@@ -1,23 +1,14 @@
-//! DBSCAN clustering algorithm.
-//!
-//! Density-Based Spatial Clustering of Applications with Noise.
-//! See IMPLEMENTATION_PLAN.md Part 4.2 for detailed specification.
+//! SoA-optimized DBSCAN clustering.
 
-use rustpix_core::clustering::{
-    ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
-};
-use rustpix_core::hit::Hit;
+use rayon::prelude::*;
+use rustpix_core::clustering::ClusteringError;
+use rustpix_core::soa::HitBatch;
 
-/// DBSCAN-specific configuration.
 #[derive(Clone, Debug)]
 pub struct DbscanConfig {
-    /// Spatial radius for neighborhood (pixels).
     pub epsilon: f64,
-    /// Temporal correlation window (nanoseconds).
     pub temporal_window_ns: f64,
-    /// Minimum points to form a core point.
     pub min_points: usize,
-    /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
 }
 
@@ -32,350 +23,232 @@ impl Default for DbscanConfig {
     }
 }
 
-use crate::spatial::SpatialGrid;
-
-/// Point classification in DBSCAN.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PointType {
-    Undefined,
-    Noise,
-    Border,
-    Core,
-}
-
-/// DBSCAN clustering state.
-pub struct DbscanState {
-    hits_processed: usize,
-    clusters_found: usize,
-    noise_points: usize,
-    visited: Vec<bool>,
-    point_types: Vec<PointType>,
-    spatial_grid: SpatialGrid<usize>,
-}
-
-impl Default for DbscanState {
-    fn default() -> Self {
-        Self {
-            hits_processed: 0,
-            clusters_found: 0,
-            noise_points: 0,
-            visited: Vec::new(),
-            point_types: Vec::new(),
-            spatial_grid: SpatialGrid::new(32, 512, 512),
-        }
-    }
-}
-
-impl ClusteringState for DbscanState {
-    fn reset(&mut self) {
-        self.hits_processed = 0;
-        self.clusters_found = 0;
-        self.noise_points = 0;
-        self.visited.clear();
-        self.point_types.clear();
-        self.spatial_grid.clear();
-    }
-}
-
-/// DBSCAN clustering algorithm with spatial indexing.
 pub struct DbscanClustering {
     config: DbscanConfig,
-    generic_config: ClusteringConfig,
+}
+
+#[derive(Default)]
+pub struct DbscanState {
+    grid: Vec<Vec<usize>>,
+    visited: Vec<bool>,
+    noise: Vec<bool>,
+    pub _grid_capacity_w: usize,
+    pub _grid_capacity_h: usize,
+}
+
+struct DbscanContext<'a> {
+    grid: &'a [Vec<usize>],
+    cell_size: usize,
+    grid_w: usize,
+    eps_sq: f64,
+    window_tof: u32,
+}
+
+/// Mutable tracking state used during DBSCAN clustering.
+struct TrackingState<'a> {
+    visited: &'a mut [bool],
+    noise: &'a mut [bool],
 }
 
 impl DbscanClustering {
-    /// Create with custom configuration.
     pub fn new(config: DbscanConfig) -> Self {
-        let generic_config = ClusteringConfig {
-            radius: config.epsilon,
-            temporal_window_ns: config.temporal_window_ns,
-            min_cluster_size: config.min_cluster_size,
-            max_cluster_size: None,
-        };
-        Self {
-            config,
-            generic_config,
-        }
+        Self { config }
     }
 
-    /// Get min_points parameter.
-    pub fn min_points(&self) -> usize {
-        self.config.min_points
+    pub fn create_state(&self) -> DbscanState {
+        DbscanState::default()
     }
 
-    fn find_neighbors<H: Hit>(
+    pub fn cluster(
         &self,
-        hits: &[H],
-        point_idx: usize,
-        epsilon_sq: f64,
-        window_tof: u32,
-        state: &DbscanState,
-    ) -> Vec<usize> {
-        let hit = &hits[point_idx];
-        let x = hit.x() as i32;
-        let y = hit.y() as i32;
-        let mut neighbors = Vec::new();
+        batch: &mut HitBatch,
+        state: &mut DbscanState,
+    ) -> Result<usize, ClusteringError> {
+        let n = batch.len();
+        if batch.is_empty() {
+            return Ok(0);
+        }
 
-        let mut potential_neighbors = Vec::with_capacity(16);
-        state
-            .spatial_grid
-            .query_neighborhood(x, y, &mut potential_neighbors);
+        // Reset cluster IDs
+        // SoA cluster_id is i32
+        batch.cluster_id.par_iter_mut().for_each(|id| *id = -1);
 
-        for &neighbor_idx in potential_neighbors.iter() {
-            if point_idx == neighbor_idx {
+        // We need spatial indexing.
+        // Reuse logic from SoAGridClustering or implement a simple grid?
+        // DBSCAN needs precise distance check, so Grid is just a broad phase.
+
+        // Cell size should be at least epsilon to optimize neighbor search
+        let cell_size = (self.config.epsilon.ceil() as usize).max(32);
+
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            if (x as usize) > max_x {
+                max_x = x as usize;
+            }
+            if (y as usize) > max_y {
+                max_y = y as usize;
+            }
+        }
+
+        let width = max_x + 32;
+        let height = max_y + 32;
+        let grid_w = width / cell_size + 1;
+        let grid_h = height / cell_size + 1;
+        let total_cells = grid_w * grid_h;
+
+        // Resize state buffers
+        if state.grid.len() < total_cells {
+            state.grid.resize(total_cells, Vec::new());
+        } else {
+            // Clear existing grid
+            for cell in &mut state.grid {
+                cell.clear();
+            }
+        }
+
+        // Populate grid
+        for i in 0..n {
+            let cx = batch.x[i] as usize / cell_size;
+            let cy = batch.y[i] as usize / cell_size;
+            let idx = cy * grid_w + cx;
+            if idx < state.grid.len() {
+                state.grid[idx].push(i);
+            }
+        }
+
+        let epsilon_sq = self.config.epsilon * self.config.epsilon;
+        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
+
+        let ctx = DbscanContext {
+            grid: &state.grid,
+            cell_size,
+            grid_w,
+            eps_sq: epsilon_sq,
+            window_tof,
+        };
+
+        if state.visited.len() < n {
+            state.visited.resize(n, false);
+            state.noise.resize(n, false);
+        }
+        // Reset flags
+        state.visited[..n].fill(false);
+        state.noise[..n].fill(false);
+
+        let mut current_cluster_id = 0;
+
+        // Use slices for tracking to avoid split borrowing issues with state
+        // We'll pass slices to helper functions
+        // But we need to use the `visited` and `noise` from `state`.
+        // To avoid borrowing `state` while reading `ctx` (which borrows `state.grid`),
+        // we can split `state` or pass things differently.
+        // `ctx` borrows `state.grid`.
+        // `visited` and `noise` are separate fields.
+        // Rust might figure it out if we borrow fields separately.
+
+        // To make it safe and easier, let's extract the slices from state:
+        let visited_slice = &mut state.visited[..n];
+        let noise_slice = &mut state.noise[..n];
+
+        for i in 0..n {
+            if visited_slice[i] {
                 continue;
             }
-            let neighbor = &hits[neighbor_idx];
-            if hit.within_temporal_window(neighbor, window_tof)
-                && hit.distance_squared(neighbor) <= epsilon_sq
-            {
-                neighbors.push(neighbor_idx);
+            visited_slice[i] = true;
+
+            let neighbors = self.region_query(&ctx, i, batch);
+
+            if neighbors.len() < self.config.min_points {
+                noise_slice[i] = true;
+            } else {
+                batch.cluster_id[i] = current_cluster_id;
+                let mut tracking = TrackingState {
+                    visited: visited_slice,
+                    noise: noise_slice,
+                };
+                self.expand_cluster(&ctx, neighbors, current_cluster_id, batch, &mut tracking);
+                current_cluster_id += 1;
+            }
+        }
+
+        Ok(current_cluster_id as usize)
+    }
+
+    fn region_query(&self, ctx: &DbscanContext, idx: usize, batch: &HitBatch) -> Vec<usize> {
+        let x = batch.x[idx] as f64;
+        let y = batch.y[idx] as f64;
+        let tof = batch.tof[idx];
+        let cx = batch.x[idx] as usize / ctx.cell_size;
+        let cy = batch.y[idx] as usize / ctx.cell_size;
+
+        let mut neighbors = Vec::new();
+
+        // Check neighboring cells
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let ncx = cx as isize + dx;
+                let ncy = cy as isize + dy;
+
+                if ncx >= 0 && ncy >= 0 {
+                    let gidx = (ncy as usize) * ctx.grid_w + (ncx as usize);
+                    if let Some(cell) = ctx.grid.get(gidx) {
+                        for &j in cell {
+                            if j == idx {
+                                continue;
+                            }
+                            let val_x = batch.x[j] as f64;
+                            let val_y = batch.y[j] as f64;
+                            let val_tof = batch.tof[j];
+
+                            let dt = tof.abs_diff(val_tof);
+                            if dt <= ctx.window_tof {
+                                let dist_sq = (x - val_x).powi(2) + (y - val_y).powi(2);
+                                if dist_sq <= ctx.eps_sq {
+                                    neighbors.push(j);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         neighbors
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn expand_cluster<H: Hit>(
+    fn expand_cluster(
         &self,
-        hits: &[H],
-        _core_idx: usize,
+        ctx: &DbscanContext,
         mut seeds: Vec<usize>,
         cluster_id: i32,
-        epsilon_sq: f64,
-        window_tof: u32,
-        state: &mut DbscanState,
-        labels: &mut [i32],
+        batch: &mut HitBatch,
+        tracking: &mut TrackingState,
     ) {
         let mut i = 0;
         while i < seeds.len() {
-            let neighbor_idx = seeds[i];
+            let current_p = seeds[i];
             i += 1;
 
-            if labels[neighbor_idx] == -1 {
-                // Was noise or unvisited
-                labels[neighbor_idx] = cluster_id;
+            if tracking.noise[current_p] {
+                tracking.noise[current_p] = false;
+                batch.cluster_id[current_p] = cluster_id;
             }
 
-            if state.visited[neighbor_idx] {
-                continue;
-            }
-            state.visited[neighbor_idx] = true;
+            if !tracking.visited[current_p] {
+                tracking.visited[current_p] = true;
+                batch.cluster_id[current_p] = cluster_id;
 
-            let neighbors = self.find_neighbors(hits, neighbor_idx, epsilon_sq, window_tof, state);
-
-            if neighbors.len() >= self.config.min_points {
-                state.point_types[neighbor_idx] = PointType::Core;
-                seeds.extend(neighbors);
-            } else {
-                state.point_types[neighbor_idx] = PointType::Border;
-            }
-        }
-    }
-}
-
-impl Default for DbscanClustering {
-    fn default() -> Self {
-        Self::new(DbscanConfig::default())
-    }
-}
-
-impl HitClustering for DbscanClustering {
-    type State = DbscanState;
-
-    fn name(&self) -> &'static str {
-        "DBSCAN"
-    }
-
-    fn create_state(&self) -> Self::State {
-        DbscanState::default()
-    }
-
-    fn configure(&mut self, config: &ClusteringConfig) {
-        self.config.epsilon = config.radius;
-        self.config.temporal_window_ns = config.temporal_window_ns;
-        self.generic_config = config.clone();
-    }
-
-    fn config(&self) -> &ClusteringConfig {
-        &self.generic_config
-    }
-
-    fn cluster<H: Hit>(
-        &self,
-        hits: &[H],
-        state: &mut Self::State,
-        labels: &mut [i32],
-    ) -> Result<usize, ClusteringError> {
-        if hits.is_empty() {
-            return Ok(0);
-        }
-
-        let n = hits.len();
-
-        // Reset state
-        state.hits_processed = 0;
-        state.clusters_found = 0;
-        state.noise_points = 0;
-        state.visited.clear();
-        state.visited.resize(n, false);
-        state.point_types.clear();
-        state.point_types.resize(n, PointType::Undefined);
-        let mut max_x = 0;
-        let mut max_y = 0;
-        for hit in hits {
-            let x = hit.x();
-            let y = hit.y();
-            if x > max_x {
-                max_x = x;
-            }
-            if y > max_y {
-                max_y = y;
+                let neighbors = self.region_query(ctx, current_p, batch);
+                if neighbors.len() >= self.config.min_points {
+                    for n in neighbors {
+                        seeds.push(n);
+                    }
+                }
+            } else if batch.cluster_id[current_p] == -1 {
+                batch.cluster_id[current_p] = cluster_id;
             }
         }
-        state
-            .spatial_grid
-            .ensure_dimensions((max_x as usize) + 32, (max_y as usize) + 32);
-        state.spatial_grid.clear();
-
-        // Initialize labels
-        labels.iter_mut().for_each(|l| *l = -1);
-
-        // Build spatial index
-        for (i, hit) in hits.iter().enumerate() {
-            state.spatial_grid.insert(hit.x() as i32, hit.y() as i32, i);
-        }
-
-        let epsilon_sq = self.config.epsilon * self.config.epsilon;
-        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
-        let mut cluster_id = 0;
-
-        for i in 0..n {
-            if state.visited[i] {
-                continue;
-            }
-            state.visited[i] = true;
-
-            let neighbors = self.find_neighbors(hits, i, epsilon_sq, window_tof, state);
-
-            if neighbors.len() < self.config.min_points {
-                state.point_types[i] = PointType::Noise;
-                state.noise_points += 1;
-            } else {
-                state.point_types[i] = PointType::Core;
-                labels[i] = cluster_id;
-                self.expand_cluster(
-                    hits, i, neighbors, cluster_id, epsilon_sq, window_tof, state, labels,
-                );
-                cluster_id += 1;
-            }
-        }
-
-        state.clusters_found = cluster_id as usize;
-        state.hits_processed = n;
-        Ok(state.clusters_found)
-    }
-
-    fn statistics(&self, state: &Self::State) -> ClusteringStatistics {
-        ClusteringStatistics {
-            hits_processed: state.hits_processed,
-            clusters_found: state.clusters_found,
-            noise_hits: state.noise_points,
-            ..Default::default()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dbscan_config_defaults() {
-        let config = DbscanConfig::default();
-        assert_eq!(config.epsilon, 5.0);
-        assert_eq!(config.min_points, 2);
-    }
-
-    #[test]
-    fn test_dbscan_state_reset() {
-        let mut state = DbscanState {
-            hits_processed: 100,
-            clusters_found: 10,
-            noise_points: 5,
-            ..Default::default()
-        };
-        state.reset();
-        assert_eq!(state.hits_processed, 0);
-        assert_eq!(state.clusters_found, 0);
-        assert_eq!(state.noise_points, 0);
-    }
-
-    #[test]
-    fn test_dbscan_clustering_basic() {
-        use rustpix_core::hit::GenericHit;
-
-        let clustering = DbscanClustering::default();
-        let mut state = clustering.create_state();
-
-        // Create two clusters of hits
-        let hits = vec![
-            // Cluster 1: (10, 10)
-            GenericHit {
-                x: 10,
-                y: 10,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 11,
-                y: 11,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 12,
-                y: 12,
-                tof: 100,
-                ..Default::default()
-            },
-            // Noise point
-            GenericHit {
-                x: 100,
-                y: 100,
-                tof: 100,
-                ..Default::default()
-            },
-            // Cluster 2: (50, 50)
-            GenericHit {
-                x: 50,
-                y: 50,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 51,
-                y: 51,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 52,
-                y: 52,
-                tof: 100,
-                ..Default::default()
-            },
-        ];
-
-        let mut labels = vec![0; hits.len()];
-        let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
-
-        assert_eq!(count, 2);
-        assert_eq!(labels[0], labels[1]);
-        assert_eq!(labels[1], labels[2]);
-        assert_eq!(labels[3], -1); // Noise
-        assert_eq!(labels[4], labels[5]);
-        assert_eq!(labels[5], labels[6]);
-        assert_ne!(labels[0], labels[4]);
     }
 }

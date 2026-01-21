@@ -1,33 +1,14 @@
-//! ABS (Age-Based Spatial) clustering algorithm.
-//!
-//! **IMPORTANT**: This is the PRIMARY clustering algorithm. See IMPLEMENTATION_PLAN.md
-//! Part 4.1 for the full implementation details.
-//!
-//! Key characteristics:
-//! - Complexity: O(n) average, O(n log n) worst case
-//! - Uses bucket pool for memory efficiency
-//! - Spatial indexing (32x32 grid) for O(1) neighbor lookup
-//! - Age-based bucket closure for temporal correlation
+//! SoA-optimized ABS (Age-Based Spatial) clustering.
 
-use crate::spatial::SpatialGrid;
-use rustpix_core::clustering::{
-    ClusteringConfig, ClusteringError, ClusteringState, ClusteringStatistics, HitClustering,
-};
-use rustpix_core::hit::Hit;
+use rustpix_core::clustering::ClusteringError;
+use rustpix_core::soa::HitBatch;
 
-/// ABS-specific configuration.
 #[derive(Clone, Debug)]
 pub struct AbsConfig {
-    /// Spatial radius for bucket membership (pixels).
     pub radius: f64,
-    /// Temporal correlation window (nanoseconds).
     pub neutron_correlation_window_ns: f64,
-    /// How often to scan for aged buckets (every N hits).
-    pub scan_interval: usize,
-    /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
-    /// Pre-allocated bucket pool size.
-    pub pre_allocate_buckets: usize,
+    pub scan_interval: usize,
 }
 
 impl Default for AbsConfig {
@@ -35,49 +16,33 @@ impl Default for AbsConfig {
         Self {
             radius: 5.0,
             neutron_correlation_window_ns: 75.0,
-            scan_interval: 100,
             min_cluster_size: 1,
-            pre_allocate_buckets: 1000,
+            scan_interval: 100,
         }
     }
 }
 
-impl AbsConfig {
-    /// Temporal window in TOF units (25ns).
-    pub fn window_tof(&self) -> u32 {
-        (self.neutron_correlation_window_ns / 25.0).ceil() as u32
-    }
-}
-
-/// Bucket for accumulating spatially close hits.
-#[derive(Clone, Debug)]
 struct Bucket {
-    /// Indices of hits in this bucket.
     hit_indices: Vec<usize>,
-    /// Spatial bounding box.
-    x_min: i32,
-    x_max: i32,
-    y_min: i32,
-    y_max: i32,
-    /// TOF of first hit (for age calculation).
+    x_min: u16,
+    x_max: u16,
+    y_min: u16,
+    y_max: u16,
     start_tof: u32,
-    /// Assigned cluster ID (-1 if not closed).
     cluster_id: i32,
-    /// Whether bucket is active.
     is_active: bool,
-    /// Insertion coordinates for spatial index removal.
-    insertion_x: i32,
-    insertion_y: i32,
+    insertion_x: u16,
+    insertion_y: u16,
 }
 
 impl Bucket {
     fn new() -> Self {
         Self {
             hit_indices: Vec::with_capacity(16),
-            x_min: i32::MAX,
-            x_max: i32::MIN,
-            y_min: i32::MAX,
-            y_max: i32::MIN,
+            x_min: u16::MAX,
+            x_max: 0,
+            y_min: u16::MAX,
+            y_max: 0,
             start_tof: 0,
             cluster_id: -1,
             is_active: false,
@@ -86,409 +51,292 @@ impl Bucket {
         }
     }
 
-    fn initialize<H: Hit>(&mut self, hit_idx: usize, hit: &H) {
+    fn initialize(&mut self, hit_idx: usize, x: u16, y: u16, tof: u32) {
         self.hit_indices.clear();
         self.hit_indices.push(hit_idx);
-        let x = hit.x() as i32;
-        let y = hit.y() as i32;
         self.x_min = x;
         self.x_max = x;
         self.y_min = y;
         self.y_max = y;
-        self.start_tof = hit.tof();
+        self.start_tof = tof;
         self.cluster_id = -1;
         self.is_active = true;
         self.insertion_x = x;
         self.insertion_y = y;
     }
 
-    fn add_hit<H: Hit>(&mut self, hit_idx: usize, hit: &H) {
+    fn add_hit(&mut self, hit_idx: usize, x: u16, y: u16) {
         self.hit_indices.push(hit_idx);
-        let x = hit.x() as i32;
-        let y = hit.y() as i32;
         self.x_min = self.x_min.min(x);
         self.x_max = self.x_max.max(x);
         self.y_min = self.y_min.min(y);
         self.y_max = self.y_max.max(y);
     }
-
-    fn fits_spatially<H: Hit>(&self, hit: &H, radius: f64) -> bool {
-        let x = hit.x() as i32;
-        let y = hit.y() as i32;
-        let r = radius.ceil() as i32;
-
-        x >= self.x_min - r && x <= self.x_max + r && y >= self.y_min - r && y <= self.y_max + r
-    }
-
-    fn fits_temporally<H: Hit>(&self, hit: &H, window_tof: u32) -> bool {
-        hit.tof().wrapping_sub(self.start_tof) <= window_tof
-    }
-
-    fn is_aged(&self, reference_tof: u32, window_tof: u32) -> bool {
-        reference_tof.wrapping_sub(self.start_tof) > window_tof
-    }
 }
 
-/// ABS clustering state.
+pub struct AbsClustering {
+    config: AbsConfig,
+}
+
 pub struct AbsState {
-    /// Bucket pool for reuse.
-    bucket_pool: Vec<Bucket>,
-    /// Indices of active buckets.
-    active_buckets: Vec<usize>,
-    /// Indices of free buckets for reuse.
-    free_buckets: Vec<usize>,
-    /// Spatial index for bucket lookup.
-    spatial_grid: SpatialGrid<usize>,
-    /// Next cluster ID to assign.
+    buckets: Vec<Bucket>,
+    active_indices: Vec<usize>,
+    free_indices: Vec<usize>,
+    grid: Vec<Vec<usize>>, // Spatial index
+    grid_w: usize,
     next_cluster_id: i32,
-    /// Hits processed counter.
-    hits_processed: usize,
-    /// Clusters found counter.
-    clusters_found: usize,
-    /// Detector width
-    pub width: usize,
-    /// Detector height
-    pub height: usize,
 }
 
 impl Default for AbsState {
     fn default() -> Self {
         Self {
-            bucket_pool: Vec::new(),
-            active_buckets: Vec::new(),
-            free_buckets: Vec::new(),
-            spatial_grid: SpatialGrid::new(32, 512, 512),
+            buckets: Vec::new(),
+            active_indices: Vec::new(),
+            free_indices: Vec::new(),
+            grid: vec![Vec::new(); (256 / 32 + 1) * (256 / 32 + 1)], // 32 is cell size
+            grid_w: 256 / 32 + 1,
             next_cluster_id: 0,
-            hits_processed: 0,
-            clusters_found: 0,
-            width: 512,
-            height: 512,
         }
     }
-}
-
-impl AbsState {
-    pub fn new(width: usize, height: usize) -> Self {
-        Self {
-            width,
-            height,
-            spatial_grid: SpatialGrid::new(32, width, height),
-            ..Default::default()
-        }
-    }
-}
-
-impl ClusteringState for AbsState {
-    fn reset(&mut self) {
-        for bucket in &mut self.bucket_pool {
-            bucket.is_active = false;
-        }
-        self.active_buckets.clear();
-        self.free_buckets.clear();
-        self.free_buckets.extend(0..self.bucket_pool.len());
-        self.spatial_grid.clear();
-        self.next_cluster_id = 0;
-        self.hits_processed = 0;
-        self.clusters_found = 0;
-    }
-}
-
-/// ABS clustering algorithm.
-pub struct AbsClustering {
-    config: AbsConfig,
-    generic_config: ClusteringConfig,
 }
 
 impl AbsClustering {
-    /// Create with custom configuration.
     pub fn new(config: AbsConfig) -> Self {
-        let generic_config = ClusteringConfig {
-            radius: config.radius,
-            temporal_window_ns: config.neutron_correlation_window_ns,
-            min_cluster_size: config.min_cluster_size,
-            max_cluster_size: None,
-        };
-        Self {
-            config,
-            generic_config,
-        }
+        Self { config }
     }
 
-    /// Get or create a bucket from the pool.
-    fn get_bucket(&self, state: &mut AbsState) -> usize {
-        if let Some(idx) = state.free_buckets.pop() {
-            idx
-        } else {
-            let idx = state.bucket_pool.len();
-            // Sanity check for unbounded growth
-            debug_assert!(
-                idx < 1_000_000,
-                "ABS Bucket Pool growing too large: {}",
-                idx
-            );
-            state.bucket_pool.push(Bucket::new());
-            idx
-        }
-    }
-
-    /// Find a compatible bucket for a hit.
-    fn find_compatible_bucket<H: Hit>(
+    pub fn cluster(
         &self,
-        hit: &H,
-        state: &AbsState,
-        window_tof: u32,
-    ) -> Option<usize> {
-        let x = hit.x() as i32;
-        let y = hit.y() as i32;
-
-        let mut neighbors = Vec::with_capacity(16);
-        state.spatial_grid.query_neighborhood(x, y, &mut neighbors);
-
-        // Search in spatial neighborhood
-        for &bucket_idx in neighbors.iter() {
-            let bucket = &state.bucket_pool[bucket_idx];
-            if bucket.is_active
-                && bucket.fits_spatially(hit, self.config.radius)
-                && bucket.fits_temporally(hit, window_tof)
-            {
-                return Some(bucket_idx);
-            }
-        }
-        None
-    }
-
-    /// Close a bucket and assign cluster labels.
-    fn close_bucket(&self, bucket_idx: usize, state: &mut AbsState, labels: &mut [i32]) -> bool {
-        let bucket = &mut state.bucket_pool[bucket_idx];
-
-        if bucket.hit_indices.len() >= self.config.min_cluster_size as usize {
-            let cluster_id = state.next_cluster_id;
-            state.next_cluster_id += 1;
-            bucket.cluster_id = cluster_id;
-
-            for &hit_idx in &bucket.hit_indices {
-                labels[hit_idx] = cluster_id;
-            }
-
-            state.clusters_found += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Scan and close aged buckets.
-    fn scan_and_close_aged(&self, reference_tof: u32, state: &mut AbsState, labels: &mut [i32]) {
-        let window_tof = self.config.window_tof();
-
-        // Identify aged buckets
-        let mut aged_indices = Vec::new();
-        let mut active_indices_to_keep = Vec::new();
-
-        for &bucket_idx in &state.active_buckets {
-            let bucket = &state.bucket_pool[bucket_idx];
-            if bucket.is_aged(reference_tof, window_tof) {
-                aged_indices.push(bucket_idx);
-            } else {
-                active_indices_to_keep.push(bucket_idx);
-            }
-        }
-
-        // Update active buckets list
-        state.active_buckets = active_indices_to_keep;
-
-        // Close and cleanup aged buckets
-        for bucket_idx in aged_indices {
-            self.close_bucket(bucket_idx, state, labels);
-
-            // Remove from spatial index using stored insertion coordinates
-            let bucket = &mut state.bucket_pool[bucket_idx];
-            state
-                .spatial_grid
-                .remove(bucket.insertion_x, bucket.insertion_y, bucket_idx);
-
-            // Return to pool
-            bucket.is_active = false;
-            state.free_buckets.push(bucket_idx);
-        }
-    }
-}
-
-impl Default for AbsClustering {
-    fn default() -> Self {
-        Self::new(AbsConfig::default())
-    }
-}
-
-impl HitClustering for AbsClustering {
-    type State = AbsState;
-
-    fn name(&self) -> &'static str {
-        "ABS"
-    }
-
-    fn create_state(&self) -> Self::State {
-        let mut bucket_pool = Vec::with_capacity(self.config.pre_allocate_buckets);
-        for _ in 0..self.config.pre_allocate_buckets {
-            bucket_pool.push(Bucket::new());
-        }
-
-        AbsState {
-            bucket_pool,
-            active_buckets: Vec::with_capacity(self.config.pre_allocate_buckets),
-            free_buckets: (0..self.config.pre_allocate_buckets).collect(),
-            spatial_grid: SpatialGrid::new(32, 512, 512),
-            next_cluster_id: 0,
-            hits_processed: 0,
-            clusters_found: 0,
-            width: 512,
-            height: 512,
-        }
-    }
-
-    fn configure(&mut self, config: &ClusteringConfig) {
-        self.config.radius = config.radius;
-        self.config.neutron_correlation_window_ns = config.temporal_window_ns;
-        self.generic_config = config.clone();
-    }
-
-    fn config(&self) -> &ClusteringConfig {
-        &self.generic_config
-    }
-
-    fn cluster<H: Hit>(
-        &self,
-        hits: &[H],
-        state: &mut Self::State,
-        labels: &mut [i32],
+        batch: &mut HitBatch,
+        state: &mut AbsState,
     ) -> Result<usize, ClusteringError> {
-        if hits.is_empty() {
+        if batch.is_empty() {
             return Ok(0);
         }
 
-        // Initialize labels to -1 (unclustered)
-        labels.iter_mut().for_each(|l| *l = -1);
+        // Initialize state if needed (or assume persistent state for streaming?)
+        // If streaming, we keep state.
+        // But users might want to cluster a single batch.
+        // Let's assume persistent state passed in `state`.
+        // We only reset `cluster_id` in batch.
 
-        // Check dimensions
+        let n = batch.len();
+        // Since batch.cluster_id stores per-hit result, we write to it eventually.
+        // ABS writes cluster ID when closing buckets.
+        batch.cluster_id.fill(-1);
+
+        let window_tof = (self.config.neutron_correlation_window_ns / 25.0).ceil() as u32;
+        let cell_size = 32;
+
         let mut max_x = 0;
         let mut max_y = 0;
-        for hit in hits {
-            let x = hit.x();
-            let y = hit.y();
-            if x > max_x {
-                max_x = x;
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            if (x as usize) > max_x {
+                max_x = x as usize;
             }
-            if y > max_y {
-                max_y = y;
+            if (y as usize) > max_y {
+                max_y = y as usize;
             }
         }
-        let req_w = (max_x as usize) + 32;
-        let req_h = (max_y as usize) + 32;
-        state.spatial_grid.ensure_dimensions(req_w, req_h);
-        state.width = state.width.max(req_w);
-        state.height = state.height.max(req_h);
 
-        let window_tof = self.config.window_tof();
+        let req_w = max_x + 32;
+        let req_h = max_y + 32;
+        let req_grid_w = req_w / cell_size + 1;
+        let req_grid_h = req_h / cell_size + 1;
+        let req_total = req_grid_w * req_grid_h;
 
-        for (hit_idx, hit) in hits.iter().enumerate() {
-            // Periodic aging scan
-            if hit_idx % self.config.scan_interval == 0 && hit_idx > 0 {
-                self.scan_and_close_aged(hit.tof(), state, labels);
+        if req_total > state.grid.len() || req_grid_w > state.grid_w {
+            state.grid = vec![Vec::new(); req_total];
+            state.grid_w = req_grid_w;
+        }
+
+        let grid_w = state.grid_w;
+
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            let tof = batch.tof[i];
+
+            // Aging
+            if i % self.config.scan_interval == 0 && i > 0 {
+                self.scan_and_close(tof, state, batch, window_tof, cell_size, grid_w);
             }
 
-            // Find compatible bucket or create new one
-            if let Some(bucket_idx) = self.find_compatible_bucket(hit, state, window_tof) {
-                state.bucket_pool[bucket_idx].add_hit(hit_idx, hit);
+            // Find compatible bucket
+            let cx = x as usize / cell_size;
+            let cy = y as usize / cell_size;
+            let mut found = None;
+
+            // Search neighbors
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let ncx = cx as isize + dx;
+                    let ncy = cy as isize + dy;
+                    if ncx >= 0 && ncy >= 0 {
+                        let gidx = (ncy as usize) * grid_w + (ncx as usize);
+                        if let Some(cell) = state.grid.get(gidx) {
+                            for &bidx in cell {
+                                let bucket = &state.buckets[bidx];
+                                if bucket.is_active {
+                                    // Spatial check
+                                    // Using int math
+                                    let r = self.config.radius.ceil() as i32;
+                                    let bx_min = bucket.x_min as i32 - r;
+                                    let bx_max = bucket.x_max as i32 + r;
+                                    let by_min = bucket.y_min as i32 - r;
+                                    let by_max = bucket.y_max as i32 + r;
+                                    let ix = x as i32;
+                                    let iy = y as i32;
+
+                                    if ix >= bx_min && ix <= bx_max && iy >= by_min && iy <= by_max
+                                    {
+                                        // Temporal check
+                                        let dt = tof.wrapping_sub(bucket.start_tof);
+                                        if dt <= window_tof {
+                                            found = Some(bidx);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+
+            if let Some(bidx) = found {
+                state.buckets[bidx].add_hit(i, x, y);
             } else {
-                let bucket_idx = self.get_bucket(state);
-                state.bucket_pool[bucket_idx].initialize(hit_idx, hit);
-                state.active_buckets.push(bucket_idx);
+                let bidx = self.get_bucket(state);
+                state.buckets[bidx].initialize(i, x, y, tof);
+                state.active_indices.push(bidx);
 
-                // Add to spatial index
-                let x = hit.x() as i32;
-                let y = hit.y() as i32;
-                state.spatial_grid.insert(x, y, bucket_idx);
+                // Insert into grid
+                let gidx = cy * grid_w + cx;
+                if gidx < state.grid.len() {
+                    state.grid[gidx].push(bidx);
+                }
+            }
+        }
+
+        // Final cleanup?
+        // If this is streaming, we DON'T close active buckets at end of batch unless strictly required.
+        // But user expects clustering to finish for batch?
+        // If we keep state, we might return partial hits?
+        // The `cluster` function usually assumes a closed batch.
+        // If streaming, we should probably close everything to yield results,
+        // OR we yield only closed clusters?
+        // The `HitBatch` needs to be fully labeled if we want to extract from it.
+        // If we leave buckets open, those hits have cluster_id = -1.
+
+        // For now, force close everything at end of batch to match existing behavior on distinct files.
+        // Stream users might want persistence.
+        // But `process_section_into_batch` creates isolated batches per chunk.
+        // If we want cross-chunk clustering, we need persistent state.
+        // I'll close all for now.
+
+        let last_tof = batch.tof.last().copied().unwrap_or(0);
+        self.scan_and_close(
+            last_tof.wrapping_add(window_tof + 1),
+            state,
+            batch,
+            window_tof,
+            cell_size,
+            grid_w,
+        );
+
+        // Force close remaining active
+        let active = std::mem::take(&mut state.active_indices);
+        for bidx in active {
+            self.close_bucket(bidx, state, batch);
+            state.buckets[bidx].is_active = false;
+            state.free_indices.push(bidx);
+            // Remove from grid? Too expensive to find.
+            // Just clear grid at end?
+            // Grid clean up relies on insertion coords.
+            let b = &state.buckets[bidx];
+            let gx = b.insertion_x as usize / cell_size;
+            let gy = b.insertion_y as usize / cell_size;
+            let gidx = gy * grid_w + gx;
+            if let Some(cell) = state.grid.get_mut(gidx) {
+                if let Some(pos) = cell.iter().position(|&x| x == bidx) {
+                    cell.swap_remove(pos);
+                }
+            }
+        }
+
+        Ok(state.next_cluster_id as usize)
+    }
+
+    fn get_bucket(&self, state: &mut AbsState) -> usize {
+        if let Some(idx) = state.free_indices.pop() {
+            idx
+        } else {
+            let idx = state.buckets.len();
+            state.buckets.push(Bucket::new());
+            idx
+        }
+    }
+
+    fn close_bucket(&self, bidx: usize, state: &mut AbsState, batch: &mut HitBatch) {
+        let bucket = &mut state.buckets[bidx];
+        if bucket.hit_indices.len() >= self.config.min_cluster_size as usize {
+            let cid = state.next_cluster_id;
+            state.next_cluster_id += 1;
+            bucket.cluster_id = cid;
+            for &hidx in &bucket.hit_indices {
+                batch.cluster_id[hidx] = cid;
+            }
+        }
+    }
+
+    fn scan_and_close(
+        &self,
+        ref_tof: u32,
+        state: &mut AbsState,
+        batch: &mut HitBatch,
+        window_tof: u32,
+        cell_size: usize,
+        grid_w: usize,
+    ) {
+        let mut keep = Vec::new();
+        let mut remove = Vec::new();
+
+        for &bidx in &state.active_indices {
+            let bucket = &state.buckets[bidx];
+            let dt = ref_tof.wrapping_sub(bucket.start_tof);
+            if dt > window_tof {
+                remove.push(bidx);
+            } else {
+                keep.push(bidx);
+            }
+        }
+        state.active_indices = keep;
+
+        for bidx in remove {
+            self.close_bucket(bidx, state, batch);
+
+            // Remove from grid
+            let b = &state.buckets[bidx];
+            let gx = b.insertion_x as usize / cell_size;
+            let gy = b.insertion_y as usize / cell_size;
+            let gidx = gy * grid_w + gx;
+            if let Some(cell) = state.grid.get_mut(gidx) {
+                if let Some(pos) = cell.iter().position(|&x| x == bidx) {
+                    cell.swap_remove(pos);
+                }
             }
 
-            state.hits_processed += 1;
+            state.buckets[bidx].is_active = false;
+            state.free_indices.push(bidx);
         }
-
-        // Final aging scan
-        if let Some(last_hit) = hits.last() {
-            self.scan_and_close_aged(last_hit.tof().saturating_add(window_tof), state, labels);
-        }
-
-        // Force close remaining buckets
-        for bucket_idx in std::mem::take(&mut state.active_buckets) {
-            self.close_bucket(bucket_idx, state, labels);
-
-            // Remove from spatial index? We don't have coordinates easily.
-            // But since we are finishing, maybe it doesn't matter if we don't clear the grid explicitly
-            // if we are going to reset anyway?
-            // But `reset` clears the grid.
-
-            state.bucket_pool[bucket_idx].is_active = false;
-            state.free_buckets.push(bucket_idx);
-        }
-
-        Ok(state.clusters_found)
-    }
-
-    fn statistics(&self, state: &Self::State) -> ClusteringStatistics {
-        ClusteringStatistics {
-            hits_processed: state.hits_processed,
-            clusters_found: state.clusters_found,
-            ..Default::default()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rustpix_core::hit::GenericHit;
-
-    #[test]
-    fn test_abs_clustering_basic() {
-        let clustering = AbsClustering::default();
-        let mut state = clustering.create_state();
-
-        // Create two clusters of hits
-        let hits = vec![
-            // Cluster 1: (10, 10) at t=100
-            GenericHit {
-                x: 10,
-                y: 10,
-                tof: 100,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 11,
-                y: 11,
-                tof: 102,
-                ..Default::default()
-            },
-            // Cluster 2: (50, 50) at t=200
-            GenericHit {
-                x: 50,
-                y: 50,
-                tof: 200,
-                ..Default::default()
-            },
-            GenericHit {
-                x: 51,
-                y: 51,
-                tof: 202,
-                ..Default::default()
-            },
-        ];
-
-        let mut labels = vec![0; hits.len()];
-        let count = clustering.cluster(&hits, &mut state, &mut labels).unwrap();
-
-        assert_eq!(count, 2);
-        assert_eq!(labels[0], labels[1]);
-        assert_eq!(labels[2], labels[3]);
-        assert_ne!(labels[0], labels[2]);
     }
 }

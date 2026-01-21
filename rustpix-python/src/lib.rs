@@ -6,11 +6,14 @@
 use numpy::ndarray::Array1;
 use numpy::PyArray1;
 use pyo3::prelude::*;
-use rustpix_algorithms::{AbsClustering, DbscanClustering, GraphClustering, GridClustering};
-use rustpix_core::clustering::{ClusteringConfig, HitClustering};
+use rustpix_algorithms::{
+    AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
+};
+use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
 use rustpix_core::hit::GenericHit;
 use rustpix_core::neutron::Neutron;
+use rustpix_core::soa::HitBatch;
 use rustpix_io::Tpx3FileReader;
 use rustpix_tpx::Tpx3Hit;
 pub mod streaming;
@@ -406,45 +409,79 @@ fn cluster_hits_impl(
     algorithm: &str,
 ) -> PyResult<(Vec<i32>, usize)> {
     let config = config.unwrap_or_else(|| PyClusteringConfig::new(5.0, 75.0, 1, None));
-    let hit_data: Vec<GenericHit> = hits.iter().map(|h| h.inner).collect();
-    let mut labels = vec![0; hit_data.len()];
+
+    // Convert to SoA Batch
+    let mut batch = HitBatch::with_capacity(hits.len());
+    for hit in hits {
+        batch.push(
+            hit.inner.x,
+            hit.inner.y,
+            hit.inner.tof,
+            hit.inner.tot,
+            hit.inner.timestamp,
+            hit.inner.chip_id,
+        );
+    }
 
     let num_clusters = match algorithm.to_lowercase().as_str() {
         "abs" => {
-            let mut algo = AbsClustering::default();
-            algo.configure(&config.inner);
-            let mut state = algo.create_state();
-            algo.cluster(&hit_data, &mut state, &mut labels)
+            let algo_config = rustpix_algorithms::AbsConfig {
+                radius: config.inner.radius,
+                neutron_correlation_window_ns: config.inner.temporal_window_ns,
+                min_cluster_size: config.inner.min_cluster_size,
+                scan_interval: 100, // default
+            };
+            let algo = AbsClustering::new(algo_config);
+            let mut state = AbsState::default();
+            algo.cluster(&mut batch, &mut state)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
         }
         "dbscan" => {
-            let mut algo = DbscanClustering::default();
-            algo.configure(&config.inner);
-            let mut state = algo.create_state();
-            algo.cluster(&hit_data, &mut state, &mut labels)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
-        }
-        "graph" => {
-            let mut algo = GraphClustering::default();
-            algo.configure(&config.inner);
-            let mut state = algo.create_state();
-            algo.cluster(&hit_data, &mut state, &mut labels)
+            let algo_config = rustpix_algorithms::DbscanConfig {
+                epsilon: config.inner.radius, // Map radius to epsilon
+                temporal_window_ns: config.inner.temporal_window_ns,
+                min_points: 2, // Default or hardcoded?
+                min_cluster_size: config.inner.min_cluster_size,
+            };
+            let algo = DbscanClustering::new(algo_config);
+            let mut state = DbscanState::default();
+            algo.cluster(&mut batch, &mut state)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
         }
         "grid" => {
-            let mut algo = GridClustering::default();
-            algo.configure(&config.inner);
-            let mut state = algo.create_state();
-            algo.cluster(&hit_data, &mut state, &mut labels)
+            let algo_config = rustpix_algorithms::GridConfig {
+                radius: config.inner.radius,
+                temporal_window_ns: config.inner.temporal_window_ns,
+                min_cluster_size: config.inner.min_cluster_size,
+                cell_size: 32, // default
+                max_cluster_size: config.inner.max_cluster_size.map(|s| s as usize),
+            };
+            let algo = GridClustering::new(algo_config);
+            let mut state = GridState::default();
+            algo.cluster(&mut batch, &mut state)
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+        }
+        "graph" => {
+            // Fallback or Error? Plan said remove.
+            // But if user passes 'graph', we should probably error or fallback to abs/grid?
+            // "Acceptance Criteria: ... Graph algorithm - Either create SoA version OR remove it entirely"
+            // "API Changes: ... CLI algorithm argument will no longer accept graph."
+            // For Python, if I remove it, I should throw error.
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Algorithm 'graph' is deprecated/removed. Use 'abs', 'dbscan', or 'grid'",
+            ));
         }
         _ => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown algorithm: {}. Use 'abs', 'dbscan', 'graph', or 'grid'",
+                "Unknown algorithm: {}. Use 'abs', 'dbscan', or 'grid'",
                 algorithm
             )))
         }
     };
+
+    // Extract labels
+    // HitBatch stores cluster_id as i32, so we can return it directly.
+    let labels = batch.cluster_id.clone();
 
     Ok((labels, num_clusters))
 }

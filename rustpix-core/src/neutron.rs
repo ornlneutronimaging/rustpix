@@ -1,6 +1,5 @@
 //! Neutron event output type.
 //!
-//! See IMPLEMENTATION_PLAN.md Part 2.2 for detailed specification.
 
 /// A detected neutron event after clustering and centroid extraction.
 ///
