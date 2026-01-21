@@ -174,6 +174,38 @@ impl DbscanClustering {
             }
         }
 
+        // Post-processing: Filter clusters smaller than min_cluster_size
+        if self.config.min_cluster_size > 1 && current_cluster_id > 0 {
+            let mut sizes = vec![0usize; current_cluster_id as usize];
+            for &id in batch.cluster_id.iter() {
+                if id >= 0 {
+                    sizes[id as usize] += 1;
+                }
+            }
+
+            let mut id_map = vec![-1i32; current_cluster_id as usize];
+            let mut new_cluster_count = 0;
+            let min_size = self.config.min_cluster_size as usize;
+
+            for (old_id, &size) in sizes.iter().enumerate() {
+                if size >= min_size {
+                    id_map[old_id] = new_cluster_count;
+                    new_cluster_count += 1;
+                }
+            }
+
+            // Remap cluster IDs
+            // If checking map is cheap, parallel iteration is fine.
+            // Note: Parallel iteration on batch.cluster_id is already used above.
+            batch.cluster_id.par_iter_mut().for_each(|id| {
+                if *id >= 0 {
+                    *id = id_map[*id as usize];
+                }
+            });
+
+            current_cluster_id = new_cluster_count;
+        }
+
         Ok(current_cluster_id as usize)
     }
 
