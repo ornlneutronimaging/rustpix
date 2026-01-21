@@ -41,4 +41,4 @@ build-debug = { cmd = "maturin develop", description = "Build in debug mode + ed
 gui = { cmd = "cargo run -p rustpix-gui --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build and run GUI in release mode" }
 gui-debug = { cmd = "cargo run -p rustpix-gui", description = "Build and run GUI in debug mode" }
 docs = { cmd = "cargo doc --workspace --no-deps --open", description = "Build and open documentation" }
-clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true", description = "Remove all build artifacts" }
+clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf '{}' + 2>/dev/null || true", description = "Remove all build artifacts" }

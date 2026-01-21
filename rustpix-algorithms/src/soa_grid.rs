@@ -40,8 +40,22 @@ impl SoAGridClustering {
         batch.cluster_id.fill(-1);
 
         // Build spatial index
-        // Using fixed grid size for now
-        let mut grid: SpatialGrid<usize> = SpatialGrid::new(self.config.cell_size, 512, 512);
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            if (x as usize) > max_x {
+                max_x = x as usize;
+            }
+            if (y as usize) > max_y {
+                max_y = y as usize;
+            }
+        }
+
+        // Using dynamic grid size
+        let mut grid: SpatialGrid<usize> =
+            SpatialGrid::new(self.config.cell_size, max_x + 32, max_y + 32);
 
         for i in 0..n {
             grid.insert(batch.x[i] as i32, batch.y[i] as i32, i);

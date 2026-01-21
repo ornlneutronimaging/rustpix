@@ -83,6 +83,7 @@ pub struct SoAAbsState {
     active_indices: Vec<usize>,
     free_indices: Vec<usize>,
     grid: Vec<Vec<usize>>, // Spatial index
+    grid_w: usize,
     next_cluster_id: i32,
 }
 
@@ -93,6 +94,7 @@ impl Default for SoAAbsState {
             active_indices: Vec::new(),
             free_indices: Vec::new(),
             grid: vec![Vec::new(); (256 / 32 + 1) * (256 / 32 + 1)], // 32 is cell size
+            grid_w: 256 / 32 + 1,
             next_cluster_id: 0,
         }
     }
@@ -125,7 +127,32 @@ impl SoAAbsClustering {
 
         let window_tof = (self.config.neutron_correlation_window_ns / 25.0).ceil() as u32;
         let cell_size = 32;
-        let grid_w = 256 / cell_size + 1;
+
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            if (x as usize) > max_x {
+                max_x = x as usize;
+            }
+            if (y as usize) > max_y {
+                max_y = y as usize;
+            }
+        }
+
+        let req_w = max_x + 32;
+        let req_h = max_y + 32;
+        let req_grid_w = req_w / cell_size + 1;
+        let req_grid_h = req_h / cell_size + 1;
+        let req_total = req_grid_w * req_grid_h;
+
+        if req_total > state.grid.len() || req_grid_w > state.grid_w {
+            state.grid = vec![Vec::new(); req_total];
+            state.grid_w = req_grid_w;
+        }
+
+        let grid_w = state.grid_w;
 
         for i in 0..n {
             let x = batch.x[i];

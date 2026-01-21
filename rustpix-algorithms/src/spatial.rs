@@ -53,6 +53,29 @@ impl<T: Clone> SpatialGrid<T> {
         }
     }
 
+    /// Ensure the grid is large enough for the given dimensions.
+    ///
+    /// If the grid is resized, all existing data is CLEARED.
+    pub fn ensure_dimensions(&mut self, width: usize, height: usize) {
+        let req_width_cells = width.div_ceil(self.cell_size);
+        let req_height_cells = height.div_ceil(self.cell_size);
+
+        if req_width_cells > self.width_cells || req_height_cells > self.height_cells {
+            let new_width_cells = req_width_cells.max(self.width_cells);
+            let new_height_cells = req_height_cells.max(self.height_cells);
+            let total_cells = new_width_cells * new_height_cells;
+
+            self.width_cells = new_width_cells;
+            self.height_cells = new_height_cells;
+
+            // Re-allocate cells
+            self.cells = Vec::with_capacity(total_cells);
+            for _ in 0..total_cells {
+                self.cells.push(Vec::with_capacity(4));
+            }
+        }
+    }
+
     /// Insert a value at the given coordinates.
     ///
     /// Ignores values outside the grid bounds.
@@ -120,6 +143,24 @@ impl<T: Clone> SpatialGrid<T> {
             // SAFETY: get_cell_index checks bounds
             unsafe { self.cells.get_unchecked(idx).as_slice() }
         })
+    }
+
+    /// Get the grid width in cells.
+    #[inline]
+    pub fn width_cells(&self) -> usize {
+        self.width_cells
+    }
+
+    /// Get the grid height in cells.
+    #[inline]
+    pub fn height_cells(&self) -> usize {
+        self.height_cells
+    }
+
+    /// Get the configured cell size.
+    #[inline]
+    pub fn cell_size(&self) -> usize {
+        self.cell_size
     }
 
     /// Query the 3x3 neighborhood around a point.

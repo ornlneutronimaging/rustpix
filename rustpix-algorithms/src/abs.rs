@@ -369,6 +369,25 @@ impl HitClustering for AbsClustering {
         // Initialize labels to -1 (unclustered)
         labels.iter_mut().for_each(|l| *l = -1);
 
+        // Check dimensions
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for hit in hits {
+            let x = hit.x();
+            let y = hit.y();
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        let req_w = (max_x as usize) + 32;
+        let req_h = (max_y as usize) + 32;
+        state.spatial_grid.ensure_dimensions(req_w, req_h);
+        state.width = state.width.max(req_w);
+        state.height = state.height.max(req_h);
+
         let window_tof = self.config.window_tof();
 
         for (hit_idx, hit) in hits.iter().enumerate() {

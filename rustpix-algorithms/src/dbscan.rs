@@ -221,6 +221,21 @@ impl HitClustering for DbscanClustering {
         state.visited.resize(n, false);
         state.point_types.clear();
         state.point_types.resize(n, PointType::Undefined);
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for hit in hits {
+            let x = hit.x();
+            let y = hit.y();
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        state
+            .spatial_grid
+            .ensure_dimensions((max_x as usize) + 32, (max_y as usize) + 32);
         state.spatial_grid.clear();
 
         // Initialize labels

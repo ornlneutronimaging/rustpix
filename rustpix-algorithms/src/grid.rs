@@ -131,9 +131,24 @@ impl HitClustering for GridClustering {
         labels.iter_mut().for_each(|l| *l = -1);
 
         // Build spatial index
-        // Note: Using a fixed grid size for now, but could be dynamic based on detector size
-        // The SpatialGrid uses a HashMap, so the width/height args are just hints/unused
-        let mut grid: SpatialGrid<usize> = SpatialGrid::new(self.config.cell_size, 512, 512);
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for hit in hits {
+            let x = hit.x();
+            let y = hit.y();
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+
+        let mut grid: SpatialGrid<usize> = SpatialGrid::new(
+            self.config.cell_size,
+            (max_x as usize) + 32,
+            (max_y as usize) + 32,
+        );
 
         for (i, hit) in hits.iter().enumerate() {
             grid.insert(hit.x() as i32, hit.y() as i32, i);

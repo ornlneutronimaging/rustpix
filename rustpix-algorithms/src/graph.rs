@@ -153,9 +153,22 @@ impl HitClustering for GraphClustering {
         let mut edges = 0;
 
         // 1. Build spatial index
-        // Use a fixed grid size for now, similar to other algorithms
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for hit in hits {
+            let x = hit.x();
+            let y = hit.y();
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+
+        // Use dynamic grid size based on hits
         let mut grid: crate::spatial::SpatialGrid<usize> =
-            crate::spatial::SpatialGrid::new(32, 512, 512);
+            crate::spatial::SpatialGrid::new(32, (max_x as usize) + 32, (max_y as usize) + 32);
         for (i, hit) in hits.iter().enumerate() {
             grid.insert(hit.x() as i32, hit.y() as i32, i);
         }

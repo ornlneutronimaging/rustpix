@@ -67,11 +67,24 @@ impl SoADbscanClustering {
         // Cell size should be at least epsilon to optimize neighbor search
         let cell_size = (self.config.epsilon.ceil() as usize).max(32);
 
-        let width = 256;
-        let height = 256;
-        let mut grid: Vec<Vec<usize>> =
-            vec![Vec::new(); (width / cell_size + 1) * (height / cell_size + 1)];
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for i in 0..n {
+            let x = batch.x[i];
+            let y = batch.y[i];
+            if (x as usize) > max_x {
+                max_x = x as usize;
+            }
+            if (y as usize) > max_y {
+                max_y = y as usize;
+            }
+        }
+
+        let width = max_x + 32;
+        let height = max_y + 32;
         let grid_w = width / cell_size + 1;
+        let grid_h = height / cell_size + 1;
+        let mut grid: Vec<Vec<usize>> = vec![Vec::new(); grid_w * grid_h];
 
         // Populate grid
         for i in 0..n {
