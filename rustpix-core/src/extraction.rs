@@ -191,8 +191,16 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                 } else {
                     // Fall back to arithmetic mean if all TOT values are zero
                     let n = cluster_indices.len() as f64;
-                    let mean_x: f64 = cluster_indices.iter().map(|&idx| hits[idx].x() as f64).sum::<f64>() / n;
-                    let mean_y: f64 = cluster_indices.iter().map(|&idx| hits[idx].y() as f64).sum::<f64>() / n;
+                    let mean_x: f64 = cluster_indices
+                        .iter()
+                        .map(|&idx| hits[idx].x() as f64)
+                        .sum::<f64>()
+                        / n;
+                    let mean_y: f64 = cluster_indices
+                        .iter()
+                        .map(|&idx| hits[idx].y() as f64)
+                        .sum::<f64>()
+                        / n;
                     (mean_x, mean_y, 0)
                 }
             } else {
