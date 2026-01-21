@@ -1,0 +1,19 @@
+[package]
+name = "rustpix-tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Diagnostic and analysis tools for TPX3 data"
+
+[[bin]]
+name = "analyze-timestamps"
+path = "analyze_timestamps.rs"
+
+[[bin]]
+name = "analyze-rollover"
+path = "analyze_rollover.rs"
+
+[dependencies]
+# Standalone tools - no internal dependencies for portability

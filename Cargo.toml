@@ -8,6 +8,7 @@ members = [
   "rustpix-python",
   "rustpix-cli",
   "rustpix-gui",
+  "tools",
 ]
 
 [workspace.package]

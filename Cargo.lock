@@ -3122,6 +3122,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustpix-tools"
+version = "0.1.0"
+
+[[package]]
 name = "rustpix-tpx"
 version = "0.1.0"
 dependencies = [
