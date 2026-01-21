@@ -3,6 +3,7 @@
 
 use crate::{Error, Result};
 use memmap2::Mmap;
+use rustpix_tpx::ordering::TimeOrderedStream;
 use rustpix_tpx::section::{discover_sections, process_section};
 use rustpix_tpx::{DetectorConfig, Tpx3Hit, Tpx3Packet};
 use std::fs::File;
@@ -117,6 +118,27 @@ impl Tpx3FileReader {
         all_hits.sort_unstable_by_key(|h| h.tof);
 
         Ok(all_hits)
+    }
+
+    /// Reads hits using the efficient time-ordered stream.
+    ///
+    /// This uses a pulse-based K-way merge to produce time-ordered hits
+    /// without loading the entire file or performing a global sort.
+    pub fn read_hits_time_ordered(&self) -> Result<Vec<Tpx3Hit>> {
+        if !self.reader.len().is_multiple_of(8) {
+            return Err(Error::InvalidFormat(format!(
+                "file size {} is not a multiple of 8 (file: {})",
+                self.reader.len(),
+                self.reader.path.display()
+            )));
+        }
+
+        let data = self.reader.as_bytes();
+        let sections = discover_sections(data);
+
+        let stream = TimeOrderedStream::new(data, &sections, &self.config);
+
+        Ok(stream.collect())
     }
 
     /// Returns an iterator over raw packets.

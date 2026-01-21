@@ -103,6 +103,12 @@ enum Commands {
         #[arg(short, long, default_value = "3")]
         iterations: usize,
     },
+
+    /// Benchmark sorting strategies (Standard vs Streaming)
+    OrderingBenchmark {
+        /// Input TPX3 file
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -411,6 +417,45 @@ fn main() -> Result<()> {
                     "{:<10} | {:<15.2} | {:<15.2} | {:<15.2}",
                     name, mean_time, min_time, max_time
                 );
+            }
+        }
+
+        Commands::OrderingBenchmark { input } => {
+            println!("Benchmarking ordering strategies on: {}", input.display());
+            let reader = Tpx3FileReader::open(&input)?;
+
+            // 1. Standard approach (Parallel Load + Unstable Sort)
+            let start = Instant::now();
+            let hits_std = reader.read_hits()?;
+            let time_std = start.elapsed();
+            println!(
+                "Standard (Load + Sort): {:.2?} ({} hits)",
+                time_std,
+                hits_std.len()
+            );
+
+            // 2. Streaming approach (Pulse-based Merge)
+            let start = Instant::now();
+            let hits_stream = reader.read_hits_time_ordered()?;
+            let time_stream = start.elapsed();
+            println!(
+                "Streaming (K-Way Merge): {:.2?} ({} hits)",
+                time_stream,
+                hits_stream.len()
+            );
+
+            let diff = (time_stream.as_secs_f64() / time_std.as_secs_f64() - 1.0) * 100.0;
+
+            println!("Performance Delta: {:+.2}%", diff);
+
+            // Verify hit counts match
+            if !hits_std.is_empty() {
+                assert_eq!(
+                    hits_std.len(),
+                    hits_stream.len(),
+                    "Hit counts must match"
+                );
+                println!("Hit counts match: {}", hits_std.len());
             }
         }
     }

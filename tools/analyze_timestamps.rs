@@ -18,7 +18,11 @@ fn main() -> std::io::Result<()> {
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
 
-    println!("File size: {} bytes ({} packets)", data.len(), data.len() / 8);
+    println!(
+        "File size: {} bytes ({} packets)",
+        data.len(),
+        data.len() / 8
+    );
     println!();
 
     // Track per-chip statistics
@@ -36,11 +40,15 @@ fn main() -> std::io::Result<()> {
         // Header packet - extract chip ID
         if (raw & 0xFFFFFFFF) == 0x33585054 {
             current_chip = ((raw >> 32) & 0xFF) as u8;
-            chip_stats.entry(current_chip).or_insert_with(ChipStats::new);
+            chip_stats
+                .entry(current_chip)
+                .or_insert_with(ChipStats::new);
             continue;
         }
 
-        let stats = chip_stats.entry(current_chip).or_insert_with(ChipStats::new);
+        let stats = chip_stats
+            .entry(current_chip)
+            .or_insert_with(ChipStats::new);
 
         // TDC packet (0x6F)
         if packet_type == 0x6F {
@@ -170,7 +178,10 @@ impl ChipStats {
             let max_hits = self.hits_per_tdc.iter().max().unwrap_or(&0);
             println!();
             println!("Hits per TDC period:");
-            println!("  Avg: {:.1}, Min: {}, Max: {}", avg_hits, min_hits, max_hits);
+            println!(
+                "  Avg: {:.1}, Min: {}, Max: {}",
+                avg_hits, min_hits, max_hits
+            );
         }
 
         // Print first few TDC timestamps to see pattern
