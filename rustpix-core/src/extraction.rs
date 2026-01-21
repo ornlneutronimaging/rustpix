@@ -182,11 +182,19 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                     sum_tot += hit.tot() as u32;
                 }
 
-                (
-                    sum_x / sum_weight,
-                    sum_y / sum_weight,
-                    sum_tot.min(u16::MAX as u32) as u16,
-                )
+                if sum_weight > 0.0 {
+                    (
+                        sum_x / sum_weight,
+                        sum_y / sum_weight,
+                        sum_tot.min(u16::MAX as u32) as u16,
+                    )
+                } else {
+                    // Fall back to arithmetic mean if all TOT values are zero
+                    let n = cluster_indices.len() as f64;
+                    let mean_x: f64 = cluster_indices.iter().map(|&idx| hits[idx].x() as f64).sum::<f64>() / n;
+                    let mean_y: f64 = cluster_indices.iter().map(|&idx| hits[idx].y() as f64).sum::<f64>() / n;
+                    (mean_x, mean_y, 0)
+                }
             } else {
                 // Simple arithmetic mean
                 let mut sum_x = 0.0;
@@ -367,5 +375,32 @@ mod tests {
         assert_eq!(neutrons[0].tof, 3000);
         // Verify it's not using the filtered hit's TOF
         assert_ne!(neutrons[0].tof, 1000);
+    }
+
+    #[test]
+    fn test_zero_tot_weighted_centroid() {
+        // All hits have TOT = 0, which would cause divide-by-zero without the fix
+        let hits = vec![
+            GenericHit::new(1000, 10, 20, 500, 0, 0), // TOT = 0
+            GenericHit::new(1000, 30, 40, 500, 0, 0), // TOT = 0
+        ];
+        let labels = vec![0, 0];
+
+        // Disable TOT filtering so zero-TOT hits aren't filtered out
+        let mut extractor = SimpleCentroidExtraction::new();
+        extractor.configure(ExtractionConfig::default().with_min_tot_threshold(0));
+
+        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+
+        assert_eq!(neutrons.len(), 1);
+        // Should fall back to arithmetic mean: (10+30)/2 = 20, (20+40)/2 = 30
+        // Scaled by 8: 160, 240
+        assert!((neutrons[0].x - 160.0).abs() < 0.01);
+        assert!((neutrons[0].y - 240.0).abs() < 0.01);
+        assert_eq!(neutrons[0].tot, 0);
+        assert_eq!(neutrons[0].n_hits, 2);
+        // Verify no NaN
+        assert!(!neutrons[0].x.is_nan());
+        assert!(!neutrons[0].y.is_nan());
     }
 }
