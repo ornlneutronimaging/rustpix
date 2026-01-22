@@ -1,4 +1,15 @@
 //! SoA-based Grid Clustering.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_lossless,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::too_many_lines,
+    clippy::items_after_statements
+)]
 //!
 //! Adapted from generic GridClustering to work directly on HitBatch (SoA).
 

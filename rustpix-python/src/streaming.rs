@@ -1,4 +1,13 @@
 //! Streaming processing of TPX3 files.
+#![allow(
+    unsafe_code,
+    clippy::map_unwrap_or,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::redundant_closure_for_method_calls,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)]
 
 use numpy::PyArray1;
 use pyo3::prelude::*;

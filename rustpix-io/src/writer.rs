@@ -1,4 +1,5 @@
 //! File writers for processed data.
+#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 //!
 
 use crate::Result;

@@ -1,4 +1,14 @@
 //! rustpix-tpx: TPX3 packet parser, hit types, and file processor.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::float_cmp,
+    clippy::uninlined_format_args,
+    clippy::doc_markdown,
+    clippy::checked_conversions,
+    clippy::missing_errors_doc
+)]
 //!
 //! This crate provides TPX3-specific data structures and parsing logic
 //! for Timepix3 pixel detector data.
@@ -49,6 +59,7 @@ pub struct ChipTransform {
 
 impl ChipTransform {
     /// Create an identity transform.
+    #[must_use]
     pub fn identity() -> Self {
         Self {
             a: 1,
@@ -66,6 +77,7 @@ impl ChipTransform {
     /// This method assumes the transform has been validated via `validate_bounds()`.
     /// Using an unvalidated transform may cause incorrect results due to integer overflow.
     #[inline]
+    #[must_use]
     pub fn apply(&self, x: u16, y: u16) -> (u16, u16) {
         let x = x as i32;
         let y = y as i32;
@@ -205,6 +217,7 @@ impl DetectorConfig {
     /// - Chip 1: Rotation 180 + Translation (513, 513)
     /// - Chip 2: Rotation 180 + Translation (255, 513)
     /// - Chip 3: Identity (0, 0)
+    #[must_use]
     pub fn venus_defaults() -> Self {
         let transforms = vec![
             // Chip 0: [[1, 0, 258], [0, 1, 0]]
@@ -334,11 +347,13 @@ impl DetectorConfig {
     }
 
     /// TDC period in seconds.
+    #[must_use]
     pub fn tdc_period_seconds(&self) -> f64 {
         1.0 / self.tdc_frequency_hz
     }
 
     /// TDC correction value in 25ns units.
+    #[must_use]
     pub fn tdc_correction_25ns(&self) -> u32 {
         (self.tdc_period_seconds() / 25e-9).round() as u32
     }
@@ -347,6 +362,7 @@ impl DetectorConfig {
     ///
     /// Uses the configured affine transform for the given chip ID.
     /// If chip ID is out of bounds, returns local coordinates as-is (identity).
+    #[must_use]
     pub fn map_chip_to_global(&self, chip_id: u8, x: u16, y: u16) -> (u16, u16) {
         if let Some(transform) = self.chip_transforms.get(chip_id as usize) {
             transform.apply(x, y)

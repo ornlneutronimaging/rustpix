@@ -1,4 +1,9 @@
 //! Analyze behavior around TDC rollover point.
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::unreadable_literal,
+    clippy::doc_markdown
+)]
 //!
 //! Run with: cargo run --bin analyze_rollover -- <tpx3_file>
 

@@ -1,3 +1,8 @@
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::cast_possible_truncation,
+    clippy::unreadable_literal
+)]
 use rustpix_algorithms::{
     AbsClustering, AbsConfig, AbsState, GridClustering, GridConfig, GridState,
 };

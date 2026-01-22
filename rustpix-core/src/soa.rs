@@ -1,13 +1,13 @@
-//! Structure of Arrays (SoA) types for efficient processing.
+//! Structure of Arrays (`SoA`) types for efficient processing.
 //!
 //! This module defines the `HitBatch` structure which stores hit data
-//! in parallel vectors (SoA layout) rather than an array of structs (AoS).
+//! in parallel vectors (`SoA` layout) rather than an array of structs (`AoS`).
 //! This layout works better with modern CPU caches and SIMD instructions.
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-/// A batch of hits stored in Structure of Arrays (SoA) format.
+/// A batch of hits stored in Structure of Arrays (`SoA`) format.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct HitBatch {
@@ -29,6 +29,7 @@ pub struct HitBatch {
 
 impl HitBatch {
     /// Creates a new empty batch with specified capacity.
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             x: Vec::with_capacity(capacity),
@@ -42,11 +43,13 @@ impl HitBatch {
     }
 
     /// Returns the number of hits in the batch.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.x.len()
     }
 
     /// Returns true if the batch is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.x.is_empty()
     }
@@ -95,12 +98,12 @@ mod tests {
         let mut batch = HitBatch::with_capacity(10);
         assert!(batch.is_empty());
 
-        batch.push(10, 20, 1000, 5, 123456, 0);
+        batch.push(10, 20, 1000, 5, 123_456, 0);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch.x[0], 10);
         assert_eq!(batch.cluster_id[0], -1);
 
-        batch.push(11, 21, 1001, 6, 123457, 0);
+        batch.push(11, 21, 1001, 6, 123_457, 0);
         assert_eq!(batch.len(), 2);
 
         batch.clear();

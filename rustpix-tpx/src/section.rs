@@ -1,4 +1,10 @@
 //! Section-aware TPX3 file processing.
+#![allow(
+    clippy::cast_lossless,
+    clippy::items_after_statements,
+    clippy::must_use_candidate,
+    clippy::missing_panics_doc
+)]
 
 use super::packet::Tpx3Packet;
 

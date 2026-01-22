@@ -1,4 +1,12 @@
 //! Analyze timestamp patterns in TPX3 data to understand rollover behavior.
+#![allow(
+    clippy::cast_lossless,
+    clippy::uninlined_format_args,
+    clippy::doc_markdown,
+    clippy::explicit_iter_loop,
+    clippy::cast_precision_loss,
+    clippy::unreadable_literal
+)]
 //!
 //! Run with: cargo run --bin analyze_timestamps -- <tpx3_file>
 

@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "PyO3 Python bindings for rustpix"
 
+[lints]
+workspace = true
+
 [lib]
 name = "rustpix"
 crate-type = ["cdylib"]

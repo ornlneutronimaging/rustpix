@@ -1,4 +1,15 @@
 //! SoA-optimized DBSCAN clustering.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::explicit_iter_loop,
+    clippy::unused_self,
+    clippy::missing_errors_doc,
+    clippy::pub_underscore_fields,
+    clippy::must_use_candidate
+)]
 
 use rayon::prelude::*;
 use rustpix_core::clustering::ClusteringError;

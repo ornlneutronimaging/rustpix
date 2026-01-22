@@ -1,4 +1,12 @@
 //! rustpix-python: PyO3 Python bindings for rustpix.
+#![allow(
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::needless_pass_by_value,
+    clippy::uninlined_format_args,
+    clippy::elidable_lifetime_names,
+    clippy::similar_names
+)]
 //!
 //! This crate provides Python bindings using PyO3 and numpy
 //! for efficient data exchange with Python.
@@ -395,6 +403,7 @@ fn read_tpx3_file_numpy<'py>(
 /// Cluster hits using the specified algorithm.
 #[pyfunction]
 #[pyo3(signature = (hits, config=None, algorithm="abs"))]
+#[allow(clippy::needless_pass_by_value)]
 fn cluster_hits(
     hits: Vec<PyHit>,
     config: Option<PyClusteringConfig>,
@@ -489,6 +498,7 @@ fn cluster_hits_impl(
 /// Extract neutrons from clustered hits.
 #[pyfunction]
 #[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
+#[allow(clippy::needless_pass_by_value)]
 fn extract_neutrons(
     hits: Vec<PyHit>,
     labels: Vec<i32>,
@@ -518,6 +528,7 @@ fn extract_neutrons(
 /// Extract neutrons and return as numpy arrays.
 #[pyfunction]
 #[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
+#[allow(clippy::needless_pass_by_value, clippy::elidable_lifetime_names)]
 fn extract_neutrons_numpy<'py>(
     py: Python<'py>,
     hits: Vec<PyHit>,

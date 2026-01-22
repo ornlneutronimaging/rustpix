@@ -1,4 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    clippy::uninlined_format_args,
+    clippy::cast_precision_loss,
+    clippy::redundant_closure_for_method_calls,
+    clippy::cast_lossless,
+    clippy::assigning_clones,
+    clippy::cast_possible_wrap,
+    clippy::explicit_iter_loop,
+    clippy::manual_let_else,
+    clippy::struct_excessive_bools,
+    clippy::items_after_statements,
+    clippy::format_push_string,
+    unsafe_code
+)]
 
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Plot, PlotImage, PlotPoint};

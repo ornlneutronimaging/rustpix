@@ -49,3 +49,10 @@ numpy = "0.23"
 # Testing
 approx = "0.5"
 tempfile = "3.14"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

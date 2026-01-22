@@ -1,4 +1,9 @@
 //! Section scanner for TPX3 files.
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::uninlined_format_args
+)]
 //!
 //! Identifies logical sections in the file based on TPX3 headers.
 
@@ -51,7 +56,7 @@ impl PacketScanner {
             let packet = u64::from_le_bytes(chunk.try_into().unwrap());
 
             // Check if this is a TPX3 header: magic "TPX3" (0x33585054) in lower 32 bits
-            if (packet & 0xFFFFFFFF) == 0x33585054 {
+            if (packet & 0xFFFF_FFFF) == 0x3358_5054 {
                 let chip_id = ((packet >> 32) & 0xFF) as u8;
 
                 if in_section {

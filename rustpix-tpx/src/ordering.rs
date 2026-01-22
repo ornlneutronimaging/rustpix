@@ -1,4 +1,5 @@
 //! Efficient time-ordering of hits using a K-way merge strategy.
+#![allow(clippy::missing_panics_doc)]
 //!
 //! # Problem
 //! TPX3 data comes in "sections" (chunks) per chip. Packets within a chip are
@@ -257,7 +258,7 @@ impl<'a> PulseReader<'a> {
             self.ready_queue.push_back(prev);
         }
 
-        let last_chip = self.sections.last().map(|s| s.chip_id).unwrap_or(0);
+        let last_chip = self.sections.last().map_or(0, |s| s.chip_id);
 
         if let Some(curr_tdc) = self.curr_tdc.take() {
             if !self.curr_hits.is_empty() {
@@ -326,7 +327,7 @@ impl<'a> TimeOrderedStream<'a> {
     }
 }
 
-impl<'a> Iterator for TimeOrderedStream<'a> {
+impl Iterator for TimeOrderedStream<'_> {
     type Item = Tpx3Hit;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -360,14 +361,14 @@ impl<'a> Iterator for TimeOrderedStream<'a> {
                     }
                 }
 
-                if !merged_hits.is_empty() {
-                    merged_hits.sort_by_key(|h| h.tof);
-                    self.current_batch_hits = merged_hits.into_iter();
-                    if let Some(hit) = self.current_batch_hits.next() {
-                        return Some(hit);
-                    }
-                } else {
+                if merged_hits.is_empty() {
                     continue;
+                }
+
+                merged_hits.sort_by_key(|h| h.tof);
+                self.current_batch_hits = merged_hits.into_iter();
+                if let Some(hit) = self.current_batch_hits.next() {
+                    return Some(hit);
                 }
             } else {
                 return None;
@@ -377,5 +378,5 @@ impl<'a> Iterator for TimeOrderedStream<'a> {
 }
 
 fn reader_chip_id(reader: &PulseReader) -> u8 {
-    reader.sections.first().map(|s| s.chip_id).unwrap_or(0)
+    reader.sections.first().map_or(0, |s| s.chip_id)
 }

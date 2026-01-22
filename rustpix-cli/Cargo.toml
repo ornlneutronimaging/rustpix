@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Command-line interface for rustpix pixel detector processing"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "rustpix"
 path = "src/main.rs"

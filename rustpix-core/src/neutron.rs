@@ -1,4 +1,9 @@
 //! Neutron event output type.
+#![allow(
+    clippy::cast_lossless,
+    clippy::pub_underscore_fields,
+    clippy::similar_names
+)]
 //!
 
 /// A detected neutron event after clustering and centroid extraction.
@@ -25,6 +30,7 @@ pub struct Neutron {
 
 impl Neutron {
     /// Create a new neutron from cluster data.
+    #[must_use]
     pub fn new(x: f64, y: f64, tof: u32, tot: u16, n_hits: u16, chip_id: u8) -> Self {
         Self {
             x,
@@ -39,23 +45,27 @@ impl Neutron {
 
     /// TOF in nanoseconds.
     #[inline]
+    #[must_use]
     pub fn tof_ns(&self) -> f64 {
         self.tof as f64 * 25.0
     }
 
     /// TOF in milliseconds.
     #[inline]
+    #[must_use]
     pub fn tof_ms(&self) -> f64 {
         self.tof_ns() / 1_000_000.0
     }
 
     /// Pixel coordinates (divide by super-resolution factor).
     #[inline]
+    #[must_use]
     pub fn pixel_coords(&self, super_res: f64) -> (f64, f64) {
         (self.x / super_res, self.y / super_res)
     }
 
     /// Cluster size category.
+    #[must_use]
     pub fn cluster_size_category(&self) -> ClusterSize {
         match self.n_hits {
             1 => ClusterSize::Single,
@@ -91,6 +101,7 @@ pub struct NeutronStatistics {
 
 impl NeutronStatistics {
     /// Calculate statistics from a slice of neutrons.
+    #[allow(clippy::cast_precision_loss, clippy::cast_lossless)]
     pub fn from_neutrons(neutrons: &[Neutron]) -> Self {
         if neutrons.is_empty() {
             return Self::default();
@@ -142,6 +153,7 @@ impl NeutronStatistics {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]

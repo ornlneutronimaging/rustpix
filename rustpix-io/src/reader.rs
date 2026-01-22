@@ -1,4 +1,12 @@
 //! Memory-mapped file readers.
+#![allow(
+    clippy::return_self_not_must_use,
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::items_after_statements,
+    clippy::missing_panics_doc,
+    unsafe_code
+)]
 //!
 
 use crate::{Error, Result};

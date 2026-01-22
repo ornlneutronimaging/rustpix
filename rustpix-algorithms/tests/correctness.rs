@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 use rustpix_algorithms::{
     AbsClustering, AbsConfig, AbsState, DbscanClustering, DbscanConfig, DbscanState,
     GridClustering, GridConfig, GridState,

@@ -1,4 +1,12 @@
 //! Neutron extraction traits and configuration.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless,
+    clippy::missing_errors_doc,
+    clippy::doc_markdown,
+    clippy::cast_possible_wrap
+)]
 //!
 
 use crate::error::ExtractionError;
@@ -28,23 +36,27 @@ impl Default for ExtractionConfig {
 
 impl ExtractionConfig {
     /// Create VENUS/SNS default configuration.
+    #[must_use]
     pub fn venus_defaults() -> Self {
         Self::default()
     }
 
     /// Set super resolution factor.
+    #[must_use]
     pub fn with_super_resolution(mut self, factor: f64) -> Self {
         self.super_resolution_factor = factor;
         self
     }
 
     /// Set TOT weighting.
+    #[must_use]
     pub fn with_weighted_by_tot(mut self, weighted: bool) -> Self {
         self.weighted_by_tot = weighted;
         self
     }
 
     /// Set minimum TOT threshold.
+    #[must_use]
     pub fn with_min_tot_threshold(mut self, threshold: u16) -> Self {
         self.min_tot_threshold = threshold;
         self
@@ -94,6 +106,7 @@ pub struct SimpleCentroidExtraction {
 
 impl SimpleCentroidExtraction {
     /// Create with default configuration.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             config: ExtractionConfig::default(),
@@ -101,6 +114,7 @@ impl SimpleCentroidExtraction {
     }
 
     /// Create with custom configuration.
+    #[must_use]
     pub fn with_config(config: ExtractionConfig) -> Self {
         Self { config }
     }
@@ -240,6 +254,7 @@ impl NeutronExtraction for SimpleCentroidExtraction {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::float_cmp)]
     use super::*;
     use crate::hit::GenericHit;
 

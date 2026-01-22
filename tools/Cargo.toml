@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Diagnostic and analysis tools for TPX3 data"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "analyze-timestamps"
 path = "analyze_timestamps.rs"

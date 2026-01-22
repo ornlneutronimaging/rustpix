@@ -1,4 +1,9 @@
 //! TPX3-specific hit type.
+#![allow(
+    clippy::pub_underscore_fields,
+    clippy::must_use_candidate,
+    clippy::unreadable_literal
+)]
 //!
 
 use rustpix_core::hit::{ClusterableHit, Hit};
@@ -29,6 +34,7 @@ pub struct Tpx3Hit {
 
 impl Tpx3Hit {
     /// Create a new hit.
+    #[must_use]
     pub fn new(tof: u32, x: u16, y: u16, timestamp: u32, tot: u16, chip_id: u8) -> Self {
         Self {
             tof,
@@ -108,6 +114,7 @@ impl PartialOrd for Tpx3Hit {
 ///
 /// Formula: if hit_ts + 0x400000 < tdc_ts, extend by 0x40000000
 #[inline]
+#[must_use]
 pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32 {
     const EXTENSION_THRESHOLD: u32 = 0x400000;
     const EXTENSION_VALUE: u32 = 0x40000000;
@@ -130,6 +137,7 @@ pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32
 /// * `tdc_correction_25ns` - The TDC period in 25ns units (1 / TDC_frequency).
 ///   For SNS (60Hz), this is approximately 666,667 units (16.67ms / 25ns).
 #[inline]
+#[must_use]
 pub fn calculate_tof(timestamp: u32, tdc_timestamp: u32, tdc_correction_25ns: u32) -> u32 {
     let raw_tof = timestamp.wrapping_sub(tdc_timestamp);
     if raw_tof > tdc_correction_25ns {

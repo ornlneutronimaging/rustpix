@@ -1,4 +1,12 @@
 //! Spatial indexing for efficient neighbor lookup.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    unsafe_code,
+    clippy::needless_pass_by_value,
+    clippy::must_use_candidate
+)]
 //!
 
 /// Spatial grid for efficient 2D neighbor queries.

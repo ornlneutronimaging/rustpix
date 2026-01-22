@@ -1,4 +1,5 @@
 //! Clustering algorithm traits and configuration.
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 //!
 
 // Re-export ClusteringError for convenience
@@ -33,35 +34,41 @@ impl Default for ClusteringConfig {
 
 impl ClusteringConfig {
     /// Create VENUS/SNS default configuration.
+    #[must_use]
     pub fn venus_defaults() -> Self {
         Self::default()
     }
 
     /// Temporal window in TOF units (25ns).
     #[inline]
+    #[must_use]
     pub fn window_tof(&self) -> u32 {
         (self.temporal_window_ns / 25.0).ceil() as u32
     }
 
     /// Set spatial radius.
+    #[must_use]
     pub fn with_radius(mut self, radius: f64) -> Self {
         self.radius = radius;
         self
     }
 
     /// Set temporal window.
+    #[must_use]
     pub fn with_temporal_window_ns(mut self, window_ns: f64) -> Self {
         self.temporal_window_ns = window_ns;
         self
     }
 
     /// Set minimum cluster size.
+    #[must_use]
     pub fn with_min_cluster_size(mut self, size: u16) -> Self {
         self.min_cluster_size = size;
         self
     }
 
     /// Set maximum cluster size.
+    #[must_use]
     pub fn with_max_cluster_size(mut self, size: u16) -> Self {
         self.max_cluster_size = Some(size);
         self
@@ -81,6 +88,7 @@ pub struct ClusteringStatistics {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]

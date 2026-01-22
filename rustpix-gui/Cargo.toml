@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "GUI application for rustpix pixel detector processing"
 
+[lints]
+workspace = true
+
 [dependencies]
 rustpix-core.workspace = true
 rustpix-io.workspace = true

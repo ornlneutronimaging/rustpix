@@ -1,4 +1,16 @@
 //! SoA-optimized ABS (Age-Based Spatial) clustering.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::explicit_iter_loop,
+    clippy::unused_self,
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
 
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;

@@ -1,4 +1,5 @@
 //! Hit traits and types for pixel detector data.
+#![allow(clippy::cast_lossless, clippy::pub_underscore_fields)]
 //!
 
 /// Core trait for all detector hit types.
@@ -91,6 +92,7 @@ pub struct GenericHit {
 
 impl GenericHit {
     /// Create a new hit.
+    #[must_use]
     pub fn new(tof: u32, x: u16, y: u16, timestamp: u32, tot: u16, chip_id: u8) -> Self {
         Self {
             tof,
@@ -159,6 +161,7 @@ impl PartialOrd for GenericHit {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]

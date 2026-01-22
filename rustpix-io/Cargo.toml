@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Memory-mapped file I/O for rustpix"
 
+[lints]
+workspace = true
+
 [dependencies]
 rustpix-core = { workspace = true }
 rustpix-tpx = { workspace = true }

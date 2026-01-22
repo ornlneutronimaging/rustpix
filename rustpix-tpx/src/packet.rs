@@ -1,4 +1,5 @@
 //! TPX3 packet parsing.
+#![allow(clippy::must_use_candidate, clippy::unreadable_literal)]
 //!
 
 /// TPX3 packet wrapper providing efficient field extraction.

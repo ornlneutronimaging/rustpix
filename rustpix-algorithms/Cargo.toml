@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Clustering algorithms (ABS, DBSCAN, Graph, Grid) with spatial indexing"
 
+[lints]
+workspace = true
+
 [dependencies]
 rustpix-core.workspace = true
 rayon.workspace = true
