@@ -215,7 +215,7 @@ impl AbsClustering {
             if let Some(bidx) = found {
                 state.buckets[bidx].add_hit(i, x, y);
             } else {
-                let bidx = self.get_bucket(state);
+                let bidx = self.get_bucket(state)?;
                 state.buckets[bidx].initialize(i, x, y, tof);
                 state.active_indices.push(bidx);
 
@@ -276,13 +276,18 @@ impl AbsClustering {
         Ok(state.next_cluster_id as usize)
     }
 
-    fn get_bucket(&self, state: &mut AbsState) -> usize {
+    fn get_bucket(&self, state: &mut AbsState) -> Result<usize, ClusteringError> {
         if let Some(idx) = state.free_indices.pop() {
-            idx
+            Ok(idx)
         } else {
+            if state.buckets.len() >= 1_000_000 {
+                return Err(ClusteringError::StateError(
+                    "bucket pool size exceeds limit (1,000,000)".to_string(),
+                ));
+            }
             let idx = state.buckets.len();
             state.buckets.push(Bucket::new());
-            idx
+            Ok(idx)
         }
     }
 
