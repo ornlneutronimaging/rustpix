@@ -95,21 +95,6 @@ impl GridClustering {
         let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
         let cell_size = self.config.cell_size as i32;
 
-        // Helper to check distance using SoA vectors
-        let check_connection = |i: usize, j: usize| -> bool {
-            let dx = batch.x[i] as f64 - batch.x[j] as f64;
-            let dy = batch.y[i] as f64 - batch.y[j] as f64;
-            let dist_sq = dx * dx + dy * dy;
-
-            if dist_sq > radius_sq {
-                return false;
-            }
-
-            let dt = batch.tof[i].abs_diff(batch.tof[j]);
-
-            dt <= window_tof
-        };
-
         // Union-Find Operations
         fn find(parent: &mut [usize], i: usize) -> usize {
             let mut root = i;
@@ -158,7 +143,18 @@ impl GridClustering {
                         let start = cell.partition_point(|&idx| idx <= i);
 
                         for &j in &cell[start..] {
-                            if check_connection(i, j) {
+                            // Temporal Pruning: valid because input is TOF-sorted
+                            let dt = batch.tof[j].wrapping_sub(batch.tof[i]);
+                            if dt > window_tof {
+                                break;
+                            }
+
+                            // Inline spatial check
+                            let dx = batch.x[i] as f64 - batch.x[j] as f64;
+                            let dy = batch.y[i] as f64 - batch.y[j] as f64;
+                            let dist_sq = dx * dx + dy * dy;
+
+                            if dist_sq <= radius_sq {
                                 union_sets(&mut parent, &mut rank, i, j);
                             }
                         }
@@ -232,6 +228,70 @@ mod tests {
 
         assert_eq!(count, 3); // 1, 2, and 3 (noise is usually single-hit cluster if min_size=1)
                               // With default min_cluster_size=1, noise is a cluster.
+
+        assert_eq!(batch.cluster_id[0], batch.cluster_id[1]);
+        assert_ne!(batch.cluster_id[0], batch.cluster_id[2]);
+    }
+
+    #[test]
+    fn test_grid_requires_tof_sorted_input() {
+        // This test documents that if hits are not sorted by TOF, clustering might fail to link them
+        // if we rely on temporal pruning (break loop early).
+        //
+        // Example: Hit A (TOF 100), Hit B (TOF 200), Hit C (TOF 102)
+        // If stored as [A, B, C], when processing A:
+        //   - Check A vs B (diff 100). If window=10, loop breaks.
+        //   - A vs C never checked.
+        // Result: A not linked to C, even though diff is 2.
+
+        let mut batch = HitBatch::default();
+        batch.push(10, 10, 100, 5, 0, 0); // Hit A
+        batch.push(10, 10, 200, 5, 0, 0); // Hit B (far future)
+        batch.push(10, 10, 102, 5, 0, 0); // Hit C (should be with A)
+
+        // Window of 2 ticks (25ns each): 50ns / 25.0 = 2.0, ceil = 2
+        let config = GridConfig {
+            temporal_window_ns: 50.0,
+            ..Default::default()
+        };
+        let algo = GridClustering::new(config);
+        let mut state = GridState::default();
+
+        // This relies on implementation detail. If we implement pruning, we expect A and C NOT to cluster
+        // because B stops the search from A.
+        algo.cluster(&mut batch, &mut state).unwrap();
+
+        // If full N^2 check, A and C would cluster.
+        // With pruning, they won't.
+        assert_ne!(
+            batch.cluster_id[0], batch.cluster_id[2],
+            "Pruning should prevent linking unsorted hits separated by future hits"
+        );
+    }
+
+    #[test]
+    fn test_grid_temporal_pruning() {
+        let mut batch = HitBatch::default();
+
+        // Ensure that we don't scan infinity.
+        // A, B, C, D... sorted.
+        // A (0), B (100), C (200), D (300). Window = 50.
+        // A checks B -> fail, break. A checks C? No.
+        // If logic is correct, performance is O(N * window_density) not O(N^2).
+
+        // Correctness check:
+        batch.push(10, 10, 100, 5, 0, 0);
+        batch.push(10, 10, 101, 5, 0, 0); // Linked to 0 (delta 1 tick = 25ns < 50ns)
+        batch.push(10, 10, 200, 5, 0, 0); // Not linked
+
+        let config = GridConfig {
+            temporal_window_ns: 50.0, // ~2 ticks
+            ..Default::default()
+        };
+        let algo = GridClustering::new(config);
+        let mut state = GridState::default();
+
+        algo.cluster(&mut batch, &mut state).unwrap();
 
         assert_eq!(batch.cluster_id[0], batch.cluster_id[1]);
         assert_ne!(batch.cluster_id[0], batch.cluster_id[2]);
