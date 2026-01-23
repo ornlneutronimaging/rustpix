@@ -36,6 +36,8 @@ pytest = "*"
 [tool.pixi.feature.jupyter.dependencies]
 jupyterlab = "*"
 ipykernel = "*"
+numpy = "*"
+matplotlib = "*"
 
 [tool.pixi.environments]
 default = { features = [] }
