@@ -39,7 +39,10 @@ fn make_hit(timestamp: u32, tot: u16, addr: u16) -> u64 {
         | (spidr as u64)
 }
 
-fn collect_batches(stream: TimeOrderedStream<'_>) -> HitBatch {
+fn collect_batches<D>(stream: TimeOrderedStream<D>) -> HitBatch
+where
+    D: AsRef<[u8]> + Clone,
+{
     let mut batch = HitBatch::default();
     for pulse_batch in stream {
         batch.append(&pulse_batch);
