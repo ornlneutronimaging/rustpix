@@ -1,8 +1,5 @@
 //! TPX3 timing helpers.
-#![allow(
-    clippy::must_use_candidate,
-    clippy::unreadable_literal
-)]
+#![allow(clippy::must_use_candidate, clippy::unreadable_literal)]
 //!
 
 /// Timestamp rollover correction.

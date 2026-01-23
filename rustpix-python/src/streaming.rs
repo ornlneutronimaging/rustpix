@@ -220,7 +220,7 @@ impl MeasurementStream {
                 // We no longer need to construct Vec<GenericHit>, saving a massive allocation and copy.
                 // We used to do:
                 // let mut hit_data = Vec::with_capacity(n); ...
-                
+
                 // Find num clusters
                 let max_label = combined_batch
                     .cluster_id

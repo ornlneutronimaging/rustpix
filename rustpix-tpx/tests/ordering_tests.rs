@@ -7,11 +7,11 @@
     clippy::unreadable_literal,
     clippy::ignore_without_reason
 )]
+use rustpix_core::soa::HitBatch;
 use rustpix_tpx::ordering::TimeOrderedStream;
 use rustpix_tpx::section::discover_sections;
 use rustpix_tpx::DetectorConfig;
 use rustpix_tpx::Tpx3Packet;
-use rustpix_core::soa::HitBatch;
 
 // Helper to create a TPX3 header packet
 fn make_header(chip_id: u8) -> u64 {

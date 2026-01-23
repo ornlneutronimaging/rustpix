@@ -117,8 +117,7 @@ impl Tpx3FileReader {
         let mut section_batches: Vec<HitBatch> = sections
             .par_iter()
             .map(|section| {
-                let mut batch =
-                    HitBatch::with_capacity((section.packet_count() * 6) / 10);
+                let mut batch = HitBatch::with_capacity((section.packet_count() * 6) / 10);
                 let _ = process_section_into_batch(
                     data,
                     section,

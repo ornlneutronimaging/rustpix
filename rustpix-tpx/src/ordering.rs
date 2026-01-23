@@ -317,10 +317,7 @@ impl<'a> TimeOrderedStream<'a> {
             readers.push(reader);
         }
 
-        Self {
-            readers,
-            heap,
-        }
+        Self { readers, heap }
     }
 }
 
