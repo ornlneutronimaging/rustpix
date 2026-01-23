@@ -151,95 +151,254 @@ impl NeutronExtraction for SimpleCentroidExtraction {
         num_clusters: usize,
     ) -> Result<Vec<Neutron>, ExtractionError> {
         let mut accumulators = vec![ClusterAccumulator::default(); num_clusters];
+        let labels = &batch.cluster_id;
+        let x_values = &batch.x;
+        let y_values = &batch.y;
+        let time_of_flight = &batch.tof;
+        let time_over_threshold = &batch.tot;
+        let chip_ids = &batch.chip_id;
 
-        // First pass: accumulate sums and find max TOT
-        for i in 0..batch.len() {
-            let label = batch.cluster_id[i];
-            if label < 0 {
-                continue;
-            }
+        if self.config.weighted_by_tot {
+            accumulate_weighted(
+                &mut accumulators,
+                labels,
+                x_values,
+                y_values,
+                time_over_threshold,
+                num_clusters,
+                self.config.min_tot_threshold,
+            );
+            Ok(build_neutrons_weighted(
+                accumulators,
+                time_of_flight,
+                chip_ids,
+                self.config.super_resolution_factor,
+            ))
+        } else {
+            accumulate_unweighted(
+                &mut accumulators,
+                labels,
+                x_values,
+                y_values,
+                time_over_threshold,
+                num_clusters,
+                self.config.min_tot_threshold,
+            );
+            Ok(build_neutrons_unweighted(
+                accumulators,
+                time_of_flight,
+                chip_ids,
+                self.config.super_resolution_factor,
+            ))
+        }
+    }
+}
 
-            let Ok(cluster_idx) = usize::try_from(label) else {
+#[allow(clippy::cast_sign_loss)]
+#[inline]
+fn cluster_index(label: i32, num_clusters: usize) -> Option<usize> {
+    if label < 0 {
+        return None;
+    }
+    let idx = label as usize;
+    if idx >= num_clusters {
+        None
+    } else {
+        Some(idx)
+    }
+}
+
+fn accumulate_weighted(
+    accumulators: &mut [ClusterAccumulator],
+    labels: &[i32],
+    x_values: &[u16],
+    y_values: &[u16],
+    tot_values: &[u16],
+    num_clusters: usize,
+    min_tot: u16,
+) {
+    if min_tot > 0 {
+        for i in 0..labels.len() {
+            let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
                 continue;
             };
-            if cluster_idx >= num_clusters {
-                continue;
-            }
-
-            let tot = batch.tot[i];
-
-            // Apply filtering
-            if self.config.min_tot_threshold > 0 && tot < self.config.min_tot_threshold {
+            let tot = tot_values[i];
+            if tot < min_tot {
                 continue;
             }
 
             let acc = &mut accumulators[cluster_idx];
-            let x = batch.x[i] as f64;
-            let y = batch.y[i] as f64;
+            let x = x_values[i] as f64;
+            let y = y_values[i] as f64;
+            let weight = tot as f64;
 
             acc.count += 1;
             acc.sum_tot += tot as u64;
-
             acc.raw_sum_x += x;
             acc.raw_sum_y += y;
-
-            if self.config.weighted_by_tot {
-                let weight = tot as f64;
-                acc.sum_x += x * weight;
-                acc.sum_y += y * weight;
-                acc.sum_weight += weight;
-            }
+            acc.sum_x += x * weight;
+            acc.sum_y += y * weight;
+            acc.sum_weight += weight;
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
                 acc.max_tot_index = i;
             }
         }
+    } else {
+        for i in 0..labels.len() {
+            let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
+                continue;
+            };
+            let tot = tot_values[i];
+            let acc = &mut accumulators[cluster_idx];
+            let x = x_values[i] as f64;
+            let y = y_values[i] as f64;
+            let weight = tot as f64;
 
-        // Second pass: generate neutrons
-        let mut neutrons = Vec::with_capacity(num_clusters);
+            acc.count += 1;
+            acc.sum_tot += tot as u64;
+            acc.raw_sum_x += x;
+            acc.raw_sum_y += y;
+            acc.sum_x += x * weight;
+            acc.sum_y += y * weight;
+            acc.sum_weight += weight;
 
-        for acc in accumulators {
-            if acc.count == 0 {
+            if tot >= acc.max_tot {
+                acc.max_tot = tot;
+                acc.max_tot_index = i;
+            }
+        }
+    }
+}
+
+fn accumulate_unweighted(
+    accumulators: &mut [ClusterAccumulator],
+    labels: &[i32],
+    x_values: &[u16],
+    y_values: &[u16],
+    tot_values: &[u16],
+    num_clusters: usize,
+    min_tot: u16,
+) {
+    if min_tot > 0 {
+        for i in 0..labels.len() {
+            let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
+                continue;
+            };
+            let tot = tot_values[i];
+            if tot < min_tot {
                 continue;
             }
 
-            let (centroid_x, centroid_y) = if self.config.weighted_by_tot {
-                if acc.sum_weight > 0.0 {
-                    (acc.sum_x / acc.sum_weight, acc.sum_y / acc.sum_weight)
-                } else {
-                    // Fall back to arithmetic mean if all TOT values are zero
-                    (
-                        acc.raw_sum_x / acc.count as f64,
-                        acc.raw_sum_y / acc.count as f64,
-                    )
-                }
-            } else {
-                (
-                    acc.raw_sum_x / acc.count as f64,
-                    acc.raw_sum_y / acc.count as f64,
-                )
+            let acc = &mut accumulators[cluster_idx];
+            let x = x_values[i] as f64;
+            let y = y_values[i] as f64;
+
+            acc.count += 1;
+            acc.sum_tot += tot as u64;
+            acc.raw_sum_x += x;
+            acc.raw_sum_y += y;
+
+            if tot >= acc.max_tot {
+                acc.max_tot = tot;
+                acc.max_tot_index = i;
+            }
+        }
+    } else {
+        for i in 0..labels.len() {
+            let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
+                continue;
             };
+            let tot = tot_values[i];
 
-            let representative_tof = batch.tof[acc.max_tot_index];
-            let representative_chip = batch.chip_id[acc.max_tot_index];
+            let acc = &mut accumulators[cluster_idx];
+            let x = x_values[i] as f64;
+            let y = y_values[i] as f64;
 
-            // Apply super-resolution scaling
-            let scaled_x = centroid_x * self.config.super_resolution_factor;
-            let scaled_y = centroid_y * self.config.super_resolution_factor;
+            acc.count += 1;
+            acc.sum_tot += tot as u64;
+            acc.raw_sum_x += x;
+            acc.raw_sum_y += y;
 
-            neutrons.push(Neutron::new(
-                scaled_x,
-                scaled_y,
-                representative_tof,
-                acc.sum_tot.min(u16::MAX as u64) as u16,
-                acc.count as u16,
-                representative_chip,
-            ));
+            if tot >= acc.max_tot {
+                acc.max_tot = tot;
+                acc.max_tot_index = i;
+            }
+        }
+    }
+}
+
+fn build_neutrons_weighted(
+    accumulators: Vec<ClusterAccumulator>,
+    tof_values: &[u32],
+    chip_ids: &[u8],
+    scale: f64,
+) -> Vec<Neutron> {
+    let mut neutrons = Vec::with_capacity(accumulators.len());
+    for acc in accumulators {
+        if acc.count == 0 {
+            continue;
         }
 
-        Ok(neutrons)
+        let (centroid_x, centroid_y) = if acc.sum_weight > 0.0 {
+            (acc.sum_x / acc.sum_weight, acc.sum_y / acc.sum_weight)
+        } else {
+            (
+                acc.raw_sum_x / acc.count as f64,
+                acc.raw_sum_y / acc.count as f64,
+            )
+        };
+
+        let representative_tof = tof_values[acc.max_tot_index];
+        let representative_chip = chip_ids[acc.max_tot_index];
+
+        let scaled_x = centroid_x * scale;
+        let scaled_y = centroid_y * scale;
+
+        neutrons.push(Neutron::new(
+            scaled_x,
+            scaled_y,
+            representative_tof,
+            acc.sum_tot.min(u16::MAX as u64) as u16,
+            acc.count as u16,
+            representative_chip,
+        ));
     }
+    neutrons
+}
+
+fn build_neutrons_unweighted(
+    accumulators: Vec<ClusterAccumulator>,
+    tof_values: &[u32],
+    chip_ids: &[u8],
+    scale: f64,
+) -> Vec<Neutron> {
+    let mut neutrons = Vec::with_capacity(accumulators.len());
+    for acc in accumulators {
+        if acc.count == 0 {
+            continue;
+        }
+
+        let centroid_x = acc.raw_sum_x / acc.count as f64;
+        let centroid_y = acc.raw_sum_y / acc.count as f64;
+
+        let representative_tof = tof_values[acc.max_tot_index];
+        let representative_chip = chip_ids[acc.max_tot_index];
+
+        let scaled_x = centroid_x * scale;
+        let scaled_y = centroid_y * scale;
+
+        neutrons.push(Neutron::new(
+            scaled_x,
+            scaled_y,
+            representative_tof,
+            acc.sum_tot.min(u16::MAX as u64) as u16,
+            acc.count as u16,
+            representative_chip,
+        ));
+    }
+    neutrons
 }
 
 #[cfg(test)]
