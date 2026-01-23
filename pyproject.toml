@@ -21,7 +21,7 @@ module-name = "rustpix"
 [tool.pixi.workspace]
 name = "rustpix"
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-64", "osx-64"]
+platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.14"
@@ -33,6 +33,14 @@ pre-commit = "*"
 taplo = "*"
 pytest = "*"
 
+[tool.pixi.feature.jupyter.dependencies]
+jupyterlab = "*"
+ipykernel = "*"
+
+[tool.pixi.environments]
+default = { features = [] }
+jupyter = { features = ["jupyter"] }
+
 [tool.pixi.tasks]
 # Core tasks
 test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && test -d tests && python -m pytest tests/ -v || echo 'No Python tests yet'", description = "Run all tests (Rust + Python)" }
@@ -42,3 +50,4 @@ gui = { cmd = "cargo run -p rustpix-gui --release", env = { RUSTFLAGS = "-C targ
 gui-debug = { cmd = "cargo run -p rustpix-gui", description = "Build and run GUI in debug mode" }
 docs = { cmd = "cargo doc --workspace --no-deps --open", description = "Build and open documentation" }
 clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf '{}' + 2>/dev/null || true", description = "Remove all build artifacts" }
+notebook = { cmd = "jupyter lab", description = "Launch JupyterLab (use pixi run -e jupyter notebook)" }
