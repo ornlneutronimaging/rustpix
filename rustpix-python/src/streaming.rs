@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use rustpix_algorithms::{GridClustering, GridConfig, GridState};
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
-use rustpix_core::hit::GenericHit;
+// use rustpix_core::hit::GenericHit; // Removed
 use rustpix_core::soa::HitBatch;
 use rustpix_io::{MappedFileReader, PacketScanner};
 use rustpix_tpx::section::{process_section_into_batch, scan_section_tdc, Tpx3Section};
@@ -217,20 +217,10 @@ impl MeasurementStream {
                 }
 
                 // 5. Extract Neutrons
-                let mut hit_data = Vec::with_capacity(n);
-                for i in 0..n {
-                    hit_data.push(GenericHit {
-                        x: combined_batch.x[i],
-                        y: combined_batch.y[i],
-                        tof: combined_batch.tof[i],
-                        tot: combined_batch.tot[i],
-                        timestamp: combined_batch.timestamp[i],
-                        chip_id: combined_batch.chip_id[i],
-                        cluster_id: combined_batch.cluster_id[i],
-                        _padding: 0,
-                    });
-                }
-
+                // We no longer need to construct Vec<GenericHit>, saving a massive allocation and copy.
+                // We used to do:
+                // let mut hit_data = Vec::with_capacity(n); ...
+                
                 // Find num clusters
                 let max_label = combined_batch
                     .cluster_id
@@ -252,7 +242,7 @@ impl MeasurementStream {
                 );
 
                 let neutrons = extractor
-                    .extract(&hit_data, &combined_batch.cluster_id, num_clusters)
+                    .extract_soa(&combined_batch, num_clusters)
                     .map_err(|e| e.to_string())?;
 
                 Ok((combined_batch, neutrons, consumed, tdc_state))

@@ -87,6 +87,43 @@ impl HitBatch {
         self.chip_id.push(chip_id);
         self.cluster_id.push(-1); // Default unclustered
     }
+
+    /// Sorts all hits by TOF, keeping columns aligned.
+    pub fn sort_by_tof(&mut self) {
+        let len = self.len();
+        if len <= 1 {
+            return;
+        }
+
+        let mut indices: Vec<usize> = (0..len).collect();
+        indices.sort_unstable_by_key(|&i| self.tof[i]);
+
+        let mut x = Vec::with_capacity(len);
+        let mut y = Vec::with_capacity(len);
+        let mut tof = Vec::with_capacity(len);
+        let mut tot = Vec::with_capacity(len);
+        let mut timestamp = Vec::with_capacity(len);
+        let mut chip_id = Vec::with_capacity(len);
+        let mut cluster_id = Vec::with_capacity(len);
+
+        for i in indices {
+            x.push(self.x[i]);
+            y.push(self.y[i]);
+            tof.push(self.tof[i]);
+            tot.push(self.tot[i]);
+            timestamp.push(self.timestamp[i]);
+            chip_id.push(self.chip_id[i]);
+            cluster_id.push(self.cluster_id[i]);
+        }
+
+        self.x = x;
+        self.y = y;
+        self.tof = tof;
+        self.tot = tot;
+        self.timestamp = timestamp;
+        self.chip_id = chip_id;
+        self.cluster_id = cluster_id;
+    }
 }
 
 #[cfg(test)]

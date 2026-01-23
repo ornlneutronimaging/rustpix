@@ -10,7 +10,6 @@
 //!
 
 use crate::error::ExtractionError;
-use crate::hit::Hit;
 use crate::neutron::Neutron;
 
 /// Configuration for neutron extraction.
@@ -76,21 +75,34 @@ pub trait NeutronExtraction: Send + Sync {
     /// Get current configuration.
     fn config(&self) -> &ExtractionConfig;
 
-    /// Extract neutrons from clustered hits.
+    /// Extract neutrons from a HitBatch using SoA layout.
     ///
-    /// # Arguments
-    /// * `hits` - Slice of hits (matching labels array)
-    /// * `labels` - Cluster labels from clustering algorithm
-    /// * `num_clusters` - Number of clusters found
-    ///
-    /// # Returns
-    /// Vector of extracted neutrons (one per cluster).
-    fn extract<H: Hit>(
+    /// This implementation is optimized for SoA and uses a single pass over the hits
+    /// (O(N) + O(C)) rather than iterating by cluster (O(N*C)).
+    fn extract_soa(
         &self,
-        hits: &[H],
-        labels: &[i32],
+        batch: &crate::soa::HitBatch,
         num_clusters: usize,
     ) -> Result<Vec<Neutron>, ExtractionError>;
+}
+
+/// Simple centroid extraction using TOT-weighted averages.
+///
+/// 1. Single hit: Return as-is with super-resolution scaling
+/// 2. Multi-hit: Compute TOT-weighted centroid
+/// 3. Representative TOF: Use TOF from hit with highest TOT
+/// 4. Output scaling: Multiply by super_resolution_factor
+#[derive(Clone, Debug, Default)]
+struct ClusterAccumulator {
+    sum_x: f64,
+    sum_y: f64,
+    sum_weight: f64,
+    raw_sum_x: f64,
+    raw_sum_y: f64,
+    sum_tot: u64,
+    count: u32,
+    max_tot: u16,
+    max_tot_index: usize,
 }
 
 /// Simple centroid extraction using TOT-weighted averages.
@@ -133,106 +145,84 @@ impl NeutronExtraction for SimpleCentroidExtraction {
         &self.config
     }
 
-    fn extract<H: Hit>(
+    fn extract_soa(
         &self,
-        hits: &[H],
-        labels: &[i32],
+        batch: &crate::soa::HitBatch,
         num_clusters: usize,
     ) -> Result<Vec<Neutron>, ExtractionError> {
-        if hits.len() != labels.len() {
-            return Err(ExtractionError::LabelMismatch {
-                hits: hits.len(),
-                labels: labels.len(),
-            });
-        }
+        let mut accumulators = vec![ClusterAccumulator::default(); num_clusters];
 
-        let mut neutrons = Vec::with_capacity(num_clusters);
-
-        // Process each cluster
-        for cluster_id in 0..num_clusters as i32 {
-            let cluster_indices: Vec<usize> = labels
-                .iter()
-                .enumerate()
-                .filter(|(_, &label)| label == cluster_id)
-                .map(|(idx, _)| idx)
-                .filter(|&idx| {
-                    // Apply TOT filtering if enabled
-                    if self.config.min_tot_threshold > 0 {
-                        hits[idx].tot() >= self.config.min_tot_threshold
-                    } else {
-                        true
-                    }
-                })
-                .collect();
-
-            if cluster_indices.is_empty() {
+        // First pass: accumulate sums and find max TOT
+        for i in 0..batch.len() {
+            let label = batch.cluster_id[i];
+            if label < 0 {
                 continue;
             }
 
-            // Find hit with maximum TOT (for representative TOF)
-            let max_tot_idx = cluster_indices
-                .iter()
-                .max_by_key(|&&idx| hits[idx].tot())
-                .copied()
-                .unwrap();
+            let Ok(cluster_idx) = usize::try_from(label) else {
+                continue;
+            };
+            if cluster_idx >= num_clusters {
+                continue;
+            }
 
-            let representative_tof = hits[max_tot_idx].tof();
-            let representative_chip = hits[max_tot_idx].chip_id();
+            let tot = batch.tot[i];
 
-            // Calculate centroid
-            let (centroid_x, centroid_y, total_tot) = if self.config.weighted_by_tot {
-                // TOT-weighted centroid
-                let mut sum_x = 0.0;
-                let mut sum_y = 0.0;
-                let mut sum_weight = 0.0;
-                let mut sum_tot = 0u32;
+            // Apply filtering
+            if self.config.min_tot_threshold > 0 && tot < self.config.min_tot_threshold {
+                continue;
+            }
 
-                for &idx in &cluster_indices {
-                    let hit = &hits[idx];
-                    let weight = hit.tot() as f64;
-                    sum_x += hit.x() as f64 * weight;
-                    sum_y += hit.y() as f64 * weight;
-                    sum_weight += weight;
-                    sum_tot += hit.tot() as u32;
-                }
+            let acc = &mut accumulators[cluster_idx];
+            let x = batch.x[i] as f64;
+            let y = batch.y[i] as f64;
 
-                if sum_weight > 0.0 {
-                    (
-                        sum_x / sum_weight,
-                        sum_y / sum_weight,
-                        sum_tot.min(u16::MAX as u32) as u16,
-                    )
+            acc.count += 1;
+            acc.sum_tot += tot as u64;
+
+            acc.raw_sum_x += x;
+            acc.raw_sum_y += y;
+
+            if self.config.weighted_by_tot {
+                let weight = tot as f64;
+                acc.sum_x += x * weight;
+                acc.sum_y += y * weight;
+                acc.sum_weight += weight;
+            }
+
+            if tot >= acc.max_tot {
+                acc.max_tot = tot;
+                acc.max_tot_index = i;
+            }
+        }
+
+        // Second pass: generate neutrons
+        let mut neutrons = Vec::with_capacity(num_clusters);
+
+        for acc in accumulators {
+            if acc.count == 0 {
+                continue;
+            }
+
+            let (centroid_x, centroid_y) = if self.config.weighted_by_tot {
+                if acc.sum_weight > 0.0 {
+                    (acc.sum_x / acc.sum_weight, acc.sum_y / acc.sum_weight)
                 } else {
                     // Fall back to arithmetic mean if all TOT values are zero
-                    let n = cluster_indices.len() as f64;
-                    let mean_x: f64 = cluster_indices
-                        .iter()
-                        .map(|&idx| hits[idx].x() as f64)
-                        .sum::<f64>()
-                        / n;
-                    let mean_y: f64 = cluster_indices
-                        .iter()
-                        .map(|&idx| hits[idx].y() as f64)
-                        .sum::<f64>()
-                        / n;
-                    (mean_x, mean_y, 0)
+                    (
+                        acc.raw_sum_x / acc.count as f64,
+                        acc.raw_sum_y / acc.count as f64,
+                    )
                 }
             } else {
-                // Simple arithmetic mean
-                let mut sum_x = 0.0;
-                let mut sum_y = 0.0;
-                let mut sum_tot = 0u32;
-                let n = cluster_indices.len() as f64;
-
-                for &idx in &cluster_indices {
-                    let hit = &hits[idx];
-                    sum_x += hit.x() as f64;
-                    sum_y += hit.y() as f64;
-                    sum_tot += hit.tot() as u32;
-                }
-
-                (sum_x / n, sum_y / n, sum_tot.min(u16::MAX as u32) as u16)
+                (
+                    acc.raw_sum_x / acc.count as f64,
+                    acc.raw_sum_y / acc.count as f64,
+                )
             };
+
+            let representative_tof = batch.tof[acc.max_tot_index];
+            let representative_chip = batch.chip_id[acc.max_tot_index];
 
             // Apply super-resolution scaling
             let scaled_x = centroid_x * self.config.super_resolution_factor;
@@ -242,8 +232,8 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                 scaled_x,
                 scaled_y,
                 representative_tof,
-                total_tot,
-                cluster_indices.len() as u16,
+                acc.sum_tot.min(u16::MAX as u64) as u16,
+                acc.count as u16,
                 representative_chip,
             ));
         }
@@ -256,15 +246,23 @@ impl NeutronExtraction for SimpleCentroidExtraction {
 mod tests {
     #![allow(clippy::float_cmp)]
     use super::*;
-    use crate::hit::GenericHit;
+    use crate::soa::HitBatch;
+
+    fn make_batch(hits: &[(u32, u16, u16, u32, u16, u8, i32)]) -> HitBatch {
+        let mut batch = HitBatch::with_capacity(hits.len());
+        for (i, (tof, x, y, timestamp, tot, chip_id, cluster_id)) in hits.iter().enumerate() {
+            batch.push(*x, *y, *tof, *tot, *timestamp, *chip_id);
+            batch.cluster_id[i] = *cluster_id;
+        }
+        batch
+    }
 
     #[test]
     fn test_single_hit_extraction() {
-        let hits = vec![GenericHit::new(1000, 100, 200, 500, 50, 0)];
-        let labels = vec![0];
+        let batch = make_batch(&[(1000, 100, 200, 500, 50, 0, 0)]);
 
         let extractor = SimpleCentroidExtraction::new();
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         assert_eq!(neutrons.len(), 1);
         assert_eq!(neutrons[0].x, 800.0); // 100 * 8
@@ -275,14 +273,13 @@ mod tests {
 
     #[test]
     fn test_weighted_centroid() {
-        let hits = vec![
-            GenericHit::new(1000, 0, 0, 500, 30, 0), // weight 30
-            GenericHit::new(1000, 2, 0, 500, 10, 0), // weight 10
-        ];
-        let labels = vec![0, 0];
+        let batch = make_batch(&[
+            (1000, 0, 0, 500, 30, 0, 0), // weight 30
+            (1000, 2, 0, 500, 10, 0, 0), // weight 10
+        ]);
 
         let extractor = SimpleCentroidExtraction::new();
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         assert_eq!(neutrons.len(), 1);
         // Weighted: (0*30 + 2*10) / 40 = 0.5, scaled by 8 = 4.0
@@ -293,15 +290,14 @@ mod tests {
 
     #[test]
     fn test_multiple_clusters() {
-        let hits = vec![
-            GenericHit::new(1000, 10, 10, 500, 50, 0),
-            GenericHit::new(1000, 11, 10, 500, 50, 0),
-            GenericHit::new(2000, 100, 100, 500, 50, 1),
-        ];
-        let labels = vec![0, 0, 1];
+        let batch = make_batch(&[
+            (1000, 10, 10, 500, 50, 0, 0),
+            (1000, 11, 10, 500, 50, 0, 0),
+            (2000, 100, 100, 500, 50, 1, 1),
+        ]);
 
         let extractor = SimpleCentroidExtraction::new();
-        let neutrons = extractor.extract(&hits, &labels, 2).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 2).unwrap();
 
         assert_eq!(neutrons.len(), 2);
         assert_eq!(neutrons[0].n_hits, 2);
@@ -309,29 +305,17 @@ mod tests {
     }
 
     #[test]
-    fn test_label_mismatch_error() {
-        let hits = vec![GenericHit::new(1000, 100, 200, 500, 50, 0)];
-        let labels = vec![0, 0]; // Wrong length
-
-        let extractor = SimpleCentroidExtraction::new();
-        let result = extractor.extract(&hits, &labels, 1);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_tot_threshold_filters_low_tot_hits() {
         // Create hits with varying TOT values
-        let hits = vec![
-            GenericHit::new(1000, 0, 0, 500, 5, 0), // TOT=5, below threshold
-            GenericHit::new(1000, 10, 0, 500, 15, 0), // TOT=15, above threshold
-            GenericHit::new(1000, 20, 0, 500, 20, 0), // TOT=20, above threshold
-        ];
-        let labels = vec![0, 0, 0]; // All in same cluster
+        let batch = make_batch(&[
+            (1000, 0, 0, 500, 5, 0, 0),   // TOT=5, below threshold
+            (1000, 10, 0, 500, 15, 0, 0), // TOT=15, above threshold
+            (1000, 20, 0, 500, 20, 0, 0), // TOT=20, above threshold
+        ]);
 
         // Default threshold is 10
         let extractor = SimpleCentroidExtraction::new();
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         assert_eq!(neutrons.len(), 1);
         // Only hits with TOT >= 10 should be included (2 hits)
@@ -347,14 +331,13 @@ mod tests {
     #[test]
     fn test_tot_threshold_skips_empty_clusters_after_filtering() {
         // All hits in cluster have TOT below threshold
-        let hits = vec![
-            GenericHit::new(1000, 0, 0, 500, 5, 0), // TOT=5, below default threshold of 10
-            GenericHit::new(1000, 1, 0, 500, 8, 0), // TOT=8, below threshold
-        ];
-        let labels = vec![0, 0];
+        let batch = make_batch(&[
+            (1000, 0, 0, 500, 5, 0, 0), // TOT=5, below default threshold of 10
+            (1000, 1, 0, 500, 8, 0, 0), // TOT=8, below threshold
+        ]);
 
         let extractor = SimpleCentroidExtraction::new();
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         // Cluster should be skipped because all hits are filtered out
         assert_eq!(neutrons.len(), 0);
@@ -362,17 +345,16 @@ mod tests {
 
     #[test]
     fn test_tot_threshold_disabled_when_zero() {
-        let hits = vec![
-            GenericHit::new(1000, 0, 0, 500, 5, 0),  // TOT=5
-            GenericHit::new(1000, 10, 0, 500, 3, 0), // TOT=3
-        ];
-        let labels = vec![0, 0];
+        let batch = make_batch(&[
+            (1000, 0, 0, 500, 5, 0, 0),  // TOT=5
+            (1000, 10, 0, 500, 3, 0, 0), // TOT=3
+        ]);
 
         // Disable TOT filtering by setting threshold to 0
         let mut extractor = SimpleCentroidExtraction::new();
         extractor.configure(ExtractionConfig::default().with_min_tot_threshold(0));
 
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         // All hits should be included
         assert_eq!(neutrons.len(), 1);
@@ -383,15 +365,14 @@ mod tests {
     #[test]
     fn test_representative_tof_from_max_tot_after_filtering() {
         // Verify that representative TOF is selected from remaining hits after filtering
-        let hits = vec![
-            GenericHit::new(1000, 0, 0, 500, 5, 0), // TOT=5, filtered out, TOF=1000
-            GenericHit::new(2000, 10, 0, 500, 15, 0), // TOT=15, kept, TOF=2000
-            GenericHit::new(3000, 20, 0, 500, 25, 0), // TOT=25 (max), kept, TOF=3000
-        ];
-        let labels = vec![0, 0, 0];
+        let batch = make_batch(&[
+            (1000, 0, 0, 500, 5, 0, 0),   // TOT=5, filtered out, TOF=1000
+            (2000, 10, 0, 500, 15, 0, 0), // TOT=15, kept, TOF=2000
+            (3000, 20, 0, 500, 25, 0, 0), // TOT=25 (max), kept, TOF=3000
+        ]);
 
         let extractor = SimpleCentroidExtraction::new();
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         assert_eq!(neutrons.len(), 1);
         // Representative TOF should be from the hit with max TOT (25), which is 3000
@@ -403,17 +384,16 @@ mod tests {
     #[test]
     fn test_zero_tot_weighted_centroid() {
         // All hits have TOT = 0, which would cause divide-by-zero without the fix
-        let hits = vec![
-            GenericHit::new(1000, 10, 20, 500, 0, 0), // TOT = 0
-            GenericHit::new(1000, 30, 40, 500, 0, 0), // TOT = 0
-        ];
-        let labels = vec![0, 0];
+        let batch = make_batch(&[
+            (1000, 10, 20, 500, 0, 0, 0), // TOT = 0
+            (1000, 30, 40, 500, 0, 0, 0), // TOT = 0
+        ]);
 
         // Disable TOT filtering so zero-TOT hits aren't filtered out
         let mut extractor = SimpleCentroidExtraction::new();
         extractor.configure(ExtractionConfig::default().with_min_tot_threshold(0));
 
-        let neutrons = extractor.extract(&hits, &labels, 1).unwrap();
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
 
         assert_eq!(neutrons.len(), 1);
         // Should fall back to arithmetic mean: (10+30)/2 = 20, (20+40)/2 = 30
@@ -425,5 +405,42 @@ mod tests {
         // Verify no NaN
         assert!(!neutrons[0].x.is_nan());
         assert!(!neutrons[0].y.is_nan());
+    }
+
+    #[test]
+    fn test_extract_soa_expected_values() {
+        let mut batch = HitBatch::with_capacity(3);
+        // Cluster 0: weighted centroid, max TOT hit provides TOF/chip_id
+        batch.push(10, 10, 1000, 20, 500, 0);
+        batch.push(20, 10, 1500, 10, 500, 0);
+        // Cluster 1: single hit
+        batch.push(5, 7, 2000, 15, 500, 1);
+
+        batch.cluster_id[0] = 0;
+        batch.cluster_id[1] = 0;
+        batch.cluster_id[2] = 1;
+
+        let extractor = SimpleCentroidExtraction::new();
+        let neutrons = extractor.extract_soa(&batch, 2).unwrap();
+
+        assert_eq!(neutrons.len(), 2);
+
+        let n0 = &neutrons[0];
+        let expected_x = (10.0 * 20.0 + 20.0 * 10.0) / 30.0 * 8.0;
+        let expected_y = 10.0 * 8.0;
+        assert!((n0.x - expected_x).abs() < 1e-6);
+        assert!((n0.y - expected_y).abs() < 1e-6);
+        assert_eq!(n0.tof, 1000);
+        assert_eq!(n0.tot, 30);
+        assert_eq!(n0.n_hits, 2);
+        assert_eq!(n0.chip_id, 0);
+
+        let n1 = &neutrons[1];
+        assert!((n1.x - 40.0).abs() < 1e-6);
+        assert!((n1.y - 56.0).abs() < 1e-6);
+        assert_eq!(n1.tof, 2000);
+        assert_eq!(n1.tot, 15);
+        assert_eq!(n1.n_hits, 1);
+        assert_eq!(n1.chip_id, 1);
     }
 }

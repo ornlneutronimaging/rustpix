@@ -17,7 +17,6 @@
 //! # Key Components
 //!
 //! - [`Tpx3Packet`] - Low-level packet parser with bit field extraction
-//! - [`Tpx3Hit`] - Hit data structure with TOF, coordinates, and cluster assignment
 //! - `Tpx3Processor` - Section-aware file processor
 //!
 //! # Processing Pipeline
@@ -31,11 +30,8 @@ pub mod ordering;
 mod packet;
 pub mod section;
 
-pub use hit::{calculate_tof, correct_timestamp_rollover, Tpx3Hit};
+pub use hit::{calculate_tof, correct_timestamp_rollover};
 pub use packet::Tpx3Packet;
-
-// Re-export core types for convenience
-pub use rustpix_core::hit::Hit;
 
 use serde::{Deserialize, Serialize};
 use std::fs::File;

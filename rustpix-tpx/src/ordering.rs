@@ -16,10 +16,11 @@
 //! 3. `TimeOrderedStream` uses a Min-Heap to merge these pulse batches based on
 //!    their TDC timestamp.
 
-use crate::hit::{calculate_tof, correct_timestamp_rollover, Tpx3Hit};
+use crate::hit::{calculate_tof, correct_timestamp_rollover};
 use crate::packet::Tpx3Packet;
 use crate::section::Tpx3Section;
 use crate::DetectorConfig;
+use rustpix_core::soa::HitBatch;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
@@ -29,7 +30,7 @@ use std::collections::VecDeque;
 pub struct PulseBatch {
     pub chip_id: u8,
     pub tdc_timestamp: u32,
-    pub hits: Vec<Tpx3Hit>,
+    pub hits: HitBatch,
 }
 
 // Order by TDC timestamp (reverse for Min-Heap)
@@ -69,7 +70,7 @@ pub struct PulseReader<'a> {
     // State for lookahead buffering
     prev_batch: Option<PulseBatch>,
     curr_tdc: Option<u32>,
-    curr_hits: Vec<Tpx3Hit>,
+    curr_batch: HitBatch,
 
     // Ready batches to be yielded
     ready_queue: VecDeque<PulseBatch>,
@@ -97,7 +98,7 @@ impl<'a> PulseReader<'a> {
             packet_idx: 0,
             prev_batch: None,
             curr_tdc: None,
-            curr_hits: Vec::with_capacity(4096),
+            curr_batch: HitBatch::with_capacity(4096),
             ready_queue: VecDeque::new(),
             tdc_correction,
             chip_transform: Box::new(chip_transform),
@@ -139,7 +140,7 @@ impl<'a> PulseReader<'a> {
 
                         // 1. Seal and emit `prev_batch` if exists
                         if let Some(mut prev) = self.prev_batch.take() {
-                            prev.hits.sort_unstable_by_key(|h| h.tof);
+                            prev.hits.sort_by_tof();
                             self.ready_queue.push_back(prev);
                         }
 
@@ -147,7 +148,7 @@ impl<'a> PulseReader<'a> {
                         let batch = PulseBatch {
                             chip_id: section.chip_id, // Approximation: assumes pulse doesn't cross chips differently
                             tdc_timestamp: old_tdc,
-                            hits: std::mem::take(&mut self.curr_hits),
+                            hits: std::mem::take(&mut self.curr_batch),
                         };
                         self.prev_batch = Some(batch);
                     }
@@ -214,8 +215,7 @@ impl<'a> PulseReader<'a> {
                                 // Definitely prev
                                 // Calculate correct TOF relative to prev
                                 let tof = calculate_tof(ts_prev, prev_tdc, self.tdc_correction);
-                                prev.hits
-                                    .push(Tpx3Hit::new(tof, gx, gy, ts_prev, tot, chip));
+                                prev.hits.push(gx, gy, tof, tot, ts_prev, chip);
                                 assigned_to_prev = true;
                             } else {
                                 // It is >= curr_tdc.
@@ -241,8 +241,7 @@ impl<'a> PulseReader<'a> {
                         if let Some(curr_tdc) = self.curr_tdc {
                             let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
                             let tof = calculate_tof(ts_curr, curr_tdc, self.tdc_correction);
-                            self.curr_hits
-                                .push(Tpx3Hit::new(tof, gx, gy, ts_curr, tot, chip));
+                            self.curr_batch.push(gx, gy, tof, tot, ts_curr, chip);
                         }
                     }
                 }
@@ -254,19 +253,19 @@ impl<'a> PulseReader<'a> {
 
         // End of stream. Flush.
         if let Some(mut prev) = self.prev_batch.take() {
-            prev.hits.sort_unstable_by_key(|h| h.tof);
+            prev.hits.sort_by_tof();
             self.ready_queue.push_back(prev);
         }
 
         let last_chip = self.sections.last().map_or(0, |s| s.chip_id);
 
         if let Some(curr_tdc) = self.curr_tdc.take() {
-            if !self.curr_hits.is_empty() {
-                self.curr_hits.sort_unstable_by_key(|h| h.tof);
+            if !self.curr_batch.is_empty() {
+                self.curr_batch.sort_by_tof();
                 self.ready_queue.push_back(PulseBatch {
                     chip_id: last_chip,
                     tdc_timestamp: curr_tdc,
-                    hits: std::mem::take(&mut self.curr_hits),
+                    hits: std::mem::take(&mut self.curr_batch),
                 });
             }
         }
@@ -279,7 +278,6 @@ impl<'a> PulseReader<'a> {
 pub struct TimeOrderedStream<'a> {
     readers: Vec<PulseReader<'a>>,
     heap: BinaryHeap<PulseBatch>,
-    current_batch_hits: std::vec::IntoIter<Tpx3Hit>,
 }
 
 impl<'a> TimeOrderedStream<'a> {
@@ -322,23 +320,18 @@ impl<'a> TimeOrderedStream<'a> {
         Self {
             readers,
             heap,
-            current_batch_hits: Vec::new().into_iter(),
         }
     }
 }
 
 impl Iterator for TimeOrderedStream<'_> {
-    type Item = Tpx3Hit;
+    type Item = HitBatch;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(hit) = self.current_batch_hits.next() {
-                return Some(hit);
-            }
-
             if let Some(head) = self.heap.peek() {
                 let min_tdc = head.tdc_timestamp;
-                let mut merged_hits = Vec::new();
+                let mut merged_batch = HitBatch::default();
 
                 while let Some(batch) = self.heap.peek() {
                     if batch.tdc_timestamp == min_tdc {
@@ -355,24 +348,20 @@ impl Iterator for TimeOrderedStream<'_> {
                             }
                         }
 
-                        merged_hits.extend(batch.hits);
+                        merged_batch.append(&batch.hits);
                     } else {
                         break;
                     }
                 }
 
-                if merged_hits.is_empty() {
+                if merged_batch.is_empty() {
                     continue;
                 }
 
-                merged_hits.sort_by_key(|h| h.tof);
-                self.current_batch_hits = merged_hits.into_iter();
-                if let Some(hit) = self.current_batch_hits.next() {
-                    return Some(hit);
-                }
-            } else {
-                return None;
+                merged_batch.sort_by_tof();
+                return Some(merged_batch);
             }
+            return None;
         }
     }
 }

@@ -18,9 +18,6 @@ pub enum ClusteringError {
 /// Errors during extraction operations.
 #[derive(Error, Debug)]
 pub enum ExtractionError {
-    #[error("label count ({labels}) does not match hit count ({hits})")]
-    LabelMismatch { hits: usize, labels: usize },
-
     #[error("empty cluster: cannot extract from zero hits")]
     EmptyCluster,
 

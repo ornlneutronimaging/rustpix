@@ -1,6 +1,6 @@
 //! TPX3 file parser.
 
-use crate::{Error, Result, Tpx3Hit, Tpx3Packet};
+use crate::{Error, Result, Tpx3Packet};
 use rayon::prelude::*;
 
 #[cfg(feature = "serde")]
@@ -144,29 +144,6 @@ impl Tpx3Parser {
         Ok(results.into_iter().flatten().collect())
     }
 
-    /// Parses raw packets and extracts only hit events.
-    pub fn parse_hits(&self, raw_packets: &[u64]) -> Result<Vec<Tpx3Hit>> {
-        let packets = self.parse_raw(raw_packets)?;
-        Ok(packets
-            .into_iter()
-            .filter_map(|p| match p {
-                Tpx3Packet::Hit(hit) => Some(hit),
-                _ => None,
-            })
-            .collect())
-    }
-
-    /// Parses bytes and extracts only hit events.
-    pub fn parse_hits_from_bytes(&self, data: &[u8]) -> Result<Vec<Tpx3Hit>> {
-        let packets = self.parse_bytes(data)?;
-        Ok(packets
-            .into_iter()
-            .filter_map(|p| match p {
-                Tpx3Packet::Hit(hit) => Some(hit),
-                _ => None,
-            })
-            .collect())
-    }
 }
 
 #[cfg(test)]

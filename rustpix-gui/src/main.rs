@@ -33,6 +33,7 @@ use rustpix_algorithms::{
     GridClustering, GridConfig, GridState,
 };
 
+use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
 use rustpix_core::neutron::Neutron;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
@@ -578,62 +579,36 @@ impl RustpixApp {
 
                 let mut neutrons = Vec::with_capacity(num_clusters);
                 if num_clusters > 0 {
-                    struct Acc {
-                        count: u32,
-                        sum_x: f64,
-                        sum_y: f64,
-                        sum_tof: f64,
-                    }
+                    let mut extractor = SimpleCentroidExtraction::new();
+                    // Preserve legacy GUI behavior: naive centroid, no TOT filtering, no super-res.
+                    extractor.configure(ExtractionConfig {
+                        super_resolution_factor: 1.0,
+                        weighted_by_tot: false,
+                        min_tot_threshold: 0,
+                    });
 
-                    // Pre-allocate vector with default values
-                    // Using a Vec<Option<Acc>> might be safer if IDs are sparse,
-                    // but our remapping ensures contiguous IDs from 0 to max.
-                    let mut accs = Vec::with_capacity(num_clusters);
-                    for _ in 0..num_clusters {
-                        accs.push(Acc {
-                            count: 0,
-                            sum_x: 0.0,
-                            sum_y: 0.0,
-                            sum_tof: 0.0,
-                        });
-                    }
+                    // We need to report progress...
+                    // extract_soa is monolithic so we can't easily report progress inside it
+                    // unless we change the API or split it.
+                    // But extract_soa is O(N) and very fast (ms). The manual loop was reporting progress...
+                    // "Report progress every 50k hits".
+                    // Given extraction is < 100ms for millions of hits usually (accumulating), maybe we drop progress reporting for extraction?
+                    // The old code had it.
+                    // But `extract_soa` is designed to be super fast.
+                    // Let's assume it's fast enough to not freeze UI for long (or it's in a thread anyway).
+                    // We can send a "Starting extraction..." message.
 
-                    // Extraction Loop with Progress
-                    let total_hits = working_batch.len();
-                    for i in 0..total_hits {
-                        // Report progress every 50k hits
-                        if i % 50_000 == 0 {
-                            let p = 0.9 + 0.1 * (i as f32 / total_hits as f32);
-                            let _ = tx.send(AppMessage::ProcessingProgress(
-                                p,
-                                format!(
-                                    "Extracting neutrons... {:.0}%",
-                                    (i as f32 / total_hits as f32) * 100.0
-                                ),
-                            ));
-                        }
+                    tx.send(AppMessage::ProcessingProgress(
+                        0.95,
+                        "Extracting neutrons (SoA)...".to_string(),
+                    ))
+                    .unwrap();
 
-                        let cid = working_batch.cluster_id[i];
-                        if cid >= 0 {
-                            let a = &mut accs[cid as usize];
-                            a.count += 1;
-                            a.sum_x += working_batch.x[i] as f64;
-                            a.sum_y += working_batch.y[i] as f64;
-                            a.sum_tof += working_batch.tof[i] as f64;
-                        }
-                    }
-
-                    for a in accs.iter() {
-                        if a.count > 0 {
-                            neutrons.push(Neutron {
-                                x: a.sum_x / a.count as f64,
-                                y: a.sum_y / a.count as f64,
-                                tof: (a.sum_tof / a.count as f64) as u32, // approx
-                                tot: 0,
-                                n_hits: a.count as u16,
-                                chip_id: 0,
-                                _reserved: [0; 3],
-                            });
+                    match extractor.extract_soa(&working_batch, num_clusters) {
+                        Ok(n) => neutrons = n,
+                        Err(e) => {
+                            let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
+                            return;
                         }
                     }
                 }

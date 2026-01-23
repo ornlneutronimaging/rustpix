@@ -19,75 +19,10 @@ use rustpix_algorithms::{
 };
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
-use rustpix_core::hit::GenericHit;
 use rustpix_core::neutron::Neutron;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::Tpx3FileReader;
-use rustpix_tpx::Tpx3Hit;
 pub mod streaming;
-
-/// Python wrapper for GenericHit.
-#[pyclass(name = "Hit")]
-#[derive(Clone)]
-pub struct PyHit {
-    inner: GenericHit,
-}
-
-#[pymethods]
-impl PyHit {
-    #[new]
-    fn new(x: u16, y: u16, tof: u32, tot: u16, timestamp: u32, chip_id: u8) -> Self {
-        Self {
-            inner: GenericHit {
-                x,
-                y,
-                tof,
-                tot,
-                timestamp,
-                chip_id,
-                _padding: 0,
-                cluster_id: -1,
-            },
-        }
-    }
-
-    #[getter]
-    fn x(&self) -> u16 {
-        self.inner.x
-    }
-
-    #[getter]
-    fn y(&self) -> u16 {
-        self.inner.y
-    }
-
-    #[getter]
-    fn tof(&self) -> u32 {
-        self.inner.tof
-    }
-
-    #[getter]
-    fn tot(&self) -> u16 {
-        self.inner.tot
-    }
-
-    #[getter]
-    fn timestamp(&self) -> u32 {
-        self.inner.timestamp
-    }
-
-    #[getter]
-    fn chip_id(&self) -> u8 {
-        self.inner.chip_id
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Hit(x={}, y={}, tof={}, tot={}, chip={})",
-            self.inner.x, self.inner.y, self.inner.tof, self.inner.tot, self.inner.chip_id
-        )
-    }
-}
 
 /// Python wrapper for Neutron.
 #[pyclass(name = "Neutron")]
@@ -325,38 +260,6 @@ impl PyDetectorConfig {
     }
 }
 
-/// Read hits from a TPX3 file.
-#[pyfunction]
-#[pyo3(signature = (path, detector_config=None))]
-fn read_tpx3_file(path: &str, detector_config: Option<PyDetectorConfig>) -> PyResult<Vec<PyHit>> {
-    let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-
-    if let Some(config) = detector_config {
-        reader = reader.with_config(config.inner);
-    }
-
-    let hits = reader
-        .read_hits()
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-    Ok(hits
-        .into_iter()
-        .map(|h| PyHit {
-            inner: GenericHit {
-                x: h.x,
-                y: h.y,
-                tof: h.tof,
-                tot: h.tot,
-                timestamp: h.timestamp,
-                chip_id: h.chip_id,
-                _padding: 0,
-                cluster_id: -1,
-            },
-        })
-        .collect())
-}
-
 /// Read hits from a TPX3 file and return as numpy structured arrays.
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None))]
@@ -372,16 +275,25 @@ fn read_tpx3_file_numpy<'py>(
         reader = reader.with_config(config.inner);
     }
 
-    let hits: Vec<Tpx3Hit> = reader
-        .read_hits()
+    let batch = reader
+        .read_batch()
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
+    let HitBatch {
+        x,
+        y,
+        tof,
+        tot,
+        chip_id,
+        ..
+    } = batch;
+
     // Create separate arrays for each field
-    let x: Array1<u16> = hits.iter().map(|h| h.x).collect();
-    let y: Array1<u16> = hits.iter().map(|h| h.y).collect();
-    let tof: Array1<u32> = hits.iter().map(|h| h.tof).collect();
-    let tot: Array1<u16> = hits.iter().map(|h| h.tot).collect();
-    let chip_id: Array1<u8> = hits.iter().map(|h| h.chip_id).collect();
+    let x: Array1<u16> = Array1::from_vec(x);
+    let y: Array1<u16> = Array1::from_vec(y);
+    let tof: Array1<u32> = Array1::from_vec(tof);
+    let tot: Array1<u16> = Array1::from_vec(tot);
+    let chip_id: Array1<u8> = Array1::from_vec(chip_id);
 
     let x_arr = PyArray1::from_array(py, &x);
     let y_arr = PyArray1::from_array(py, &y);
@@ -400,39 +312,14 @@ fn read_tpx3_file_numpy<'py>(
     Ok(dict.into_any())
 }
 
-/// Cluster hits using the specified algorithm.
-#[pyfunction]
-#[pyo3(signature = (hits, config=None, algorithm="abs"))]
-#[allow(clippy::needless_pass_by_value)]
-fn cluster_hits(
-    hits: Vec<PyHit>,
+fn cluster_from_batch(
+    batch: &mut HitBatch,
     config: Option<PyClusteringConfig>,
     algorithm: &str,
-) -> PyResult<(Vec<i32>, usize)> {
-    cluster_hits_impl(&hits, config, algorithm)
-}
-
-fn cluster_hits_impl(
-    hits: &[PyHit],
-    config: Option<PyClusteringConfig>,
-    algorithm: &str,
-) -> PyResult<(Vec<i32>, usize)> {
+) -> PyResult<usize> {
     let config = config.unwrap_or_else(|| PyClusteringConfig::new(5.0, 75.0, 1, None));
 
-    // Convert to SoA Batch
-    let mut batch = HitBatch::with_capacity(hits.len());
-    for hit in hits {
-        batch.push(
-            hit.inner.x,
-            hit.inner.y,
-            hit.inner.tof,
-            hit.inner.tot,
-            hit.inner.timestamp,
-            hit.inner.chip_id,
-        );
-    }
-
-    let num_clusters = match algorithm.to_lowercase().as_str() {
+    match algorithm.to_lowercase().as_str() {
         "abs" => {
             let algo_config = rustpix_algorithms::AbsConfig {
                 radius: config.inner.radius,
@@ -442,8 +329,8 @@ fn cluster_hits_impl(
             };
             let algo = AbsClustering::new(algo_config);
             let mut state = AbsState::default();
-            algo.cluster(&mut batch, &mut state)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+            algo.cluster(batch, &mut state)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
         }
         "dbscan" => {
             let algo_config = rustpix_algorithms::DbscanConfig {
@@ -454,8 +341,8 @@ fn cluster_hits_impl(
             };
             let algo = DbscanClustering::new(algo_config);
             let mut state = DbscanState::default();
-            algo.cluster(&mut batch, &mut state)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+            algo.cluster(batch, &mut state)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
         }
         "grid" => {
             let algo_config = rustpix_algorithms::GridConfig {
@@ -467,94 +354,31 @@ fn cluster_hits_impl(
             };
             let algo = GridClustering::new(algo_config);
             let mut state = GridState::default();
-            algo.cluster(&mut batch, &mut state)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?
+            algo.cluster(batch, &mut state)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
         }
-        "graph" => {
-            // Fallback or Error? Plan said remove.
-            // But if user passes 'graph', we should probably error or fallback to abs/grid?
-            // "Acceptance Criteria: ... Graph algorithm - Either create SoA version OR remove it entirely"
-            // "API Changes: ... CLI algorithm argument will no longer accept graph."
-            // For Python, if I remove it, I should throw error.
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Algorithm 'graph' is deprecated/removed. Use 'abs', 'dbscan', or 'grid'",
-            ));
-        }
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown algorithm: {}. Use 'abs', 'dbscan', or 'grid'",
-                algorithm
-            )))
-        }
-    };
-
-    // Extract labels
-    // HitBatch stores cluster_id as i32, so we can return it directly.
-    let labels = batch.cluster_id.clone();
-
-    Ok((labels, num_clusters))
+        "graph" => Err(pyo3::exceptions::PyValueError::new_err(
+            "Algorithm 'graph' is deprecated/removed. Use 'abs', 'dbscan', or 'grid'",
+        )),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown algorithm: {}. Use 'abs', 'dbscan', or 'grid'",
+            algorithm
+        ))),
+    }
 }
 
-/// Extract neutrons from clustered hits.
-#[pyfunction]
-#[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
-#[allow(clippy::needless_pass_by_value)]
-fn extract_neutrons(
-    hits: Vec<PyHit>,
-    labels: Vec<i32>,
-    num_clusters: usize,
-    super_resolution: f64,
-    tot_weighted: bool,
-) -> PyResult<Vec<PyNeutron>> {
-    let mut extractor = SimpleCentroidExtraction::new();
-    extractor.configure(
-        ExtractionConfig::default()
-            .with_super_resolution(super_resolution)
-            .with_weighted_by_tot(tot_weighted),
-    );
+/// Helper to read hits directly into batch from file (internal usage).
+fn read_file_to_batch(path: &str, detector_config: Option<PyDetectorConfig>) -> PyResult<HitBatch> {
+    let mut reader = Tpx3FileReader::open(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
 
-    let hit_data: Vec<GenericHit> = hits.iter().map(|h| h.inner).collect();
+    if let Some(config) = detector_config {
+        reader = reader.with_config(config.inner);
+    }
 
-    let neutrons = extractor
-        .extract(&hit_data, &labels, num_clusters)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
-    Ok(neutrons
-        .into_iter()
-        .map(|n| PyNeutron { inner: n })
-        .collect())
-}
-
-/// Extract neutrons and return as numpy arrays.
-#[pyfunction]
-#[pyo3(signature = (hits, labels, num_clusters, super_resolution=8.0, tot_weighted=true))]
-#[allow(clippy::needless_pass_by_value, clippy::elidable_lifetime_names)]
-fn extract_neutrons_numpy<'py>(
-    py: Python<'py>,
-    hits: Vec<PyHit>,
-    labels: Vec<i32>,
-    num_clusters: usize,
-    super_resolution: f64,
-    tot_weighted: bool,
-) -> PyResult<Bound<'py, PyAny>> {
-    let neutrons = extract_neutrons(hits, labels, num_clusters, super_resolution, tot_weighted)?;
-
-    let x: Array1<f64> = neutrons.iter().map(|n| n.inner.x).collect();
-    let y: Array1<f64> = neutrons.iter().map(|n| n.inner.y).collect();
-    let tof: Array1<u32> = neutrons.iter().map(|n| n.inner.tof).collect();
-    let tot: Array1<u16> = neutrons.iter().map(|n| n.inner.tot).collect();
-    let n_hits: Array1<u16> = neutrons.iter().map(|n| n.inner.n_hits).collect();
-    let chip_id: Array1<u8> = neutrons.iter().map(|n| n.inner.chip_id).collect();
-
-    let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", PyArray1::from_array(py, &x))?;
-    dict.set_item("y", PyArray1::from_array(py, &y))?;
-    dict.set_item("tof", PyArray1::from_array(py, &tof))?;
-    dict.set_item("tot", PyArray1::from_array(py, &tot))?;
-    dict.set_item("n_hits", PyArray1::from_array(py, &n_hits))?;
-    dict.set_item("chip_id", PyArray1::from_array(py, &chip_id))?;
-
-    Ok(dict.into_any())
+    reader
+        .read_batch()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Process a TPX3 file: read, cluster, and extract neutrons.
@@ -568,9 +392,24 @@ fn process_tpx3_file(
     tot_weighted: bool,
     detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Vec<PyNeutron>> {
-    let hits = read_tpx3_file(path, detector_config)?;
-    let (labels, num_clusters) = cluster_hits_impl(&hits, config, algorithm)?;
-    extract_neutrons(hits, labels, num_clusters, super_resolution, tot_weighted)
+    let mut batch = read_file_to_batch(path, detector_config)?;
+    let num_clusters = cluster_from_batch(&mut batch, config, algorithm)?;
+
+    let mut extractor = SimpleCentroidExtraction::new();
+    extractor.configure(
+        ExtractionConfig::default()
+            .with_super_resolution(super_resolution)
+            .with_weighted_by_tot(tot_weighted),
+    );
+
+    let neutrons = extractor
+        .extract_soa(&batch, num_clusters)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    Ok(neutrons
+        .into_iter()
+        .map(|n| PyNeutron { inner: n })
+        .collect())
 }
 
 /// Process a TPX3 file and return neutrons as numpy arrays.
@@ -585,32 +424,45 @@ fn process_tpx3_file_numpy<'py>(
     tot_weighted: bool,
     detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let hits = read_tpx3_file(path, detector_config)?;
-    let (labels, num_clusters) = cluster_hits_impl(&hits, config, algorithm)?;
-    extract_neutrons_numpy(
-        py,
-        hits,
-        labels,
-        num_clusters,
+    // Reuse the process_tpx3_file logic but return dict
+    // Actually, calling process_tpx3_file creates Vec<PyNeutron>.
+    // Then we act on it.
+    let neutrons_vec = process_tpx3_file(
+        path,
+        config,
+        algorithm,
         super_resolution,
         tot_weighted,
-    )
+        detector_config,
+    )?;
+
+    let x: Array1<f64> = neutrons_vec.iter().map(|n| n.inner.x).collect();
+    let y: Array1<f64> = neutrons_vec.iter().map(|n| n.inner.y).collect();
+    let tof: Array1<u32> = neutrons_vec.iter().map(|n| n.inner.tof).collect();
+    let tot: Array1<u16> = neutrons_vec.iter().map(|n| n.inner.tot).collect();
+    let n_hits: Array1<u16> = neutrons_vec.iter().map(|n| n.inner.n_hits).collect();
+    let chip_id: Array1<u8> = neutrons_vec.iter().map(|n| n.inner.chip_id).collect();
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("x", PyArray1::from_array(py, &x))?;
+    dict.set_item("y", PyArray1::from_array(py, &y))?;
+    dict.set_item("tof", PyArray1::from_array(py, &tof))?;
+    dict.set_item("tot", PyArray1::from_array(py, &tot))?;
+    dict.set_item("n_hits", PyArray1::from_array(py, &n_hits))?;
+    dict.set_item("chip_id", PyArray1::from_array(py, &chip_id))?;
+
+    Ok(dict.into_any())
 }
 
 /// Python module for rustpix.
 #[pymodule]
 fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyHit>()?;
     m.add_class::<PyNeutron>()?;
     m.add_class::<PyClusteringConfig>()?;
     m.add_class::<PyChipTransform>()?;
     m.add_class::<PyDetectorConfig>()?;
     m.add_class::<streaming::MeasurementStream>()?;
-    m.add_function(wrap_pyfunction!(read_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
-    m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;
-    m.add_function(wrap_pyfunction!(extract_neutrons, m)?)?;
-    m.add_function(wrap_pyfunction!(extract_neutrons_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file_numpy, m)?)?;
     Ok(())

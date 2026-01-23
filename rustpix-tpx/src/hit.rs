@@ -1,111 +1,9 @@
-//! TPX3-specific hit type.
+//! TPX3 timing helpers.
 #![allow(
-    clippy::pub_underscore_fields,
     clippy::must_use_candidate,
     clippy::unreadable_literal
 )]
 //!
-
-use rustpix_core::hit::{ClusterableHit, Hit};
-
-/// TPX3 hit with optimized memory layout.
-///
-/// Size: 20 bytes (packed)
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[repr(C)]
-pub struct Tpx3Hit {
-    /// Time-of-flight in 25ns units.
-    pub tof: u32,
-    /// Global X coordinate.
-    pub x: u16,
-    /// Global Y coordinate.
-    pub y: u16,
-    /// Timestamp in 25ns units.
-    pub timestamp: u32,
-    /// Time-over-threshold (10-bit, stored as u16).
-    pub tot: u16,
-    /// Chip identifier (0-3 for quad arrangement).
-    pub chip_id: u8,
-    /// Padding for alignment.
-    pub _padding: u8,
-    /// Cluster assignment (-1 = unassigned).
-    pub cluster_id: i32,
-}
-
-impl Tpx3Hit {
-    /// Create a new hit.
-    #[must_use]
-    pub fn new(tof: u32, x: u16, y: u16, timestamp: u32, tot: u16, chip_id: u8) -> Self {
-        Self {
-            tof,
-            x,
-            y,
-            timestamp,
-            tot,
-            chip_id,
-            _padding: 0,
-            cluster_id: -1,
-        }
-    }
-}
-
-impl From<(u32, u16, u16, u32, u16, u8)> for Tpx3Hit {
-    fn from(tuple: (u32, u16, u16, u32, u16, u8)) -> Self {
-        Self::new(tuple.0, tuple.1, tuple.2, tuple.3, tuple.4, tuple.5)
-    }
-}
-
-impl Hit for Tpx3Hit {
-    #[inline]
-    fn tof(&self) -> u32 {
-        self.tof
-    }
-    #[inline]
-    fn x(&self) -> u16 {
-        self.x
-    }
-    #[inline]
-    fn y(&self) -> u16 {
-        self.y
-    }
-    #[inline]
-    fn tot(&self) -> u16 {
-        self.tot
-    }
-    #[inline]
-    fn timestamp(&self) -> u32 {
-        self.timestamp
-    }
-    #[inline]
-    fn chip_id(&self) -> u8 {
-        self.chip_id
-    }
-}
-
-impl ClusterableHit for Tpx3Hit {
-    #[inline]
-    fn cluster_id(&self) -> i32 {
-        self.cluster_id
-    }
-    #[inline]
-    fn set_cluster_id(&mut self, id: i32) {
-        self.cluster_id = id;
-    }
-}
-
-impl Eq for Tpx3Hit {}
-
-impl Ord for Tpx3Hit {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.tof.cmp(&other.tof)
-    }
-}
-
-impl PartialOrd for Tpx3Hit {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 /// Timestamp rollover correction.
 ///
@@ -150,23 +48,6 @@ pub fn calculate_tof(timestamp: u32, tdc_timestamp: u32, tdc_correction_25ns: u3
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_hit_creation() {
-        let hit = Tpx3Hit::new(1000, 128, 256, 500, 50, 0);
-        assert_eq!(hit.tof(), 1000);
-        assert_eq!(hit.x(), 128);
-        assert_eq!(hit.y(), 256);
-        assert_eq!(hit.tot(), 50);
-        assert_eq!(hit.chip_id(), 0);
-        assert_eq!(hit.cluster_id(), -1);
-    }
-
-    #[test]
-    fn test_hit_trait() {
-        let hit = Tpx3Hit::new(1000, 100, 200, 500, 50, 0);
-        assert_eq!(hit.tof_ns(), 25000.0);
-    }
 
     #[test]
     fn test_timestamp_rollover() {

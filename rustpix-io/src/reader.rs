@@ -11,9 +11,10 @@
 
 use crate::{Error, Result};
 use memmap2::Mmap;
+use rustpix_core::soa::HitBatch;
 use rustpix_tpx::ordering::TimeOrderedStream;
-use rustpix_tpx::section::{discover_sections, process_section};
-use rustpix_tpx::{DetectorConfig, Tpx3Hit, Tpx3Packet};
+use rustpix_tpx::section::{discover_sections, process_section_into_batch};
+use rustpix_tpx::{DetectorConfig, Tpx3Packet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -92,8 +93,8 @@ impl Tpx3FileReader {
         self.reader.len() / 8
     }
 
-    /// Reads and parses all hits from the file using section discovery.
-    pub fn read_hits(&self) -> Result<Vec<Tpx3Hit>> {
+    /// Reads and parses all hits from the file into a `HitBatch` (`SoA`).
+    pub fn read_batch(&self) -> Result<HitBatch> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
                 "file size {} is not a multiple of 8 (file: {})",
@@ -113,26 +114,39 @@ impl Tpx3FileReader {
 
         use rayon::prelude::*;
 
-        let mut all_hits: Vec<Tpx3Hit> = sections
+        let mut section_batches: Vec<HitBatch> = sections
             .par_iter()
-            .flat_map(|section| {
-                process_section(data, section, tdc_correction, |chip_id, x, y| {
-                    config.map_chip_to_global(chip_id, x, y)
-                })
+            .map(|section| {
+                let mut batch =
+                    HitBatch::with_capacity((section.packet_count() * 6) / 10);
+                let _ = process_section_into_batch(
+                    data,
+                    section,
+                    tdc_correction,
+                    |chip_id, x, y| config.map_chip_to_global(chip_id, x, y),
+                    &mut batch,
+                );
+                batch
             })
             .collect();
 
-        // Sort by TOF
-        all_hits.sort_unstable_by_key(|h| h.tof);
+        let total_hits = section_batches.iter().map(HitBatch::len).sum();
+        let mut all_batch = HitBatch::with_capacity(total_hits);
+        for batch in section_batches.drain(..) {
+            all_batch.append(&batch);
+        }
 
-        Ok(all_hits)
+        // Sort by TOF for deterministic ordering
+        all_batch.sort_by_tof();
+
+        Ok(all_batch)
     }
 
     /// Reads hits using the efficient time-ordered stream.
     ///
     /// This uses a pulse-based K-way merge to produce time-ordered hits
     /// without loading the entire file or performing a global sort.
-    pub fn read_hits_time_ordered(&self) -> Result<Vec<Tpx3Hit>> {
+    pub fn read_batch_time_ordered(&self) -> Result<HitBatch> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
                 "file size {} is not a multiple of 8 (file: {})",
@@ -145,8 +159,11 @@ impl Tpx3FileReader {
         let sections = discover_sections(data);
 
         let stream = TimeOrderedStream::new(data, &sections, &self.config);
-
-        Ok(stream.collect())
+        let mut batch = HitBatch::default();
+        for pulse_batch in stream {
+            batch.append(&pulse_batch);
+        }
+        Ok(batch)
     }
 
     /// Returns an iterator over raw packets.
@@ -185,8 +202,8 @@ mod tests {
         assert_eq!(reader.file_size(), 0);
         assert_eq!(reader.packet_count(), 0);
 
-        let hits = reader.read_hits().unwrap();
-        assert!(hits.is_empty());
+        let batch = reader.read_batch().unwrap();
+        assert!(batch.is_empty());
     }
 
     #[test]
@@ -196,6 +213,6 @@ mod tests {
         file.flush().unwrap();
 
         let reader = Tpx3FileReader::open(file.path()).unwrap();
-        assert!(reader.read_hits().is_err());
+        assert!(reader.read_batch().is_err());
     }
 }

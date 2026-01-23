@@ -69,26 +69,16 @@ rustpix benchmark input.tpx3 --iterations 5
 ```python
 import rustpix
 
-# Read hits from TPX3 file
-hits = rustpix.read_tpx3_file("input.tpx3")
-
-# Or get numpy arrays directly
+# Get numpy arrays directly (SoA)
 data = rustpix.read_tpx3_file_numpy("input.tpx3")
-# data["x"], data["y"], data["toa"], data["tot"] are numpy arrays
-
-# Cluster hits
-config = rustpix.ClusteringConfig(
-    spatial_epsilon=1.5,
-    temporal_epsilon=1000,
-    min_cluster_size=2
-)
-clusters = rustpix.cluster_hits(hits, config, algorithm="abs")
-
-# Extract centroids
-centroids = rustpix.extract_centroids(clusters)
+# data["x"], data["y"], data["tof"], data["tot"], data["chip_id"] are numpy arrays
 
 # Or process file in one call
-centroids = rustpix.process_tpx3_file("input.tpx3")
+config = rustpix.ClusteringConfig(radius=1.5, temporal_window_ns=1000, min_cluster_size=2)
+neutrons = rustpix.process_tpx3_file("input.tpx3", config=config, algorithm="abs")
+
+# Or return numpy arrays for neutrons
+neutrons_np = rustpix.process_tpx3_file_numpy("input.tpx3", config=config, algorithm="abs")
 ```
 
 ## License

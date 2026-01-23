@@ -18,7 +18,6 @@ use rustpix_algorithms::{
     AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
 };
 use rustpix_core::extraction::NeutronExtraction;
-use rustpix_core::soa::HitBatch;
 use rustpix_io::Tpx3FileReader;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -164,16 +163,10 @@ fn main() -> Result<()> {
                 }
 
                 let reader = Tpx3FileReader::open(path)?;
-                let hits = reader.read_hits()?;
+                let mut batch = reader.read_batch()?;
 
                 if verbose {
-                    eprintln!("  {} hits read", hits.len());
-                }
-
-                // Convert to HitBatch for SoA clustering
-                let mut batch = HitBatch::with_capacity(hits.len());
-                for hit in &hits {
-                    batch.push(hit.x, hit.y, hit.tof, hit.tot, hit.timestamp, hit.chip_id);
+                    eprintln!("  {} hits read", batch.len());
                 }
 
                 // Perform clustering
@@ -219,9 +212,7 @@ fn main() -> Result<()> {
                 }
 
                 // Perform extraction
-                // Need to extract labels from batch
-                let labels = batch.cluster_id.clone();
-                let neutrons = extractor.extract(&hits, &labels, num_clusters)?;
+                let neutrons = extractor.extract_soa(&batch, num_clusters)?;
 
                 if verbose {
                     eprintln!("  {} neutrons extracted", neutrons.len());
@@ -275,19 +266,18 @@ fn main() -> Result<()> {
             );
             println!("Packets: {}", packet_count);
 
-            let hits = reader.read_hits()?;
-            println!("Hits: {}", hits.len());
+            let batch = reader.read_batch()?;
+            println!("Hits: {}", batch.len());
 
-            if !hits.is_empty() {
-                use rustpix_core::hit::Hit;
-                let min_tof = hits.iter().map(|h| h.tof()).min().unwrap();
-                let max_tof = hits.iter().map(|h| h.tof()).max().unwrap();
+            if !batch.is_empty() {
+                let min_tof = batch.tof.iter().copied().min().unwrap();
+                let max_tof = batch.tof.iter().copied().max().unwrap();
                 println!("TOF range: {} - {}", min_tof, max_tof);
 
-                let min_x = hits.iter().map(|h| h.x()).min().unwrap();
-                let max_x = hits.iter().map(|h| h.x()).max().unwrap();
-                let min_y = hits.iter().map(|h| h.y()).min().unwrap();
-                let max_y = hits.iter().map(|h| h.y()).max().unwrap();
+                let min_x = batch.x.iter().copied().min().unwrap();
+                let max_x = batch.x.iter().copied().max().unwrap();
+                let min_y = batch.y.iter().copied().min().unwrap();
+                let max_y = batch.y.iter().copied().max().unwrap();
                 println!("X range: {} - {}", min_x, max_x);
                 println!("Y range: {} - {}", min_y, max_y);
             }
@@ -295,11 +285,11 @@ fn main() -> Result<()> {
 
         Commands::Benchmark { input, iterations } => {
             let reader = Tpx3FileReader::open(&input)?;
-            let hits = reader.read_hits()?;
+            let base_batch = reader.read_batch()?;
 
             println!(
                 "Benchmarking with {} hits, {} iterations",
-                hits.len(),
+                base_batch.len(),
                 iterations
             );
 
@@ -323,10 +313,7 @@ fn main() -> Result<()> {
 
                 // Warmup
                 {
-                    let mut batch = HitBatch::with_capacity(hits.len());
-                    for hit in &hits {
-                        batch.push(hit.x, hit.y, hit.tof, hit.tot, hit.timestamp, hit.chip_id);
-                    }
+                    let mut batch = base_batch.clone();
                     match algo_enum {
                         Algorithm::Abs => {
                             let algo_config = rustpix_algorithms::AbsConfig {
@@ -375,10 +362,7 @@ fn main() -> Result<()> {
                     // I will include batch creation to mimic real pipeline.
                     let start = Instant::now();
 
-                    let mut batch = HitBatch::with_capacity(hits.len());
-                    for hit in &hits {
-                        batch.push(hit.x, hit.y, hit.tof, hit.tot, hit.timestamp, hit.chip_id);
-                    }
+                    let mut batch = base_batch.clone();
 
                     match algo_enum {
                         Algorithm::Abs => {
@@ -437,7 +421,7 @@ fn main() -> Result<()> {
 
             // 1. Standard approach (Parallel Load + Unstable Sort)
             let start = Instant::now();
-            let hits_std = reader.read_hits()?;
+            let hits_std = reader.read_batch()?;
             let time_std = start.elapsed();
             println!(
                 "Standard (Load + Sort): {:.2?} ({} hits)",
@@ -447,7 +431,7 @@ fn main() -> Result<()> {
 
             // 2. Streaming approach (Pulse-based Merge)
             let start = Instant::now();
-            let hits_stream = reader.read_hits_time_ordered()?;
+            let hits_stream = reader.read_batch_time_ordered()?;
             let time_stream = start.elapsed();
             println!(
                 "Streaming (K-Way Merge): {:.2?} ({} hits)",

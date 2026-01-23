@@ -11,6 +11,7 @@ use rustpix_tpx::ordering::TimeOrderedStream;
 use rustpix_tpx::section::discover_sections;
 use rustpix_tpx::DetectorConfig;
 use rustpix_tpx::Tpx3Packet;
+use rustpix_core::soa::HitBatch;
 
 // Helper to create a TPX3 header packet
 fn make_header(chip_id: u8) -> u64 {
@@ -36,6 +37,14 @@ fn make_hit(timestamp: u32, tot: u16, addr: u16) -> u64 {
         | ((tot as u64) << 20)
         | ((addr as u64) << 44)
         | (spidr as u64)
+}
+
+fn collect_batches(stream: TimeOrderedStream<'_>) -> HitBatch {
+    let mut batch = HitBatch::default();
+    for pulse_batch in stream {
+        batch.append(&pulse_batch);
+    }
+    batch
 }
 
 #[test]
@@ -89,7 +98,7 @@ fn test_interleaved_ordering() {
     // Create Stream
     let stream = TimeOrderedStream::new(&data, &sections, &config);
 
-    let hits: Vec<_> = stream.collect();
+    let hits = collect_batches(stream);
 
     assert_eq!(hits.len(), 4);
 
@@ -102,21 +111,21 @@ fn test_interleaved_ordering() {
     //   Chip 0 Hit: TOF = 2100 - 2000 = 100
 
     // Verify TOF order
-    assert_eq!(hits[0].tof, 100);
-    assert_eq!(hits[0].chip_id, 0);
+    assert_eq!(hits.tof[0], 100);
+    assert_eq!(hits.chip_id[0], 0);
 
-    assert_eq!(hits[1].tof, 200);
-    assert_eq!(hits[1].chip_id, 1);
+    assert_eq!(hits.tof[1], 200);
+    assert_eq!(hits.chip_id[1], 1);
 
     // Note: hits[2] should be the one with TOF=50 from Pulse 2
     // Because Pulse 2 > Pulse 1, so all Pulse 1 hits come first.
     // Within Pulse 2, TOF=50 comes before TOF=100.
 
-    assert_eq!(hits[2].tof, 50);
-    assert_eq!(hits[2].chip_id, 1);
+    assert_eq!(hits.tof[2], 50);
+    assert_eq!(hits.chip_id[2], 1);
 
-    assert_eq!(hits[3].tof, 100);
-    assert_eq!(hits[3].chip_id, 0);
+    assert_eq!(hits.tof[3], 100);
+    assert_eq!(hits.chip_id[3], 0);
 }
 
 #[test]
@@ -146,7 +155,7 @@ fn test_independent_rollover() {
     let sections = discover_sections(&data);
     let config = DetectorConfig::default();
     let stream = TimeOrderedStream::new(&data, &sections, &config);
-    let hits: Vec<_> = stream.collect();
+    let hits = collect_batches(stream);
 
     assert_eq!(hits.len(), 1);
 
@@ -154,7 +163,7 @@ fn test_independent_rollover() {
     // Hit 0x0001 corresponds to ... 0x40000001 (extension)
     // TDC 0x3FFFF000
     // Diff: 0x40000001 - 0x3FFFF000 = 0x1001 = 4097
-    assert_eq!(hits[0].tof, 4097);
+    assert_eq!(hits.tof[0], 4097);
 }
 
 #[test]
@@ -188,7 +197,7 @@ fn test_late_hit_boundary() {
     let sections = discover_sections(&data);
     let config = DetectorConfig::default();
     let stream = TimeOrderedStream::new(&data, &sections, &config);
-    let hits: Vec<_> = stream.collect();
+    let hits = collect_batches(stream);
 
     assert_eq!(hits.len(), 3);
 
@@ -197,9 +206,9 @@ fn test_late_hit_boundary() {
     // 2. Hit 1950 (Pulse 0). TOF=950. <-- Crucial check
     // 3. Hit 2100 (Pulse 1). TOF=100.
 
-    assert_eq!(hits[0].tof, 100);
-    assert_eq!(hits[1].tof, 950);
-    assert_eq!(hits[2].tof, 100);
+    assert_eq!(hits.tof[0], 100);
+    assert_eq!(hits.tof[1], 950);
+    assert_eq!(hits.tof[2], 100);
 }
 
 #[test]
@@ -232,7 +241,7 @@ fn test_performance_synthetic() {
 
     let start = std::time::Instant::now();
     let stream = TimeOrderedStream::new(&data, &sections, &config);
-    let count = stream.count();
+    let count: usize = stream.map(|batch| batch.len()).sum();
     let elapsed = start.elapsed();
 
     println!("Processed {} hits in {:.2?}", count, elapsed);
