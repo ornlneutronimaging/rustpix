@@ -385,6 +385,7 @@ fn batch_from_numpy(
 /// Cluster hits using SoA numpy arrays.
 #[pyfunction]
 #[pyo3(signature = (x, y, tof, tot, timestamp=None, chip_id=None, config=None, algorithm="abs"))]
+#[allow(clippy::too_many_arguments)]
 fn cluster_hits_numpy<'py>(
     py: Python<'py>,
     x: PyReadonlyArray1<u16>,
@@ -405,6 +406,7 @@ fn cluster_hits_numpy<'py>(
 /// Extract neutrons from SoA numpy arrays and labels.
 #[pyfunction]
 #[pyo3(signature = (x, y, tof, tot, labels, num_clusters, super_resolution=8.0, tot_weighted=true, timestamp=None, chip_id=None))]
+#[allow(clippy::too_many_arguments)]
 fn extract_neutrons_numpy<'py>(
     py: Python<'py>,
     x: PyReadonlyArray1<u16>,
