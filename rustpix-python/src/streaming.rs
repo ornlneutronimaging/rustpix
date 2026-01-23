@@ -155,41 +155,24 @@ impl MeasurementStream {
                     tpx_sections.push(tpx_sec);
                 }
 
-                // 2. Process sections PARALLEL into HitBatch
-                use rayon::prelude::*;
-
+                // 2. Process sections into a single HitBatch (avoid per-section merge copies)
                 let tdc_corr = detector_config.tdc_correction_25ns();
                 let det_config = &detector_config;
+                let total_capacity: usize =
+                    tpx_sections.iter().map(|section| section.packet_count()).sum();
+                let mut combined_batch = HitBatch::with_capacity(total_capacity);
 
-                let batches: Vec<HitBatch> = tpx_sections
-                    .par_iter()
-                    .map(|section| {
-                        let mut batch = HitBatch::with_capacity(section.packet_count());
-                        let _ = process_section_into_batch(
-                            chunk_data,
-                            section,
-                            tdc_corr,
-                            |c, x, y| det_config.map_chip_to_global(c, x, y),
-                            &mut batch,
-                        );
-                        batch
-                    })
-                    .collect();
-
-                // 3. Merge batches
-                let mut combined_batch =
-                    HitBatch::with_capacity(batches.iter().map(|b| b.len()).sum());
-                for b in batches {
-                    combined_batch.x.extend_from_slice(&b.x);
-                    combined_batch.y.extend_from_slice(&b.y);
-                    combined_batch.tof.extend_from_slice(&b.tof);
-                    combined_batch.tot.extend_from_slice(&b.tot);
-                    combined_batch.timestamp.extend_from_slice(&b.timestamp);
-                    combined_batch.chip_id.extend_from_slice(&b.chip_id);
-                    combined_batch.cluster_id.extend_from_slice(&b.cluster_id);
+                for section in &tpx_sections {
+                    let _ = process_section_into_batch(
+                        chunk_data,
+                        section,
+                        tdc_corr,
+                        |c, x, y| det_config.map_chip_to_global(c, x, y),
+                        &mut combined_batch,
+                    );
                 }
 
-                // 4. Clustering (only if hits exist)
+                // 3. Clustering (only if hits exist)
                 let n = combined_batch.len();
                 if n > 0 {
                     match algorithm.as_str() {
@@ -216,7 +199,7 @@ impl MeasurementStream {
                     }
                 }
 
-                // 5. Extract Neutrons
+                // 4. Extract Neutrons
                 // We no longer need to construct Vec<GenericHit>, saving a massive allocation and copy.
                 // We used to do:
                 // let mut hit_data = Vec::with_capacity(n); ...
@@ -253,7 +236,7 @@ impl MeasurementStream {
         slf.offset += consumed;
         slf.tdc_state = new_tdc_state;
 
-        // 6. Return Data Info
+        // 5. Return Data Info
         // Prepare PyDict output
         let dict = pyo3::types::PyDict::new(py);
 
