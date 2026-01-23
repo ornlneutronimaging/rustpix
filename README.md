@@ -73,12 +73,18 @@ import rustpix
 data = rustpix.read_tpx3_file_numpy("input.tpx3")
 # data["x"], data["y"], data["tof"], data["tot"], data["timestamp"], data["chip_id"] are numpy arrays
 
+# Optional Arrow export (requires pyarrow)
+hits_arrow = rustpix.read_tpx3_file_arrow("input.tpx3")
+
 # Or process file in one call
 config = rustpix.ClusteringConfig(radius=1.5, temporal_window_ns=1000, min_cluster_size=2)
 neutrons = rustpix.process_tpx3_file("input.tpx3", config=config, algorithm="abs")
 
 # Or return numpy arrays for neutrons
 neutrons_np = rustpix.process_tpx3_file_numpy("input.tpx3", config=config, algorithm="abs")
+
+# Arrow output for neutrons (requires pyarrow)
+neutrons_arrow = rustpix.process_tpx3_file_arrow("input.tpx3", config=config, algorithm="abs")
 
 # SoA-native numpy inputs (no per-hit objects)
 labels, num_clusters = rustpix.cluster_hits_numpy(

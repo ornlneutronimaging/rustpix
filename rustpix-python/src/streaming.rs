@@ -264,6 +264,11 @@ impl MeasurementStream {
         hits_dict.set_item("tof", PyArray1::from_vec(py, combined_batch.tof))?;
         hits_dict.set_item("tot", PyArray1::from_vec(py, combined_batch.tot))?;
         hits_dict.set_item(
+            "timestamp",
+            PyArray1::from_vec(py, combined_batch.timestamp),
+        )?;
+        hits_dict.set_item("chip_id", PyArray1::from_vec(py, combined_batch.chip_id))?;
+        hits_dict.set_item(
             "cluster_id",
             PyArray1::from_vec(py, combined_batch.cluster_id),
         )?;

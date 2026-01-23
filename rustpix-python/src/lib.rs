@@ -11,7 +11,6 @@
 //! This crate provides Python bindings using PyO3 and numpy
 //! for efficient data exchange with Python.
 
-use numpy::ndarray::Array1;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use rustpix_algorithms::{
@@ -279,6 +278,14 @@ fn read_tpx3_file_numpy<'py>(
         .read_batch()
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
+    let dict = hits_dict_from_batch(py, batch)?;
+    Ok(dict.into_any())
+}
+
+fn hits_dict_from_batch<'py>(
+    py: Python<'py>,
+    batch: HitBatch,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let HitBatch {
         x,
         y,
@@ -286,33 +293,53 @@ fn read_tpx3_file_numpy<'py>(
         tot,
         timestamp,
         chip_id,
-        ..
+        cluster_id,
     } = batch;
 
-    // Create separate arrays for each field
-    let x: Array1<u16> = Array1::from_vec(x);
-    let y: Array1<u16> = Array1::from_vec(y);
-    let tof: Array1<u32> = Array1::from_vec(tof);
-    let tot: Array1<u16> = Array1::from_vec(tot);
-    let timestamp: Array1<u32> = Array1::from_vec(timestamp);
-    let chip_id: Array1<u8> = Array1::from_vec(chip_id);
-
-    let x_arr = PyArray1::from_array(py, &x);
-    let y_arr = PyArray1::from_array(py, &y);
-    let tof_arr = PyArray1::from_array(py, &tof);
-    let tot_arr = PyArray1::from_array(py, &tot);
-    let chip_arr = PyArray1::from_array(py, &chip_id);
-
-    // Return as a dictionary
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", x_arr)?;
-    dict.set_item("y", y_arr)?;
-    dict.set_item("tof", tof_arr)?;
-    dict.set_item("tot", tot_arr)?;
-    dict.set_item("timestamp", PyArray1::from_array(py, &timestamp))?;
-    dict.set_item("chip_id", chip_arr)?;
+    dict.set_item("x", PyArray1::from_vec(py, x))?;
+    dict.set_item("y", PyArray1::from_vec(py, y))?;
+    dict.set_item("tof", PyArray1::from_vec(py, tof))?;
+    dict.set_item("tot", PyArray1::from_vec(py, tot))?;
+    dict.set_item("timestamp", PyArray1::from_vec(py, timestamp))?;
+    dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
+    if !cluster_id.is_empty() {
+        dict.set_item("cluster_id", PyArray1::from_vec(py, cluster_id))?;
+    }
 
-    Ok(dict.into_any())
+    Ok(dict)
+}
+
+fn arrow_table_from_dict<'py>(
+    py: Python<'py>,
+    dict: &Bound<'py, pyo3::types::PyDict>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let pyarrow = py
+        .import("pyarrow")
+        .map_err(|_| pyo3::exceptions::PyImportError::new_err("pyarrow is required"))?;
+    pyarrow.call_method("table", (dict,), None)
+}
+
+/// Read hits from a TPX3 file and return as a PyArrow table.
+#[pyfunction]
+#[pyo3(signature = (path, detector_config=None))]
+fn read_tpx3_file_arrow<'py>(
+    py: Python<'py>,
+    path: &str,
+    detector_config: Option<PyDetectorConfig>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let mut reader = Tpx3FileReader::open(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+    if let Some(config) = detector_config {
+        reader = reader.with_config(config.inner);
+    }
+
+    let batch = reader
+        .read_batch()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let dict = hits_dict_from_batch(py, batch)?;
+    arrow_table_from_dict(py, &dict)
 }
 
 fn batch_from_numpy(
@@ -444,20 +471,20 @@ fn extract_neutrons_numpy<'py>(
         .extract_soa(&batch, num_clusters)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-    let x: Array1<f64> = neutrons.iter().map(|n| n.x).collect();
-    let y: Array1<f64> = neutrons.iter().map(|n| n.y).collect();
-    let tof: Array1<u32> = neutrons.iter().map(|n| n.tof).collect();
-    let tot: Array1<u16> = neutrons.iter().map(|n| n.tot).collect();
-    let n_hits: Array1<u16> = neutrons.iter().map(|n| n.n_hits).collect();
-    let chip_id: Array1<u8> = neutrons.iter().map(|n| n.chip_id).collect();
+    let x: Vec<f64> = neutrons.iter().map(|n| n.x).collect();
+    let y: Vec<f64> = neutrons.iter().map(|n| n.y).collect();
+    let tof: Vec<u32> = neutrons.iter().map(|n| n.tof).collect();
+    let tot: Vec<u16> = neutrons.iter().map(|n| n.tot).collect();
+    let n_hits: Vec<u16> = neutrons.iter().map(|n| n.n_hits).collect();
+    let chip_id: Vec<u8> = neutrons.iter().map(|n| n.chip_id).collect();
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", PyArray1::from_array(py, &x))?;
-    dict.set_item("y", PyArray1::from_array(py, &y))?;
-    dict.set_item("tof", PyArray1::from_array(py, &tof))?;
-    dict.set_item("tot", PyArray1::from_array(py, &tot))?;
-    dict.set_item("n_hits", PyArray1::from_array(py, &n_hits))?;
-    dict.set_item("chip_id", PyArray1::from_array(py, &chip_id))?;
+    dict.set_item("x", PyArray1::from_vec(py, x))?;
+    dict.set_item("y", PyArray1::from_vec(py, y))?;
+    dict.set_item("tof", PyArray1::from_vec(py, tof))?;
+    dict.set_item("tot", PyArray1::from_vec(py, tot))?;
+    dict.set_item("n_hits", PyArray1::from_vec(py, n_hits))?;
+    dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
 
     Ok(dict.into_any())
 }
@@ -586,22 +613,47 @@ fn process_tpx3_file_numpy<'py>(
         detector_config,
     )?;
 
-    let x: Array1<f64> = neutrons_vec.iter().map(|n| n.inner.x).collect();
-    let y: Array1<f64> = neutrons_vec.iter().map(|n| n.inner.y).collect();
-    let tof: Array1<u32> = neutrons_vec.iter().map(|n| n.inner.tof).collect();
-    let tot: Array1<u16> = neutrons_vec.iter().map(|n| n.inner.tot).collect();
-    let n_hits: Array1<u16> = neutrons_vec.iter().map(|n| n.inner.n_hits).collect();
-    let chip_id: Array1<u8> = neutrons_vec.iter().map(|n| n.inner.chip_id).collect();
+    let x: Vec<f64> = neutrons_vec.iter().map(|n| n.inner.x).collect();
+    let y: Vec<f64> = neutrons_vec.iter().map(|n| n.inner.y).collect();
+    let tof: Vec<u32> = neutrons_vec.iter().map(|n| n.inner.tof).collect();
+    let tot: Vec<u16> = neutrons_vec.iter().map(|n| n.inner.tot).collect();
+    let n_hits: Vec<u16> = neutrons_vec.iter().map(|n| n.inner.n_hits).collect();
+    let chip_id: Vec<u8> = neutrons_vec.iter().map(|n| n.inner.chip_id).collect();
 
     let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", PyArray1::from_array(py, &x))?;
-    dict.set_item("y", PyArray1::from_array(py, &y))?;
-    dict.set_item("tof", PyArray1::from_array(py, &tof))?;
-    dict.set_item("tot", PyArray1::from_array(py, &tot))?;
-    dict.set_item("n_hits", PyArray1::from_array(py, &n_hits))?;
-    dict.set_item("chip_id", PyArray1::from_array(py, &chip_id))?;
+    dict.set_item("x", PyArray1::from_vec(py, x))?;
+    dict.set_item("y", PyArray1::from_vec(py, y))?;
+    dict.set_item("tof", PyArray1::from_vec(py, tof))?;
+    dict.set_item("tot", PyArray1::from_vec(py, tot))?;
+    dict.set_item("n_hits", PyArray1::from_vec(py, n_hits))?;
+    dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
 
     Ok(dict.into_any())
+}
+
+/// Process a TPX3 file and return neutrons as a PyArrow table.
+#[pyfunction]
+#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true, detector_config=None))]
+fn process_tpx3_file_arrow<'py>(
+    py: Python<'py>,
+    path: &str,
+    config: Option<PyClusteringConfig>,
+    algorithm: &str,
+    super_resolution: f64,
+    tot_weighted: bool,
+    detector_config: Option<PyDetectorConfig>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let dict_any = process_tpx3_file_numpy(
+        py,
+        path,
+        config,
+        algorithm,
+        super_resolution,
+        tot_weighted,
+        detector_config,
+    )?;
+    let dict = dict_any.downcast::<pyo3::types::PyDict>()?;
+    arrow_table_from_dict(py, dict)
 }
 
 /// Python module for rustpix.
@@ -613,9 +665,11 @@ fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDetectorConfig>()?;
     m.add_class::<streaming::MeasurementStream>()?;
     m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(read_tpx3_file_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(cluster_hits_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(extract_neutrons_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(process_tpx3_file_arrow, m)?)?;
     Ok(())
 }
