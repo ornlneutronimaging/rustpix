@@ -17,7 +17,8 @@ use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentro
 // use rustpix_core::hit::GenericHit; // Removed
 use rustpix_core::soa::HitBatch;
 use rustpix_io::{MappedFileReader, PacketScanner};
-use rustpix_tpx::section::{process_section_into_batch, scan_section_tdc, Tpx3Section};
+use rustpix_tpx::ordering::TimeOrderedStream;
+use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
 use rustpix_tpx::DetectorConfig;
 
 use crate::{PyClusteringConfig, PyDetectorConfig};
@@ -155,21 +156,13 @@ impl MeasurementStream {
                     tpx_sections.push(tpx_sec);
                 }
 
-                // 2. Process sections into a single HitBatch (avoid per-section merge copies)
-                let tdc_corr = detector_config.tdc_correction_25ns();
-                let det_config = &detector_config;
+                // 2. Time-order hits via K-way merge (consistent with core behavior)
                 let total_capacity: usize =
                     tpx_sections.iter().map(|section| section.packet_count()).sum();
                 let mut combined_batch = HitBatch::with_capacity(total_capacity);
-
-                for section in &tpx_sections {
-                    let _ = process_section_into_batch(
-                        chunk_data,
-                        section,
-                        tdc_corr,
-                        |c, x, y| det_config.map_chip_to_global(c, x, y),
-                        &mut combined_batch,
-                    );
+                let stream = TimeOrderedStream::new(chunk_data, &tpx_sections, &detector_config);
+                for pulse_batch in stream {
+                    combined_batch.append(&pulse_batch);
                 }
 
                 // 3. Clustering (only if hits exist)

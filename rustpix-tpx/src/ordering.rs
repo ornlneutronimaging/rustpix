@@ -89,7 +89,7 @@ impl<'a> PulseReader<'a> {
         let owned_sections = sections.to_vec();
 
         // Initialize state
-        // We do NOT pre-load the first TDC here. We let the loop handle it.
+        let initial_tdc = owned_sections.first().and_then(|s| s.initial_tdc);
 
         Self {
             data,
@@ -97,7 +97,7 @@ impl<'a> PulseReader<'a> {
             section_idx: 0,
             packet_idx: 0,
             prev_batch: None,
-            curr_tdc: None,
+            curr_tdc: initial_tdc,
             curr_batch: HitBatch::with_capacity(4096),
             ready_queue: VecDeque::new(),
             tdc_correction,
