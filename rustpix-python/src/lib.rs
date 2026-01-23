@@ -12,7 +12,7 @@
 //! for efficient data exchange with Python.
 
 use numpy::ndarray::Array1;
-use numpy::PyArray1;
+use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::prelude::*;
 use rustpix_algorithms::{
     AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
@@ -284,6 +284,7 @@ fn read_tpx3_file_numpy<'py>(
         y,
         tof,
         tot,
+        timestamp,
         chip_id,
         ..
     } = batch;
@@ -293,6 +294,7 @@ fn read_tpx3_file_numpy<'py>(
     let y: Array1<u16> = Array1::from_vec(y);
     let tof: Array1<u32> = Array1::from_vec(tof);
     let tot: Array1<u16> = Array1::from_vec(tot);
+    let timestamp: Array1<u32> = Array1::from_vec(timestamp);
     let chip_id: Array1<u8> = Array1::from_vec(chip_id);
 
     let x_arr = PyArray1::from_array(py, &x);
@@ -307,7 +309,153 @@ fn read_tpx3_file_numpy<'py>(
     dict.set_item("y", y_arr)?;
     dict.set_item("tof", tof_arr)?;
     dict.set_item("tot", tot_arr)?;
+    dict.set_item("timestamp", PyArray1::from_array(py, &timestamp))?;
     dict.set_item("chip_id", chip_arr)?;
+
+    Ok(dict.into_any())
+}
+
+fn batch_from_numpy(
+    x: PyReadonlyArray1<u16>,
+    y: PyReadonlyArray1<u16>,
+    tof: PyReadonlyArray1<u32>,
+    tot: PyReadonlyArray1<u16>,
+    timestamp: Option<PyReadonlyArray1<u32>>,
+    chip_id: Option<PyReadonlyArray1<u8>>,
+) -> PyResult<HitBatch> {
+    let len = x.len()?;
+    let y_len = y.len()?;
+    if y_len != len {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Length mismatch: y={}, x={}",
+            y_len, len
+        )));
+    }
+    let tof_len = tof.len()?;
+    if tof_len != len {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Length mismatch: tof={}, x={}",
+            tof_len, len
+        )));
+    }
+    let tot_len = tot.len()?;
+    if tot_len != len {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Length mismatch: tot={}, x={}",
+            tot_len, len
+        )));
+    }
+
+    if let Some(ref ts) = timestamp {
+        let ts_len = ts.len()?;
+        if ts_len != len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Length mismatch: timestamp={}, x={}",
+                ts_len, len
+            )));
+        }
+    }
+    if let Some(ref chip) = chip_id {
+        let chip_len = chip.len()?;
+        if chip_len != len {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Length mismatch: chip_id={}, x={}",
+                chip_len, len
+            )));
+        }
+    }
+
+    let x = x.as_slice()?;
+    let y = y.as_slice()?;
+    let tof = tof.as_slice()?;
+    let tot = tot.as_slice()?;
+    let timestamp = timestamp.as_ref().map(|ts| ts.as_slice()).transpose()?;
+    let chip_id = chip_id.as_ref().map(|chip| chip.as_slice()).transpose()?;
+
+    let mut batch = HitBatch::with_capacity(len);
+    for i in 0..len {
+        let ts = timestamp.map_or(0, |ts| ts[i]);
+        let chip = chip_id.map_or(0, |chip| chip[i]);
+        batch.push(x[i], y[i], tof[i], tot[i], ts, chip);
+    }
+
+    Ok(batch)
+}
+
+/// Cluster hits using SoA numpy arrays.
+#[pyfunction]
+#[pyo3(signature = (x, y, tof, tot, timestamp=None, chip_id=None, config=None, algorithm="abs"))]
+fn cluster_hits_numpy<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<u16>,
+    y: PyReadonlyArray1<u16>,
+    tof: PyReadonlyArray1<u32>,
+    tot: PyReadonlyArray1<u16>,
+    timestamp: Option<PyReadonlyArray1<u32>>,
+    chip_id: Option<PyReadonlyArray1<u8>>,
+    config: Option<PyClusteringConfig>,
+    algorithm: &str,
+) -> PyResult<(Bound<'py, PyArray1<i32>>, usize)> {
+    let mut batch = batch_from_numpy(x, y, tof, tot, timestamp, chip_id)?;
+    let num_clusters = cluster_from_batch(&mut batch, config, algorithm)?;
+    let labels = PyArray1::from_vec(py, batch.cluster_id);
+    Ok((labels, num_clusters))
+}
+
+/// Extract neutrons from SoA numpy arrays and labels.
+#[pyfunction]
+#[pyo3(signature = (x, y, tof, tot, labels, num_clusters, super_resolution=8.0, tot_weighted=true, timestamp=None, chip_id=None))]
+fn extract_neutrons_numpy<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<u16>,
+    y: PyReadonlyArray1<u16>,
+    tof: PyReadonlyArray1<u32>,
+    tot: PyReadonlyArray1<u16>,
+    labels: PyReadonlyArray1<i32>,
+    num_clusters: usize,
+    super_resolution: f64,
+    tot_weighted: bool,
+    timestamp: Option<PyReadonlyArray1<u32>>,
+    chip_id: Option<PyReadonlyArray1<u8>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let labels = labels.as_slice()?;
+    let mut batch = batch_from_numpy(x, y, tof, tot, timestamp, chip_id)?;
+    if labels.len() != batch.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Length mismatch: labels={}, hits={}",
+            labels.len(),
+            batch.len()
+        )));
+    }
+    for (i, label) in labels.iter().enumerate() {
+        batch.cluster_id[i] = *label;
+    }
+
+    let mut extractor = SimpleCentroidExtraction::new();
+    extractor.configure(
+        ExtractionConfig::default()
+            .with_super_resolution(super_resolution)
+            .with_weighted_by_tot(tot_weighted),
+    );
+
+    let neutrons = extractor
+        .extract_soa(&batch, num_clusters)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let x: Array1<f64> = neutrons.iter().map(|n| n.x).collect();
+    let y: Array1<f64> = neutrons.iter().map(|n| n.y).collect();
+    let tof: Array1<u32> = neutrons.iter().map(|n| n.tof).collect();
+    let tot: Array1<u16> = neutrons.iter().map(|n| n.tot).collect();
+    let n_hits: Array1<u16> = neutrons.iter().map(|n| n.n_hits).collect();
+    let chip_id: Array1<u8> = neutrons.iter().map(|n| n.chip_id).collect();
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("x", PyArray1::from_array(py, &x))?;
+    dict.set_item("y", PyArray1::from_array(py, &y))?;
+    dict.set_item("tof", PyArray1::from_array(py, &tof))?;
+    dict.set_item("tot", PyArray1::from_array(py, &tot))?;
+    dict.set_item("n_hits", PyArray1::from_array(py, &n_hits))?;
+    dict.set_item("chip_id", PyArray1::from_array(py, &chip_id))?;
 
     Ok(dict.into_any())
 }
@@ -463,6 +611,8 @@ fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDetectorConfig>()?;
     m.add_class::<streaming::MeasurementStream>()?;
     m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(cluster_hits_numpy, m)?)?;
+    m.add_function(wrap_pyfunction!(extract_neutrons_numpy, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_file_numpy, m)?)?;
     Ok(())

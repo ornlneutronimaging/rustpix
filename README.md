@@ -71,7 +71,7 @@ import rustpix
 
 # Get numpy arrays directly (SoA)
 data = rustpix.read_tpx3_file_numpy("input.tpx3")
-# data["x"], data["y"], data["tof"], data["tot"], data["chip_id"] are numpy arrays
+# data["x"], data["y"], data["tof"], data["tot"], data["timestamp"], data["chip_id"] are numpy arrays
 
 # Or process file in one call
 config = rustpix.ClusteringConfig(radius=1.5, temporal_window_ns=1000, min_cluster_size=2)
@@ -79,6 +79,29 @@ neutrons = rustpix.process_tpx3_file("input.tpx3", config=config, algorithm="abs
 
 # Or return numpy arrays for neutrons
 neutrons_np = rustpix.process_tpx3_file_numpy("input.tpx3", config=config, algorithm="abs")
+
+# SoA-native numpy inputs (no per-hit objects)
+labels, num_clusters = rustpix.cluster_hits_numpy(
+    data["x"],
+    data["y"],
+    data["tof"],
+    data["tot"],
+    timestamp=data["timestamp"],
+    chip_id=data["chip_id"],
+    config=config,
+    algorithm="abs",
+)
+
+neutrons_np = rustpix.extract_neutrons_numpy(
+    data["x"],
+    data["y"],
+    data["tof"],
+    data["tot"],
+    labels,
+    num_clusters,
+    timestamp=data["timestamp"],
+    chip_id=data["chip_id"],
+)
 ```
 
 ## License
