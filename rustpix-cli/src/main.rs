@@ -15,9 +15,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 use rustpix_algorithms::{
+    cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm,
+};
+use rustpix_algorithms::{
     AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
 };
-use rustpix_core::extraction::NeutronExtraction;
+use rustpix_core::clustering::ClusteringConfig;
+use rustpix_core::extraction::ExtractionConfig;
 use rustpix_io::Tpx3FileReader;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -150,12 +154,36 @@ fn main() -> Result<()> {
             }
 
             let start = Instant::now();
-            let mut all_neutrons = Vec::new();
+            let mut total_neutrons = 0usize;
+            let mut total_hits = 0usize;
 
-            // Configure extraction
-            let extraction_config = rustpix_core::extraction::ExtractionConfig::default();
-            let mut extractor = rustpix_core::extraction::SimpleCentroidExtraction::new();
-            extractor.configure(extraction_config);
+            let algo = match algorithm {
+                Algorithm::Abs => ClusteringAlgorithm::Abs,
+                Algorithm::Dbscan => ClusteringAlgorithm::Dbscan,
+                Algorithm::Grid => ClusteringAlgorithm::Grid,
+            };
+
+            let clustering = ClusteringConfig {
+                radius,
+                temporal_window_ns,
+                min_cluster_size,
+                max_cluster_size: None,
+            };
+
+            let extraction = ExtractionConfig::default();
+            let params = AlgorithmParams::default();
+
+            let mut writer = rustpix_io::DataFileWriter::create(&output)?;
+            if verbose {
+                eprintln!("Writing output to: {}", output.display());
+            }
+            let output_format = output
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_lowercase())
+                .unwrap_or_else(|| "bin".to_string());
+            let mut wrote_header = false;
+            let mut warned_unknown = false;
 
             for path in &input {
                 if verbose {
@@ -163,94 +191,55 @@ fn main() -> Result<()> {
                 }
 
                 let reader = Tpx3FileReader::open(path)?;
-                let mut batch = reader.read_batch()?;
+                let stream = reader.stream_time_ordered()?;
+                let mut file_hits = 0usize;
+                let mut file_neutrons = 0usize;
 
-                if verbose {
-                    eprintln!("  {} hits read", batch.len());
+                for mut batch in stream {
+                    file_hits = file_hits.saturating_add(batch.len());
+                    total_hits = total_hits.saturating_add(batch.len());
+
+                    let neutrons =
+                        cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params)?;
+                    file_neutrons = file_neutrons.saturating_add(neutrons.len());
+                    total_neutrons = total_neutrons.saturating_add(neutrons.len());
+
+                    match output_format.as_str() {
+                        "csv" => {
+                            writer.write_neutron_batch_csv(&neutrons, !wrote_header)?;
+                            wrote_header = true;
+                        }
+                        "bin" | "dat" => {
+                            writer.write_neutron_batch_binary(&neutrons)?;
+                        }
+                        _ => {
+                            if verbose && !warned_unknown {
+                                eprintln!(
+                                    "Unknown extension '{}', defaulting to binary",
+                                    output_format
+                                );
+                            }
+                            warned_unknown = true;
+                            writer.write_neutron_batch_binary(&neutrons)?;
+                        }
+                    }
                 }
 
-                // Perform clustering
-                let num_clusters = match algorithm {
-                    Algorithm::Abs => {
-                        let algo_config = rustpix_algorithms::AbsConfig {
-                            radius,
-                            neutron_correlation_window_ns: temporal_window_ns,
-                            min_cluster_size,
-                            scan_interval: 100,
-                        };
-                        let algo = AbsClustering::new(algo_config);
-                        let mut state = AbsState::default();
-                        algo.cluster(&mut batch, &mut state)?
-                    }
-                    Algorithm::Dbscan => {
-                        let algo_config = rustpix_algorithms::DbscanConfig {
-                            epsilon: radius,
-                            temporal_window_ns,
-                            min_points: 2,
-                            min_cluster_size,
-                        };
-                        let algo = DbscanClustering::new(algo_config);
-                        let mut state = DbscanState::default();
-                        algo.cluster(&mut batch, &mut state)?
-                    }
-                    Algorithm::Grid => {
-                        let algo_config = rustpix_algorithms::GridConfig {
-                            radius,
-                            temporal_window_ns,
-                            min_cluster_size,
-                            cell_size: 32,
-                            max_cluster_size: None,
-                        };
-                        let algo = GridClustering::new(algo_config);
-                        let mut state = GridState::default();
-                        algo.cluster(&mut batch, &mut state)?
-                    }
-                };
-
                 if verbose {
-                    eprintln!("  {} clusters found", num_clusters);
+                    eprintln!("  {} hits processed", file_hits);
+                    eprintln!("  {} neutrons extracted", file_neutrons);
                 }
-
-                // Perform extraction
-                let neutrons = extractor.extract_soa(&batch, num_clusters)?;
-
-                if verbose {
-                    eprintln!("  {} neutrons extracted", neutrons.len());
-                }
-
-                all_neutrons.extend(neutrons);
             }
 
             let elapsed = start.elapsed();
-
-            // Write output
-            if verbose {
-                eprintln!("Writing output to: {}", output.display());
-            }
-
-            let mut writer = rustpix_io::DataFileWriter::create(&output)?;
-
-            if let Some(ext) = output.extension().and_then(|e| e.to_str()) {
-                match ext.to_lowercase().as_str() {
-                    "csv" => writer.write_neutrons_csv(&all_neutrons)?,
-                    "bin" | "dat" => writer.write_neutrons_binary(&all_neutrons)?,
-                    _ => {
-                        if verbose {
-                            eprintln!("Unknown extension '{}', defaulting to binary", ext);
-                        }
-                        writer.write_neutrons_binary(&all_neutrons)?;
-                    }
-                }
-            } else {
-                writer.write_neutrons_binary(&all_neutrons)?;
-            }
 
             println!(
                 "Processed {} files in {:.2}s",
                 input.len(),
                 elapsed.as_secs_f64()
             );
-            println!("Total neutrons: {}", all_neutrons.len());
+            println!("Total hits: {}", total_hits);
+            println!("Total neutrons: {}", total_neutrons);
         }
 
         Commands::Info { input } => {

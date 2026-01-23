@@ -35,7 +35,6 @@ impl Default for AbsConfig {
 }
 
 struct Bucket {
-    hit_indices: Vec<usize>,
     x_min: u16,
     x_max: u16,
     y_min: u16,
@@ -50,7 +49,6 @@ struct Bucket {
 impl Bucket {
     fn new() -> Self {
         Self {
-            hit_indices: Vec::with_capacity(16),
             x_min: u16::MAX,
             x_max: 0,
             y_min: u16::MAX,
@@ -63,22 +61,19 @@ impl Bucket {
         }
     }
 
-    fn initialize(&mut self, hit_idx: usize, x: u16, y: u16, tof: u32) {
-        self.hit_indices.clear();
-        self.hit_indices.push(hit_idx);
+    fn initialize(&mut self, x: u16, y: u16, tof: u32, cluster_id: i32) {
         self.x_min = x;
         self.x_max = x;
         self.y_min = y;
         self.y_max = y;
         self.start_tof = tof;
-        self.cluster_id = -1;
+        self.cluster_id = cluster_id;
         self.is_active = true;
         self.insertion_x = x;
         self.insertion_y = y;
     }
 
-    fn add_hit(&mut self, hit_idx: usize, x: u16, y: u16) {
-        self.hit_indices.push(hit_idx);
+    fn add_hit(&mut self, x: u16, y: u16) {
         self.x_min = self.x_min.min(x);
         self.x_max = self.x_max.max(x);
         self.y_min = self.y_min.min(y);
@@ -97,6 +92,7 @@ pub struct AbsState {
     grid: Vec<Vec<usize>>, // Spatial index
     grid_w: usize,
     next_cluster_id: i32,
+    cluster_sizes: Vec<u32>,
 }
 
 impl Default for AbsState {
@@ -108,6 +104,7 @@ impl Default for AbsState {
             grid: vec![Vec::new(); (256 / 32 + 1) * (256 / 32 + 1)], // 32 is cell size
             grid_w: 256 / 32 + 1,
             next_cluster_id: 0,
+            cluster_sizes: Vec::new(),
         }
     }
 }
@@ -134,8 +131,10 @@ impl AbsClustering {
 
         let n = batch.len();
         // Since batch.cluster_id stores per-hit result, we write to it eventually.
-        // ABS writes cluster ID when closing buckets.
+        // ABS writes cluster ID when assigning hits to buckets.
         batch.cluster_id.fill(-1);
+        state.cluster_sizes.clear();
+        state.next_cluster_id = 0;
 
         let window_tof = (self.config.neutron_correlation_window_ns / 25.0).ceil() as u32;
         let cell_size = 32;
@@ -173,7 +172,7 @@ impl AbsClustering {
 
             // Aging
             if i % self.config.scan_interval == 0 && i > 0 {
-                self.scan_and_close(tof, state, batch, window_tof, cell_size, grid_w);
+                self.scan_and_close(tof, state, window_tof, cell_size, grid_w);
             }
 
             // Find compatible bucket
@@ -225,10 +224,16 @@ impl AbsClustering {
             }
 
             if let Some(bidx) = found {
-                state.buckets[bidx].add_hit(i, x, y);
+                let cid = state.buckets[bidx].cluster_id;
+                state.cluster_sizes[cid as usize] += 1;
+                batch.cluster_id[i] = cid;
+                state.buckets[bidx].add_hit(x, y);
             } else {
                 let bidx = self.get_bucket(state)?;
-                state.buckets[bidx].initialize(i, x, y, tof);
+                let cid = self.new_cluster_id(state)?;
+                state.buckets[bidx].initialize(x, y, tof, cid);
+                state.cluster_sizes[cid as usize] += 1;
+                batch.cluster_id[i] = cid;
                 state.active_indices.push(bidx);
 
                 // Insert into grid
@@ -259,7 +264,6 @@ impl AbsClustering {
         self.scan_and_close(
             last_tof.wrapping_add(window_tof + 1),
             state,
-            batch,
             window_tof,
             cell_size,
             grid_w,
@@ -268,7 +272,6 @@ impl AbsClustering {
         // Force close remaining active
         let active = std::mem::take(&mut state.active_indices);
         for bidx in active {
-            self.close_bucket(bidx, state, batch);
             state.buckets[bidx].is_active = false;
             state.free_indices.push(bidx);
             // Remove from grid? Too expensive to find.
@@ -285,7 +288,23 @@ impl AbsClustering {
             }
         }
 
-        Ok(state.next_cluster_id as usize)
+        let min_cluster_size = self.config.min_cluster_size as u32;
+        let mut remap = vec![-1i32; state.cluster_sizes.len()];
+        let mut next = 0i32;
+        for (cid, &count) in state.cluster_sizes.iter().enumerate() {
+            if count >= min_cluster_size {
+                remap[cid] = next;
+                next += 1;
+            }
+        }
+
+        for cid in &mut batch.cluster_id {
+            if *cid >= 0 {
+                *cid = remap[*cid as usize];
+            }
+        }
+
+        Ok(next as usize)
     }
 
     fn get_bucket(&self, state: &mut AbsState) -> Result<usize, ClusteringError> {
@@ -303,23 +322,22 @@ impl AbsClustering {
         }
     }
 
-    fn close_bucket(&self, bidx: usize, state: &mut AbsState, batch: &mut HitBatch) {
-        let bucket = &mut state.buckets[bidx];
-        if bucket.hit_indices.len() >= self.config.min_cluster_size as usize {
-            let cid = state.next_cluster_id;
-            state.next_cluster_id += 1;
-            bucket.cluster_id = cid;
-            for &hidx in &bucket.hit_indices {
-                batch.cluster_id[hidx] = cid;
-            }
+    fn new_cluster_id(&self, state: &mut AbsState) -> Result<i32, ClusteringError> {
+        if state.next_cluster_id == i32::MAX {
+            return Err(ClusteringError::StateError(
+                "cluster id overflow".to_string(),
+            ));
         }
+        let cid = state.next_cluster_id;
+        state.next_cluster_id += 1;
+        state.cluster_sizes.push(0);
+        Ok(cid)
     }
 
     fn scan_and_close(
         &self,
         ref_tof: u32,
         state: &mut AbsState,
-        batch: &mut HitBatch,
         window_tof: u32,
         cell_size: usize,
         grid_w: usize,
@@ -339,8 +357,6 @@ impl AbsClustering {
         state.active_indices = keep;
 
         for bidx in remove {
-            self.close_bucket(bidx, state, batch);
-
             // Remove from grid
             let b = &state.buckets[bidx];
             let gx = b.insertion_x as usize / cell_size;

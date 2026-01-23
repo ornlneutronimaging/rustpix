@@ -5,10 +5,12 @@ use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use rustpix_algorithms::{cluster_and_extract, AlgorithmParams, ClusteringAlgorithm};
+use rustpix_algorithms::{
+    cluster_and_extract_batch, cluster_and_extract_stream, AlgorithmParams, ClusteringAlgorithm,
+};
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;
-use rustpix_core::neutron::Neutron;
+use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::{TimeOrderedHitStream, Tpx3FileReader};
 use rustpix_tpx::{ChipTransform, DetectorConfig};
@@ -247,18 +249,18 @@ impl PyHitBatch {
 
 #[pyclass(name = "NeutronBatch")]
 struct PyNeutronBatch {
-    neutrons: Vec<Neutron>,
+    batch: Option<NeutronBatch>,
     metadata: BatchMetadata,
 }
 
 #[pymethods]
 impl PyNeutronBatch {
     fn len(&self) -> usize {
-        self.neutrons.len()
+        self.batch.as_ref().map_or(0, NeutronBatch::len)
     }
 
     fn is_empty(&self) -> bool {
-        self.neutrons.is_empty()
+        self.batch.as_ref().map_or(true, NeutronBatch::is_empty)
     }
 
     fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -266,22 +268,20 @@ impl PyNeutronBatch {
     }
 
     /// Convert neutrons to NumPy arrays (SoA layout).
-    fn to_numpy(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let mut x = Vec::with_capacity(self.neutrons.len());
-        let mut y = Vec::with_capacity(self.neutrons.len());
-        let mut tof = Vec::with_capacity(self.neutrons.len());
-        let mut tot = Vec::with_capacity(self.neutrons.len());
-        let mut n_hits = Vec::with_capacity(self.neutrons.len());
-        let mut chip_id = Vec::with_capacity(self.neutrons.len());
+    fn to_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let batch = self
+            .batch
+            .take()
+            .ok_or_else(|| PyValueError::new_err("NeutronBatch data has already been moved"))?;
 
-        for neutron in &self.neutrons {
-            x.push(neutron.x);
-            y.push(neutron.y);
-            tof.push(neutron.tof);
-            tot.push(neutron.tot);
-            n_hits.push(neutron.n_hits);
-            chip_id.push(neutron.chip_id);
-        }
+        let NeutronBatch {
+            x,
+            y,
+            tof,
+            tot,
+            n_hits,
+            chip_id,
+        } = batch;
 
         let dict = PyDict::new(py);
         dict.set_item("x", PyArray1::from_vec(py, x))?;
@@ -416,21 +416,22 @@ fn process_tpx3_neutrons(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(detector.clone());
 
-    let mut batch = if time_ordered {
-        reader
-            .read_batch_time_ordered()
+    let neutrons = if time_ordered {
+        let stream = reader
+            .stream_time_ordered()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        cluster_and_extract_stream(stream, algo, &clustering, &extraction, &params)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
     } else {
-        reader
+        let mut batch = reader
             .read_batch()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
     };
 
-    let neutrons = cluster_and_extract(&mut batch, algo, &clustering, &extraction, &params)
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-
     Ok(PyNeutronBatch {
-        neutrons,
+        batch: Some(neutrons),
         metadata: BatchMetadata {
             detector,
             clustering: Some(clustering),
@@ -492,11 +493,11 @@ fn cluster_hits(
         .as_mut()
         .ok_or_else(|| PyValueError::new_err("HitBatch data has already been moved"))?;
 
-    let neutrons = cluster_and_extract(batch_ref, algo, &clustering, &extraction, &params)
+    let neutrons = cluster_and_extract_batch(batch_ref, algo, &clustering, &extraction, &params)
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     Ok(PyNeutronBatch {
-        neutrons,
+        batch: Some(neutrons),
         metadata: BatchMetadata {
             detector: batch.metadata.detector.clone(),
             clustering: Some(clustering),

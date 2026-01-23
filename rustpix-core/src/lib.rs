@@ -13,4 +13,4 @@ pub mod soa;
 pub use clustering::{ClusteringConfig, ClusteringStatistics};
 pub use error::{ClusteringError, Error, ExtractionError, IoError, ProcessingError, Result};
 pub use extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
-pub use neutron::{ClusterSize, Neutron, NeutronStatistics};
+pub use neutron::{ClusterSize, Neutron, NeutronBatch, NeutronStatistics};

@@ -10,7 +10,7 @@
 //!
 
 use crate::error::ExtractionError;
-use crate::neutron::Neutron;
+use crate::neutron::{Neutron, NeutronBatch};
 
 /// Configuration for neutron extraction.
 #[derive(Clone, Debug)]
@@ -96,13 +96,13 @@ pub trait NeutronExtraction: Send + Sync {
 struct ClusterAccumulator {
     sum_x: f64,
     sum_y: f64,
-    sum_weight: f64,
     raw_sum_x: f64,
     raw_sum_y: f64,
     sum_tot: u64,
     count: u32,
     max_tot: u16,
-    max_tot_index: usize,
+    rep_tof: u32,
+    rep_chip: u8,
 }
 
 /// Simple centroid extraction using TOT-weighted averages.
@@ -165,13 +165,13 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                 x_values,
                 y_values,
                 time_over_threshold,
+                time_of_flight,
+                chip_ids,
                 num_clusters,
                 self.config.min_tot_threshold,
             );
             Ok(build_neutrons_weighted(
                 accumulators,
-                time_of_flight,
-                chip_ids,
                 self.config.super_resolution_factor,
             ))
         } else {
@@ -181,13 +181,63 @@ impl NeutronExtraction for SimpleCentroidExtraction {
                 x_values,
                 y_values,
                 time_over_threshold,
+                time_of_flight,
+                chip_ids,
                 num_clusters,
                 self.config.min_tot_threshold,
             );
             Ok(build_neutrons_unweighted(
                 accumulators,
+                self.config.super_resolution_factor,
+            ))
+        }
+    }
+}
+
+impl SimpleCentroidExtraction {
+    pub fn extract_soa_batch(
+        &self,
+        batch: &crate::soa::HitBatch,
+        num_clusters: usize,
+    ) -> Result<NeutronBatch, ExtractionError> {
+        let mut accumulators = vec![ClusterAccumulator::default(); num_clusters];
+        let labels = &batch.cluster_id;
+        let x_values = &batch.x;
+        let y_values = &batch.y;
+        let time_of_flight = &batch.tof;
+        let time_over_threshold = &batch.tot;
+        let chip_ids = &batch.chip_id;
+
+        if self.config.weighted_by_tot {
+            accumulate_weighted(
+                &mut accumulators,
+                labels,
+                x_values,
+                y_values,
+                time_over_threshold,
                 time_of_flight,
                 chip_ids,
+                num_clusters,
+                self.config.min_tot_threshold,
+            );
+            Ok(build_neutron_batch_weighted(
+                accumulators,
+                self.config.super_resolution_factor,
+            ))
+        } else {
+            accumulate_unweighted(
+                &mut accumulators,
+                labels,
+                x_values,
+                y_values,
+                time_over_threshold,
+                time_of_flight,
+                chip_ids,
+                num_clusters,
+                self.config.min_tot_threshold,
+            );
+            Ok(build_neutron_batch_unweighted(
+                accumulators,
                 self.config.super_resolution_factor,
             ))
         }
@@ -214,6 +264,8 @@ fn accumulate_weighted(
     x_values: &[u16],
     y_values: &[u16],
     tot_values: &[u16],
+    tof_values: &[u32],
+    chip_ids: &[u8],
     num_clusters: usize,
     min_tot: u16,
 ) {
@@ -238,11 +290,11 @@ fn accumulate_weighted(
             acc.raw_sum_y += y;
             acc.sum_x += x * weight;
             acc.sum_y += y * weight;
-            acc.sum_weight += weight;
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.max_tot_index = i;
+                acc.rep_tof = tof_values[i];
+                acc.rep_chip = chip_ids[i];
             }
         }
     } else {
@@ -262,11 +314,11 @@ fn accumulate_weighted(
             acc.raw_sum_y += y;
             acc.sum_x += x * weight;
             acc.sum_y += y * weight;
-            acc.sum_weight += weight;
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.max_tot_index = i;
+                acc.rep_tof = tof_values[i];
+                acc.rep_chip = chip_ids[i];
             }
         }
     }
@@ -278,6 +330,8 @@ fn accumulate_unweighted(
     x_values: &[u16],
     y_values: &[u16],
     tot_values: &[u16],
+    tof_values: &[u32],
+    chip_ids: &[u8],
     num_clusters: usize,
     min_tot: u16,
 ) {
@@ -302,7 +356,8 @@ fn accumulate_unweighted(
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.max_tot_index = i;
+                acc.rep_tof = tof_values[i];
+                acc.rep_chip = chip_ids[i];
             }
         }
     } else {
@@ -323,7 +378,8 @@ fn accumulate_unweighted(
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.max_tot_index = i;
+                acc.rep_tof = tof_values[i];
+                acc.rep_chip = chip_ids[i];
             }
         }
     }
@@ -331,8 +387,6 @@ fn accumulate_unweighted(
 
 fn build_neutrons_weighted(
     accumulators: Vec<ClusterAccumulator>,
-    tof_values: &[u32],
-    chip_ids: &[u8],
     scale: f64,
 ) -> Vec<Neutron> {
     let mut neutrons = Vec::with_capacity(accumulators.len());
@@ -341,8 +395,9 @@ fn build_neutrons_weighted(
             continue;
         }
 
-        let (centroid_x, centroid_y) = if acc.sum_weight > 0.0 {
-            (acc.sum_x / acc.sum_weight, acc.sum_y / acc.sum_weight)
+        let (centroid_x, centroid_y) = if acc.sum_tot > 0 {
+            let sum_weight = acc.sum_tot as f64;
+            (acc.sum_x / sum_weight, acc.sum_y / sum_weight)
         } else {
             (
                 acc.raw_sum_x / acc.count as f64,
@@ -350,19 +405,16 @@ fn build_neutrons_weighted(
             )
         };
 
-        let representative_tof = tof_values[acc.max_tot_index];
-        let representative_chip = chip_ids[acc.max_tot_index];
-
         let scaled_x = centroid_x * scale;
         let scaled_y = centroid_y * scale;
 
         neutrons.push(Neutron::new(
             scaled_x,
             scaled_y,
-            representative_tof,
+            acc.rep_tof,
             acc.sum_tot.min(u16::MAX as u64) as u16,
             acc.count as u16,
-            representative_chip,
+            acc.rep_chip,
         ));
     }
     neutrons
@@ -370,8 +422,6 @@ fn build_neutrons_weighted(
 
 fn build_neutrons_unweighted(
     accumulators: Vec<ClusterAccumulator>,
-    tof_values: &[u32],
-    chip_ids: &[u8],
     scale: f64,
 ) -> Vec<Neutron> {
     let mut neutrons = Vec::with_capacity(accumulators.len());
@@ -383,22 +433,76 @@ fn build_neutrons_unweighted(
         let centroid_x = acc.raw_sum_x / acc.count as f64;
         let centroid_y = acc.raw_sum_y / acc.count as f64;
 
-        let representative_tof = tof_values[acc.max_tot_index];
-        let representative_chip = chip_ids[acc.max_tot_index];
-
         let scaled_x = centroid_x * scale;
         let scaled_y = centroid_y * scale;
 
         neutrons.push(Neutron::new(
             scaled_x,
             scaled_y,
-            representative_tof,
+            acc.rep_tof,
             acc.sum_tot.min(u16::MAX as u64) as u16,
             acc.count as u16,
-            representative_chip,
+            acc.rep_chip,
         ));
     }
     neutrons
+}
+
+fn build_neutron_batch_weighted(
+    accumulators: Vec<ClusterAccumulator>,
+    scale: f64,
+) -> NeutronBatch {
+    let mut batch = NeutronBatch::with_capacity(accumulators.len());
+    for acc in accumulators {
+        if acc.count == 0 {
+            continue;
+        }
+
+        let (centroid_x, centroid_y) = if acc.sum_tot > 0 {
+            let sum_weight = acc.sum_tot as f64;
+            (acc.sum_x / sum_weight, acc.sum_y / sum_weight)
+        } else {
+            (
+                acc.raw_sum_x / acc.count as f64,
+                acc.raw_sum_y / acc.count as f64,
+            )
+        };
+
+        batch.push(Neutron::new(
+            centroid_x * scale,
+            centroid_y * scale,
+            acc.rep_tof,
+            acc.sum_tot.min(u16::MAX as u64) as u16,
+            acc.count as u16,
+            acc.rep_chip,
+        ));
+    }
+    batch
+}
+
+fn build_neutron_batch_unweighted(
+    accumulators: Vec<ClusterAccumulator>,
+    scale: f64,
+) -> NeutronBatch {
+    let mut batch = NeutronBatch::with_capacity(accumulators.len());
+    for acc in accumulators {
+        if acc.count == 0 {
+            continue;
+        }
+
+        let centroid_x = acc.raw_sum_x / acc.count as f64;
+        let centroid_y = acc.raw_sum_y / acc.count as f64;
+
+        batch.push(Neutron::new(
+            centroid_x * scale,
+            centroid_y * scale,
+            acc.rep_tof,
+            acc.sum_tot.min(u16::MAX as u64) as u16,
+            acc.count as u16,
+            acc.rep_chip,
+        ));
+    }
+    batch
 }
 
 #[cfg(test)]

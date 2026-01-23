@@ -99,6 +99,68 @@ pub struct NeutronStatistics {
     pub tof_range: (u32, u32),
 }
 
+/// Structure-of-arrays neutron output.
+#[derive(Clone, Debug, Default)]
+pub struct NeutronBatch {
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub tof: Vec<u32>,
+    pub tot: Vec<u16>,
+    pub n_hits: Vec<u16>,
+    pub chip_id: Vec<u8>,
+}
+
+impl NeutronBatch {
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            x: Vec::with_capacity(capacity),
+            y: Vec::with_capacity(capacity),
+            tof: Vec::with_capacity(capacity),
+            tot: Vec::with_capacity(capacity),
+            n_hits: Vec::with_capacity(capacity),
+            chip_id: Vec::with_capacity(capacity),
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.x.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.x.is_empty()
+    }
+
+    pub fn push(&mut self, neutron: Neutron) {
+        self.x.push(neutron.x);
+        self.y.push(neutron.y);
+        self.tof.push(neutron.tof);
+        self.tot.push(neutron.tot);
+        self.n_hits.push(neutron.n_hits);
+        self.chip_id.push(neutron.chip_id);
+    }
+
+    pub fn append(&mut self, other: &NeutronBatch) {
+        self.x.extend_from_slice(&other.x);
+        self.y.extend_from_slice(&other.y);
+        self.tof.extend_from_slice(&other.tof);
+        self.tot.extend_from_slice(&other.tot);
+        self.n_hits.extend_from_slice(&other.n_hits);
+        self.chip_id.extend_from_slice(&other.chip_id);
+    }
+
+    pub fn clear(&mut self) {
+        self.x.clear();
+        self.y.clear();
+        self.tof.clear();
+        self.tot.clear();
+        self.n_hits.clear();
+        self.chip_id.clear();
+    }
+}
+
 impl NeutronStatistics {
     /// Calculate statistics from a slice of neutrons.
     #[allow(clippy::cast_precision_loss, clippy::cast_lossless)]

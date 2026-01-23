@@ -3,7 +3,7 @@
 //!
 
 use crate::Result;
-use rustpix_core::neutron::Neutron;
+use rustpix_core::neutron::{Neutron, NeutronBatch};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -51,6 +51,45 @@ impl DataFileWriter {
             self.writer.write_all(&n.tot.to_le_bytes())?;
             self.writer.write_all(&n.n_hits.to_le_bytes())?;
             self.writer.write_all(&[n.chip_id])?;
+            self.writer.write_all(&[0u8; 3])?; // Reserved/padding
+        }
+
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    /// Writes neutron batch as CSV.
+    pub fn write_neutron_batch_csv(&mut self, batch: &NeutronBatch, include_header: bool) -> Result<()> {
+        if include_header {
+            writeln!(self.writer, "x,y,tof,tot,n_hits,chip_id")?;
+        }
+
+        for i in 0..batch.len() {
+            writeln!(
+                self.writer,
+                "{},{},{},{},{},{}",
+                batch.x[i],
+                batch.y[i],
+                batch.tof[i],
+                batch.tot[i],
+                batch.n_hits[i],
+                batch.chip_id[i]
+            )?;
+        }
+
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    /// Writes neutron batch as binary data.
+    pub fn write_neutron_batch_binary(&mut self, batch: &NeutronBatch) -> Result<()> {
+        for i in 0..batch.len() {
+            self.writer.write_all(&batch.x[i].to_le_bytes())?;
+            self.writer.write_all(&batch.y[i].to_le_bytes())?;
+            self.writer.write_all(&batch.tof[i].to_le_bytes())?;
+            self.writer.write_all(&batch.tot[i].to_le_bytes())?;
+            self.writer.write_all(&batch.n_hits[i].to_le_bytes())?;
+            self.writer.write_all(&[batch.chip_id[i]])?;
             self.writer.write_all(&[0u8; 3])?; // Reserved/padding
         }
 

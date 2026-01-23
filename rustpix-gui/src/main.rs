@@ -29,15 +29,17 @@ use std::time::{Duration, Instant};
 
 // Logic Imports
 use rustpix_algorithms::{
-    AbsClustering, AbsConfig, AbsState, DbscanClustering, DbscanConfig, DbscanState,
-    GridClustering, GridConfig, GridState,
+    cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm,
 };
 
-use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
-use rustpix_core::neutron::Neutron;
+use rustpix_core::clustering::ClusteringConfig;
+use rustpix_core::extraction::ExtractionConfig;
+use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
+use rustpix_io::Tpx3FileReader;
 use rustpix_tpx::section::{process_section_into_batch, scan_section_tdc, Tpx3Section};
+use rustpix_tpx::DetectorConfig;
 
 // We probably need to re-export MappedFileReader or use Tpx3FileReader internals?
 // rustpix-io exports `PacketScanner` and `Mmap...` if public.
@@ -85,7 +87,7 @@ enum AppMessage {
     LoadError(String),
 
     ProcessingProgress(f32, String),
-    ProcessingComplete(Vec<Neutron>, Duration),
+    ProcessingComplete(NeutronBatch, Duration),
     ProcessingError(String),
 }
 
@@ -103,7 +105,7 @@ struct RustpixApp {
     // Data
     hit_batch: Option<HitBatch>,
     hit_counts: Option<Vec<u32>>, // 512x512 grid for visualization/tooltips
-    neutrons: Vec<Neutron>,
+    neutrons: NeutronBatch,
     tof_hist_full: Option<Vec<u64>>, // Cached histogram
     // Cursor Info: x, y, hits
     cursor_info: Option<(usize, usize, u32)>,
@@ -147,7 +149,7 @@ impl Default for RustpixApp {
 
             hit_batch: None,
             hit_counts: None,
-            neutrons: Vec::new(),
+            neutrons: NeutronBatch::default(),
             tof_hist_full: None,
             cursor_info: None,
             // debug_info removed
@@ -419,13 +421,12 @@ impl RustpixApp {
     }
 
     fn run_processing(&mut self) {
-        if let Some(batch) = &self.hit_batch {
+        if let Some(path) = self.selected_file.clone() {
             self.is_processing = true;
             self.progress = 0.0;
             self.status_text = "Clustering...".to_owned();
 
             let tx = self.tx.clone();
-            let mut working_batch = batch.clone();
             let algo_type = self.algo_type;
             let config = (
                 self.radius,
@@ -433,183 +434,89 @@ impl RustpixApp {
                 self.min_cluster_size,
                 self.dbscan_min_points,
             );
+            let total_hits = self.hit_batch.as_ref().map_or(0, HitBatch::len);
+            let tdc_frequency = self.tdc_frequency;
 
             thread::spawn(move || {
                 let start = Instant::now();
                 let (radius, window, min_size, min_points) = config;
 
-                // --- Chunked Clustering Logic ---
-                // We split the batch into temporal chunks to allow progress reporting.
-                // A safe split point is where delta_tof > window (so no cluster can span the gap).
+                let det_config = DetectorConfig {
+                    tdc_frequency_hz: tdc_frequency,
+                    ..DetectorConfig::venus_defaults()
+                };
 
-                let mut current_max_cluster_id = 0;
-                let total_hits = working_batch.len();
-                let chunk_threshold = 100_000; // Prefer chunks of at least this size
-
-                // We need to build a new cluster_id vector because we process in chunks
-                let mut final_cluster_ids = vec![-1; total_hits];
-
-                let mut start_idx = 0;
-                let mut end_idx;
-
-                while start_idx < total_hits {
-                    // Find split point
-                    end_idx = start_idx + 1;
-
-                    // Look ahead for a gap
-                    let mut count = 1;
-                    while end_idx < total_hits {
-                        // Check if we can split here
-                        let dt =
-                            working_batch.tof[end_idx].wrapping_sub(working_batch.tof[end_idx - 1]);
-                        let window_tof = (window / 25.0).ceil() as u32;
-
-                        // We split if we found a gap AND we have enough data (or we are at end)
-                        // OR if we have TOO much data (safety break to prevent UI freeze)
-                        if (dt > window_tof && count >= chunk_threshold) || count >= 5_000_000 {
-                            break;
-                        }
-
-                        end_idx += 1;
-                        count += 1;
+                let reader = match Tpx3FileReader::open(&path) {
+                    Ok(r) => r.with_config(det_config),
+                    Err(e) => {
+                        let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
+                        return;
                     }
+                };
 
-                    // Create sub-batch for this range [start_idx, end_idx)
-                    let len = end_idx - start_idx;
-                    let mut sub_batch = HitBatch::with_capacity(len);
+                let algo = match algo_type {
+                    AlgorithmType::Abs => ClusteringAlgorithm::Abs,
+                    AlgorithmType::Dbscan => ClusteringAlgorithm::Dbscan,
+                    AlgorithmType::Grid => ClusteringAlgorithm::Grid,
+                };
 
-                    // Copy data
-                    sub_batch
-                        .x
-                        .extend_from_slice(&working_batch.x[start_idx..end_idx]);
-                    sub_batch
-                        .y
-                        .extend_from_slice(&working_batch.y[start_idx..end_idx]);
-                    sub_batch
-                        .tof
-                        .extend_from_slice(&working_batch.tof[start_idx..end_idx]);
-                    sub_batch
-                        .tot
-                        .extend_from_slice(&working_batch.tot[start_idx..end_idx]);
-                    sub_batch
-                        .timestamp
-                        .extend_from_slice(&working_batch.timestamp[start_idx..end_idx]);
-                    sub_batch
-                        .chip_id
-                        .extend_from_slice(&working_batch.chip_id[start_idx..end_idx]);
-                    sub_batch.cluster_id.resize(len, -1);
+                let clustering = ClusteringConfig {
+                    radius,
+                    temporal_window_ns: window,
+                    min_cluster_size: min_size,
+                    max_cluster_size: None,
+                };
 
-                    // Run Clustering on sub-batch
-                    let res = match algo_type {
-                        AlgorithmType::Grid => {
-                            let cfg = GridConfig {
-                                cell_size: 32,
-                                radius,
-                                temporal_window_ns: window,
-                                min_cluster_size: min_size,
-                                max_cluster_size: None,
-                            };
-                            let algo = GridClustering::new(cfg);
-                            let mut state = GridState::default();
-                            algo.cluster(&mut sub_batch, &mut state)
-                        }
-                        AlgorithmType::Abs => {
-                            let cfg = AbsConfig {
-                                radius,
-                                neutron_correlation_window_ns: window,
-                                min_cluster_size: min_size,
-                                scan_interval: 100,
-                            };
-                            let algo = AbsClustering::new(cfg);
-                            let mut state = AbsState::default();
-                            algo.cluster(&mut sub_batch, &mut state)
-                        }
-                        AlgorithmType::Dbscan => {
-                            let cfg = DbscanConfig {
-                                epsilon: radius,
-                                temporal_window_ns: window,
-                                min_points,
-                                min_cluster_size: min_size,
-                            };
-                            let algo = DbscanClustering::new(cfg);
-                            let mut state = DbscanState::default();
-                            algo.cluster(&mut sub_batch, &mut state)
-                        }
-                    };
+                let params = AlgorithmParams {
+                    abs_scan_interval: 100,
+                    dbscan_min_points: min_points,
+                    grid_cell_size: 32,
+                };
+
+                // Preserve legacy GUI behavior: naive centroid, no TOT filtering, no super-res.
+                let extraction = ExtractionConfig {
+                    super_resolution_factor: 1.0,
+                    weighted_by_tot: false,
+                    min_tot_threshold: 0,
+                };
+
+                let stream = match reader.stream_time_ordered() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
+                        return;
+                    }
+                };
+
+                let mut processed_hits = 0usize;
+                let mut last_update = Instant::now();
+                let mut neutrons = NeutronBatch::default();
+
+                for mut batch in stream {
+                    processed_hits = processed_hits.saturating_add(batch.len());
+                    let res = cluster_and_extract_batch(
+                        &mut batch,
+                        algo,
+                        &clustering,
+                        &extraction,
+                        &params,
+                    );
 
                     match res {
-                        Ok(n_clusters) => {
-                            // Map back results
-                            for i in 0..len {
-                                let cid = sub_batch.cluster_id[i];
-                                if cid >= 0 {
-                                    final_cluster_ids[start_idx + i] = cid + current_max_cluster_id;
-                                }
-                            }
-                            current_max_cluster_id += n_clusters as i32;
-                        }
+                        Ok(n) => neutrons.append(&n),
                         Err(e) => {
                             let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
                             return;
                         }
                     }
 
-                    start_idx = end_idx;
-
-                    // Update Progress
-                    let p = 0.9 * (start_idx as f32 / total_hits as f32);
-                    let _ = tx.send(AppMessage::ProcessingProgress(
-                        p,
-                        format!(
-                            "Clustering... {:.0}%",
-                            (start_idx as f32 / total_hits as f32) * 100.0
-                        ),
-                    ));
-                }
-
-                // Commit final IDs back to working_batch
-                working_batch.cluster_id = final_cluster_ids;
-                let num_clusters = current_max_cluster_id as usize;
-
-                tx.send(AppMessage::ProcessingProgress(
-                    0.9,
-                    format!("Found {} clusters. Extracting...", num_clusters),
-                ))
-                .unwrap();
-
-                let mut neutrons = Vec::with_capacity(num_clusters);
-                if num_clusters > 0 {
-                    let mut extractor = SimpleCentroidExtraction::new();
-                    // Preserve legacy GUI behavior: naive centroid, no TOT filtering, no super-res.
-                    extractor.configure(ExtractionConfig {
-                        super_resolution_factor: 1.0,
-                        weighted_by_tot: false,
-                        min_tot_threshold: 0,
-                    });
-
-                    // We need to report progress...
-                    // extract_soa is monolithic so we can't easily report progress inside it
-                    // unless we change the API or split it.
-                    // But extract_soa is O(N) and very fast (ms). The manual loop was reporting progress...
-                    // "Report progress every 50k hits".
-                    // Given extraction is < 100ms for millions of hits usually (accumulating), maybe we drop progress reporting for extraction?
-                    // The old code had it.
-                    // But `extract_soa` is designed to be super fast.
-                    // Let's assume it's fast enough to not freeze UI for long (or it's in a thread anyway).
-                    // We can send a "Starting extraction..." message.
-
-                    tx.send(AppMessage::ProcessingProgress(
-                        0.95,
-                        "Extracting neutrons (SoA)...".to_string(),
-                    ))
-                    .unwrap();
-
-                    match extractor.extract_soa(&working_batch, num_clusters) {
-                        Ok(n) => neutrons = n,
-                        Err(e) => {
-                            let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
-                            return;
-                        }
+                    if total_hits > 0 && last_update.elapsed() > Duration::from_millis(200) {
+                        let progress = (processed_hits as f32 / total_hits as f32).min(0.95);
+                        let _ = tx.send(AppMessage::ProcessingProgress(
+                            progress,
+                            format!("Processing... {:.0}%", progress * 100.0),
+                        ));
+                        last_update = Instant::now();
                     }
                 }
 
