@@ -21,7 +21,7 @@ use rustpix_tpx::ordering::TimeOrderedStream;
 use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
 use rustpix_tpx::DetectorConfig;
 
-use crate::{PyClusteringConfig, PyDetectorConfig};
+use crate::{io_error, value_error, PyClusteringConfig, PyDetectorConfig};
 
 struct UnsafeSlice(*const u8, usize);
 unsafe impl Send for UnsafeSlice {}
@@ -60,7 +60,7 @@ impl MeasurementStream {
         tot_weighted: bool,
     ) -> PyResult<Self> {
         let reader = MappedFileReader::open(path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+            .map_err(|e| io_error(&format!("MeasurementStream: open {path}"), e))?;
 
         let det_conf = detector_config
             .map(|c| c.inner.clone())
@@ -181,7 +181,7 @@ impl MeasurementStream {
                             });
                             let mut state = GridState::default();
                             algo.cluster(&mut combined_batch, &mut state)
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| format!("streaming grid cluster: {e}"))?;
                         }
                         _ => {
                             return Err(
@@ -219,11 +219,11 @@ impl MeasurementStream {
 
                 let neutrons = extractor
                     .extract_soa(&combined_batch, num_clusters)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| format!("streaming extract_soa: {e}"))?;
 
                 Ok((combined_batch, neutrons, consumed, tdc_state))
             })
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            .map_err(|e| value_error("MeasurementStream.__next__", e))?;
 
         // Update state
         slf.offset += consumed;

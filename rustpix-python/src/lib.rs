@@ -23,6 +23,14 @@ use rustpix_core::soa::HitBatch;
 use rustpix_io::Tpx3FileReader;
 pub mod streaming;
 
+fn io_error(context: &str, err: impl std::fmt::Display) -> PyErr {
+    pyo3::exceptions::PyIOError::new_err(format!("{context}: {err}"))
+}
+
+fn value_error(context: &str, err: impl std::fmt::Display) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(format!("{context}: {err}"))
+}
+
 /// Python wrapper for Neutron.
 #[pyclass(name = "Neutron")]
 #[derive(Clone)]
@@ -232,7 +240,7 @@ impl PyDetectorConfig {
         config
             .inner
             .validate_transforms()
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+            .map_err(|e| value_error("DetectorConfig.validate_transforms", e))?;
 
         Ok(config)
     }
@@ -248,14 +256,14 @@ impl PyDetectorConfig {
     fn from_file(path: &str) -> PyResult<Self> {
         rustpix_tpx::DetectorConfig::from_file(path)
             .map(|config| Self { inner: config })
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+            .map_err(|e| io_error(&format!("DetectorConfig.from_file({path})"), e))
     }
 
     #[staticmethod]
     fn from_json(json: &str) -> PyResult<Self> {
         rustpix_tpx::DetectorConfig::from_json(json)
             .map(|config| Self { inner: config })
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+            .map_err(|e| value_error("DetectorConfig.from_json", e))
     }
 }
 
@@ -268,7 +276,7 @@ fn read_tpx3_file_numpy<'py>(
     detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        .map_err(|e| io_error(&format!("read_tpx3_file_numpy: open {path}"), e))?;
 
     if let Some(config) = detector_config {
         reader = reader.with_config(config.inner);
@@ -276,7 +284,7 @@ fn read_tpx3_file_numpy<'py>(
 
     let batch = reader
         .read_batch()
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| value_error("read_tpx3_file_numpy: read_batch", e))?;
 
     let dict = hits_dict_from_batch(py, batch)?;
     Ok(dict.into_any())
@@ -329,7 +337,7 @@ fn read_tpx3_file_arrow<'py>(
     detector_config: Option<PyDetectorConfig>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        .map_err(|e| io_error(&format!("read_tpx3_file_arrow: open {path}"), e))?;
 
     if let Some(config) = detector_config {
         reader = reader.with_config(config.inner);
@@ -337,7 +345,7 @@ fn read_tpx3_file_arrow<'py>(
 
     let batch = reader
         .read_batch()
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| value_error("read_tpx3_file_arrow: read_batch", e))?;
     let dict = hits_dict_from_batch(py, batch)?;
     arrow_table_from_dict(py, &dict)
 }
@@ -450,11 +458,14 @@ fn extract_neutrons_numpy<'py>(
     let labels = labels.as_slice()?;
     let mut batch = batch_from_numpy(x, y, tof, tot, timestamp, chip_id)?;
     if labels.len() != batch.len() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Length mismatch: labels={}, hits={}",
-            labels.len(),
-            batch.len()
-        )));
+        return Err(value_error(
+            "extract_neutrons_numpy",
+            format!(
+                "Length mismatch: labels={}, hits={}",
+                labels.len(),
+                batch.len()
+            ),
+        ));
     }
     for (i, label) in labels.iter().enumerate() {
         batch.cluster_id[i] = *label;
@@ -469,7 +480,7 @@ fn extract_neutrons_numpy<'py>(
 
     let neutrons = extractor
         .extract_soa(&batch, num_clusters)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| value_error("extract_neutrons_numpy: extract_soa", e))?;
 
     let x: Vec<f64> = neutrons.iter().map(|n| n.x).collect();
     let y: Vec<f64> = neutrons.iter().map(|n| n.y).collect();
@@ -496,7 +507,8 @@ fn cluster_from_batch(
 ) -> PyResult<usize> {
     let config = config.unwrap_or_else(|| PyClusteringConfig::new(5.0, 75.0, 1, None));
 
-    match algorithm.to_lowercase().as_str() {
+    let algorithm = algorithm.to_lowercase();
+    match algorithm.as_str() {
         "abs" => {
             let algo_config = rustpix_algorithms::AbsConfig {
                 radius: config.inner.radius,
@@ -507,7 +519,7 @@ fn cluster_from_batch(
             let algo = AbsClustering::new(algo_config);
             let mut state = AbsState::default();
             algo.cluster(batch, &mut state)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+                .map_err(|e| value_error(&format!("cluster_from_batch({algorithm})"), e))
         }
         "dbscan" => {
             let algo_config = rustpix_algorithms::DbscanConfig {
@@ -519,7 +531,7 @@ fn cluster_from_batch(
             let algo = DbscanClustering::new(algo_config);
             let mut state = DbscanState::default();
             algo.cluster(batch, &mut state)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+                .map_err(|e| value_error(&format!("cluster_from_batch({algorithm})"), e))
         }
         "grid" => {
             let algo_config = rustpix_algorithms::GridConfig {
@@ -532,22 +544,22 @@ fn cluster_from_batch(
             let algo = GridClustering::new(algo_config);
             let mut state = GridState::default();
             algo.cluster(batch, &mut state)
-                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+                .map_err(|e| value_error(&format!("cluster_from_batch({algorithm})"), e))
         }
         "graph" => Err(pyo3::exceptions::PyValueError::new_err(
             "Algorithm 'graph' is deprecated/removed. Use 'abs', 'dbscan', or 'grid'",
         )),
-        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Unknown algorithm: {}. Use 'abs', 'dbscan', or 'grid'",
-            algorithm
-        ))),
+        _ => Err(value_error(
+            "cluster_from_batch",
+            format!("Unknown algorithm: {algorithm}. Use 'abs', 'dbscan', or 'grid'"),
+        )),
     }
 }
 
 /// Helper to read hits directly into batch from file (internal usage).
 fn read_file_to_batch(path: &str, detector_config: Option<PyDetectorConfig>) -> PyResult<HitBatch> {
     let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        .map_err(|e| io_error(&format!("read_file_to_batch: open {path}"), e))?;
 
     if let Some(config) = detector_config {
         reader = reader.with_config(config.inner);
@@ -555,7 +567,7 @@ fn read_file_to_batch(path: &str, detector_config: Option<PyDetectorConfig>) -> 
 
     reader
         .read_batch()
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+        .map_err(|e| value_error("read_file_to_batch: read_batch", e))
 }
 
 /// Process a TPX3 file: read, cluster, and extract neutrons.
@@ -581,7 +593,7 @@ fn process_tpx3_file(
 
     let neutrons = extractor
         .extract_soa(&batch, num_clusters)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        .map_err(|e| value_error("process_tpx3_file: extract_soa", e))?;
 
     Ok(neutrons
         .into_iter()
