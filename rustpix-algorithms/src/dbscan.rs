@@ -43,6 +43,10 @@ pub struct DbscanState {
     grid: Vec<Vec<usize>>,
     visited: Vec<bool>,
     noise: Vec<bool>,
+    neighbors: Vec<usize>,
+    seeds: Vec<usize>,
+    cluster_sizes: Vec<usize>,
+    id_map: Vec<i32>,
     pub _grid_capacity_w: usize,
     pub _grid_capacity_h: usize,
 }
@@ -70,6 +74,7 @@ impl DbscanClustering {
         DbscanState::default()
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn cluster(
         &self,
         batch: &mut HitBatch,
@@ -163,6 +168,8 @@ impl DbscanClustering {
         // To make it safe and easier, let's extract the slices from state:
         let visited_slice = &mut state.visited[..n];
         let noise_slice = &mut state.noise[..n];
+        let neighbors_buffer = &mut state.neighbors;
+        let seeds_buffer = &mut state.seeds;
 
         for i in 0..n {
             if visited_slice[i] {
@@ -170,31 +177,49 @@ impl DbscanClustering {
             }
             visited_slice[i] = true;
 
-            let neighbors = self.region_query(&ctx, i, batch);
+            self.region_query_into(&ctx, i, batch, neighbors_buffer);
 
-            if neighbors.len() < self.config.min_points {
+            if neighbors_buffer.len() < self.config.min_points {
                 noise_slice[i] = true;
             } else {
                 batch.cluster_id[i] = current_cluster_id;
+                seeds_buffer.clear();
+                seeds_buffer.extend_from_slice(neighbors_buffer);
                 let mut tracking = TrackingState {
                     visited: visited_slice,
                     noise: noise_slice,
                 };
-                self.expand_cluster(&ctx, neighbors, current_cluster_id, batch, &mut tracking);
+                self.expand_cluster(
+                    &ctx,
+                    seeds_buffer,
+                    current_cluster_id,
+                    batch,
+                    &mut tracking,
+                    neighbors_buffer,
+                );
                 current_cluster_id += 1;
             }
         }
 
         // Post-processing: Filter clusters smaller than min_cluster_size
         if self.config.min_cluster_size > 1 && current_cluster_id > 0 {
-            let mut sizes = vec![0usize; current_cluster_id as usize];
+            let current_cluster_len = current_cluster_id as usize;
+            if state.cluster_sizes.len() < current_cluster_len {
+                state.cluster_sizes.resize(current_cluster_len, 0);
+            }
+            let sizes = &mut state.cluster_sizes[..current_cluster_len];
+            sizes.fill(0);
             for &id in batch.cluster_id.iter() {
                 if id >= 0 {
                     sizes[id as usize] += 1;
                 }
             }
 
-            let mut id_map = vec![-1i32; current_cluster_id as usize];
+            if state.id_map.len() < current_cluster_len {
+                state.id_map.resize(current_cluster_len, -1);
+            }
+            let id_map = &mut state.id_map[..current_cluster_len];
+            id_map.fill(-1);
             let mut new_cluster_count = 0;
             let min_size = self.config.min_cluster_size as usize;
 
@@ -220,14 +245,20 @@ impl DbscanClustering {
         Ok(current_cluster_id as usize)
     }
 
-    fn region_query(&self, ctx: &DbscanContext, idx: usize, batch: &HitBatch) -> Vec<usize> {
+    fn region_query_into(
+        &self,
+        ctx: &DbscanContext,
+        idx: usize,
+        batch: &HitBatch,
+        neighbors: &mut Vec<usize>,
+    ) {
         let x = batch.x[idx] as f64;
         let y = batch.y[idx] as f64;
         let tof = batch.tof[idx];
         let cx = batch.x[idx] as usize / ctx.cell_size;
         let cy = batch.y[idx] as usize / ctx.cell_size;
 
-        let mut neighbors = Vec::new();
+        neighbors.clear();
 
         // Check neighboring cells
         for dy in -1..=1 {
@@ -258,16 +289,16 @@ impl DbscanClustering {
                 }
             }
         }
-        neighbors
     }
 
     fn expand_cluster(
         &self,
         ctx: &DbscanContext,
-        mut seeds: Vec<usize>,
+        seeds: &mut Vec<usize>,
         cluster_id: i32,
         batch: &mut HitBatch,
         tracking: &mut TrackingState,
+        neighbors: &mut Vec<usize>,
     ) {
         let mut i = 0;
         while i < seeds.len() {
@@ -283,11 +314,9 @@ impl DbscanClustering {
                 tracking.visited[current_p] = true;
                 batch.cluster_id[current_p] = cluster_id;
 
-                let neighbors = self.region_query(ctx, current_p, batch);
+                self.region_query_into(ctx, current_p, batch, neighbors);
                 if neighbors.len() >= self.config.min_points {
-                    for n in neighbors {
-                        seeds.push(n);
-                    }
+                    seeds.extend_from_slice(neighbors);
                 }
             } else if batch.cluster_id[current_p] == -1 {
                 batch.cluster_id[current_p] = cluster_id;

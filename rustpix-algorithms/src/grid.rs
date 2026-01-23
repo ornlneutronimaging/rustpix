@@ -42,6 +42,12 @@ impl Default for GridConfig {
 pub struct GridState {
     pub hits_processed: usize,
     pub clusters_found: usize,
+    grid: Option<SpatialGrid<usize>>,
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+    roots: Vec<usize>,
+    cluster_sizes: Vec<usize>,
+    root_to_label: Vec<i32>,
 }
 
 /// SoA-optimized Grid Clustering.
@@ -76,7 +82,7 @@ impl GridClustering {
         // Initialize labels to -1
         batch.cluster_id.fill(-1);
 
-        // Build spatial index
+        // Build spatial index (reuse allocations via state)
         let mut max_x = 0;
         let mut max_y = 0;
         for i in 0..n {
@@ -90,17 +96,45 @@ impl GridClustering {
             }
         }
 
-        // Using dynamic grid size
-        let mut grid: SpatialGrid<usize> =
-            SpatialGrid::new(self.config.cell_size, max_x + 32, max_y + 32);
+        let width = max_x + 32;
+        let height = max_y + 32;
+
+        let grid = state
+            .grid
+            .get_or_insert_with(|| SpatialGrid::new(self.config.cell_size, width, height));
+
+        if grid.cell_size() == self.config.cell_size {
+            grid.ensure_dimensions(width, height);
+            grid.clear();
+        } else {
+            *grid = SpatialGrid::new(self.config.cell_size, width, height);
+        }
 
         for i in 0..n {
             grid.insert(batch.x[i] as i32, batch.y[i] as i32, i);
         }
 
-        // Union-Find structure
-        let mut parent: Vec<usize> = (0..n).collect();
-        let mut rank: Vec<usize> = vec![0; n];
+        // Union-Find structure (reuse allocations)
+        if state.parent.len() < n {
+            state.parent.resize(n, 0);
+        }
+        if state.rank.len() < n {
+            state.rank.resize(n, 0);
+        }
+        if state.roots.len() < n {
+            state.roots.resize(n, 0);
+        }
+        if state.cluster_sizes.len() < n {
+            state.cluster_sizes.resize(n, 0);
+        }
+        if state.root_to_label.len() < n {
+            state.root_to_label.resize(n, -1);
+        }
+
+        for i in 0..n {
+            state.parent[i] = i;
+            state.rank[i] = 0;
+        }
 
         let radius_sq = self.config.radius * self.config.radius;
         let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
@@ -166,7 +200,7 @@ impl GridClustering {
                             let dist_sq = dx * dx + dy * dy;
 
                             if dist_sq <= radius_sq {
-                                union_sets(&mut parent, &mut rank, i, j);
+                                union_sets(&mut state.parent, &mut state.rank, i, j);
                             }
                         }
                     }
@@ -175,29 +209,30 @@ impl GridClustering {
         }
 
         // Count cluster sizes
-        let mut cluster_sizes = std::collections::HashMap::new();
+        state.cluster_sizes[..n].fill(0);
         for i in 0..n {
-            let root = find(&mut parent, i);
-            *cluster_sizes.entry(root).or_insert(0) += 1;
+            let root = find(&mut state.parent, i);
+            state.roots[i] = root;
+            state.cluster_sizes[root] += 1;
         }
 
         // Assign cluster labels
-        let mut root_to_label = std::collections::HashMap::new();
+        state.root_to_label[..n].fill(-1);
         let mut next_label = 0;
 
         for i in 0..n {
-            let root = find(&mut parent, i);
-            let size = *cluster_sizes.get(&root).unwrap_or(&0);
+            let root = state.roots[i];
+            let size = state.cluster_sizes[root];
 
             if size < self.config.min_cluster_size as usize {
                 batch.cluster_id[i] = -1;
             } else {
-                let label_id = *root_to_label.entry(root).or_insert_with(|| {
-                    let l = next_label;
+                let label_slot = &mut state.root_to_label[root];
+                if *label_slot < 0 {
+                    *label_slot = next_label;
                     next_label += 1;
-                    l
-                });
-                batch.cluster_id[i] = label_id;
+                }
+                batch.cluster_id[i] = *label_slot;
             }
         }
 
