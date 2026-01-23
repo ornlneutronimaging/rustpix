@@ -1,687 +1,614 @@
-//! rustpix-python: PyO3 Python bindings for rustpix.
-#![allow(
-    clippy::doc_markdown,
-    clippy::cast_possible_truncation,
-    clippy::needless_pass_by_value,
-    clippy::uninlined_format_args,
-    clippy::elidable_lifetime_names,
-    clippy::similar_names
-)]
-//!
-//! This crate provides Python bindings using PyO3 and numpy
-//! for efficient data exchange with Python.
+//! Thin Python bindings for rustpix.
 
-use numpy::{PyArray1, PyReadonlyArray1};
+use numpy::PyArray1;
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use rustpix_algorithms::{
-    AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
-};
+use pyo3::types::PyDict;
+
+use rustpix_algorithms::{cluster_and_extract, AlgorithmParams, ClusteringAlgorithm};
 use rustpix_core::clustering::ClusteringConfig;
-use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
+use rustpix_core::extraction::ExtractionConfig;
 use rustpix_core::neutron::Neutron;
 use rustpix_core::soa::HitBatch;
-use rustpix_io::Tpx3FileReader;
-pub mod streaming;
+use rustpix_io::{TimeOrderedHitStream, Tpx3FileReader};
+use rustpix_tpx::{ChipTransform, DetectorConfig};
 
-fn io_error(context: &str, err: impl std::fmt::Display) -> PyErr {
-    pyo3::exceptions::PyIOError::new_err(format!("{context}: {err}"))
-}
-
-fn value_error(context: &str, err: impl std::fmt::Display) -> PyErr {
-    pyo3::exceptions::PyValueError::new_err(format!("{context}: {err}"))
-}
-
-/// Python wrapper for Neutron.
-#[pyclass(name = "Neutron")]
 #[derive(Clone)]
-pub struct PyNeutron {
-    inner: Neutron,
+struct BatchMetadata {
+    detector: DetectorConfig,
+    clustering: Option<ClusteringConfig>,
+    extraction: Option<ExtractionConfig>,
+    algorithm: Option<String>,
+    source_path: Option<String>,
+    time_ordered: bool,
+}
+
+impl BatchMetadata {
+    fn to_pydict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        dict.set_item("detector_config", detector_config_to_dict(py, &self.detector)?)?;
+        if let Some(ref clustering) = self.clustering {
+            dict.set_item("clustering_config", clustering_config_to_dict(py, clustering)?)?;
+        }
+        if let Some(ref extraction) = self.extraction {
+            dict.set_item("extraction_config", extraction_config_to_dict(py, extraction)?)?;
+        }
+        if let Some(ref algorithm) = self.algorithm {
+            dict.set_item("algorithm", algorithm)?;
+        }
+        if let Some(ref source_path) = self.source_path {
+            dict.set_item("source_path", source_path)?;
+        }
+        dict.set_item("time_ordered", self.time_ordered)?;
+        Ok(dict.into_any().unbind())
+    }
+}
+
+#[pyclass(name = "DetectorConfig")]
+#[derive(Clone)]
+struct PyDetectorConfig {
+    inner: DetectorConfig,
 }
 
 #[pymethods]
-impl PyNeutron {
+impl PyDetectorConfig {
     #[new]
-    fn new(x: f64, y: f64, tof: u32, tot: u16, n_hits: u16, chip_id: u8) -> Self {
+    #[pyo3(signature = (
+        tdc_frequency_hz=None,
+        enable_missing_tdc_correction=None,
+        chip_size_x=None,
+        chip_size_y=None,
+        chip_transforms=None
+    ))]
+    fn new(
+        tdc_frequency_hz: Option<f64>,
+        enable_missing_tdc_correction: Option<bool>,
+        chip_size_x: Option<u16>,
+        chip_size_y: Option<u16>,
+        chip_transforms: Option<Vec<(i32, i32, i32, i32, i32, i32)>>,
+    ) -> Self {
+        let mut config = DetectorConfig::default();
+        if let Some(value) = tdc_frequency_hz {
+            config.tdc_frequency_hz = value;
+        }
+        if let Some(value) = enable_missing_tdc_correction {
+            config.enable_missing_tdc_correction = value;
+        }
+        if let Some(value) = chip_size_x {
+            config.chip_size_x = value;
+        }
+        if let Some(value) = chip_size_y {
+            config.chip_size_y = value;
+        }
+        if let Some(transforms) = chip_transforms {
+            config.chip_transforms = transforms
+                .into_iter()
+                .map(|(a, b, c, d, tx, ty)| ChipTransform { a, b, c, d, tx, ty })
+                .collect();
+        }
+        Self { inner: config }
+    }
+
+    #[staticmethod]
+    fn venus_defaults() -> Self {
         Self {
-            inner: Neutron::new(x, y, tof, tot, n_hits, chip_id),
+            inner: DetectorConfig::venus_defaults(),
         }
     }
 
-    #[getter]
-    fn x(&self) -> f64 {
-        self.inner.x
+    #[staticmethod]
+    fn from_json(json: &str) -> PyResult<Self> {
+        DetectorConfig::from_json(json)
+            .map(|config| Self { inner: config })
+            .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
-    #[getter]
-    fn y(&self) -> f64 {
-        self.inner.y
-    }
-
-    #[getter]
-    fn tof(&self) -> u32 {
-        self.inner.tof
-    }
-
-    #[getter]
-    fn tof_ns(&self) -> f64 {
-        self.inner.tof_ns()
-    }
-
-    #[getter]
-    fn tot(&self) -> u16 {
-        self.inner.tot
-    }
-
-    #[getter]
-    fn n_hits(&self) -> u16 {
-        self.inner.n_hits
-    }
-
-    #[getter]
-    fn chip_id(&self) -> u8 {
-        self.inner.chip_id
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "Neutron(x={:.2}, y={:.2}, tof={}, tot={}, n_hits={}, chip={})",
-            self.inner.x,
-            self.inner.y,
-            self.inner.tof,
-            self.inner.tot,
-            self.inner.n_hits,
-            self.inner.chip_id
-        )
+    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        detector_config_to_dict(py, &self.inner)
     }
 }
 
-/// Python wrapper for ClusteringConfig.
 #[pyclass(name = "ClusteringConfig")]
 #[derive(Clone)]
-pub struct PyClusteringConfig {
+struct PyClusteringConfig {
     inner: ClusteringConfig,
 }
 
 #[pymethods]
 impl PyClusteringConfig {
     #[new]
-    #[pyo3(signature = (radius=5.0, temporal_window_ns=75.0, min_cluster_size=1, max_cluster_size=None))]
+    #[pyo3(signature = (radius=None, temporal_window_ns=None, min_cluster_size=None, max_cluster_size=None))]
     fn new(
-        radius: f64,
-        temporal_window_ns: f64,
-        min_cluster_size: u16,
-        max_cluster_size: Option<usize>,
+        radius: Option<f64>,
+        temporal_window_ns: Option<f64>,
+        min_cluster_size: Option<u16>,
+        max_cluster_size: Option<u16>,
     ) -> Self {
-        Self {
-            inner: ClusteringConfig {
-                radius,
-                temporal_window_ns,
-                min_cluster_size,
-                max_cluster_size: max_cluster_size.map(|s| s as u16),
-            },
+        let mut config = ClusteringConfig::default();
+        if let Some(value) = radius {
+            config.radius = value;
         }
-    }
-
-    #[staticmethod]
-    fn default() -> Self {
-        Self {
-            inner: ClusteringConfig::default(),
+        if let Some(value) = temporal_window_ns {
+            config.temporal_window_ns = value;
         }
-    }
-
-    #[getter]
-    fn radius(&self) -> f64 {
-        self.inner.radius
-    }
-
-    #[getter]
-    fn temporal_window_ns(&self) -> f64 {
-        self.inner.temporal_window_ns
-    }
-
-    #[getter]
-    fn min_cluster_size(&self) -> u16 {
-        self.inner.min_cluster_size
-    }
-
-    #[getter]
-    fn max_cluster_size(&self) -> Option<usize> {
-        self.inner.max_cluster_size.map(|s| s as usize)
-    }
-}
-
-/// Python wrapper for ChipTransform.
-#[pyclass(name = "ChipTransform")]
-#[derive(Clone)]
-pub struct PyChipTransform {
-    inner: rustpix_tpx::ChipTransform,
-}
-
-#[pymethods]
-impl PyChipTransform {
-    #[new]
-    #[pyo3(signature = (a=1, b=0, c=0, d=1, tx=0, ty=0))]
-    fn new(a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32) -> Self {
-        Self {
-            inner: rustpix_tpx::ChipTransform { a, b, c, d, tx, ty },
+        if let Some(value) = min_cluster_size {
+            config.min_cluster_size = value;
         }
-    }
-
-    #[staticmethod]
-    fn identity() -> Self {
-        Self {
-            inner: rustpix_tpx::ChipTransform::identity(),
+        if let Some(value) = max_cluster_size {
+            config.max_cluster_size = Some(value);
         }
-    }
-
-    #[getter]
-    fn a(&self) -> i32 {
-        self.inner.a
-    }
-
-    #[getter]
-    fn b(&self) -> i32 {
-        self.inner.b
-    }
-
-    #[getter]
-    fn c(&self) -> i32 {
-        self.inner.c
-    }
-
-    #[getter]
-    fn d(&self) -> i32 {
-        self.inner.d
-    }
-
-    #[getter]
-    fn tx(&self) -> i32 {
-        self.inner.tx
-    }
-
-    #[getter]
-    fn ty(&self) -> i32 {
-        self.inner.ty
-    }
-}
-
-/// Python wrapper for DetectorConfig.
-#[pyclass(name = "DetectorConfig")]
-#[derive(Clone)]
-pub struct PyDetectorConfig {
-    inner: rustpix_tpx::DetectorConfig,
-}
-
-#[pymethods]
-impl PyDetectorConfig {
-    #[new]
-    #[pyo3(signature = (tdc_frequency_hz=60.0, enable_missing_tdc_correction=true, chip_size_x=256, chip_size_y=256, chip_transforms=None))]
-    fn new(
-        tdc_frequency_hz: f64,
-        enable_missing_tdc_correction: bool,
-        chip_size_x: u16,
-        chip_size_y: u16,
-        chip_transforms: Option<Vec<PyChipTransform>>,
-    ) -> PyResult<Self> {
-        let transforms = chip_transforms
-            .map(|v| v.into_iter().map(|t| t.inner).collect())
-            .unwrap_or_default();
-
-        let config = Self {
-            inner: rustpix_tpx::DetectorConfig {
-                tdc_frequency_hz,
-                enable_missing_tdc_correction,
-                chip_size_x,
-                chip_size_y,
-                chip_transforms: transforms,
-            },
-        };
-
-        config
-            .inner
-            .validate_transforms()
-            .map_err(|e| value_error("DetectorConfig.validate_transforms", e))?;
-
-        Ok(config)
+        Self { inner: config }
     }
 
     #[staticmethod]
     fn venus_defaults() -> Self {
         Self {
-            inner: rustpix_tpx::DetectorConfig::venus_defaults(),
+            inner: ClusteringConfig::venus_defaults(),
         }
     }
 
-    #[staticmethod]
-    fn from_file(path: &str) -> PyResult<Self> {
-        rustpix_tpx::DetectorConfig::from_file(path)
-            .map(|config| Self { inner: config })
-            .map_err(|e| io_error(&format!("DetectorConfig.from_file({path})"), e))
-    }
-
-    #[staticmethod]
-    fn from_json(json: &str) -> PyResult<Self> {
-        rustpix_tpx::DetectorConfig::from_json(json)
-            .map(|config| Self { inner: config })
-            .map_err(|e| value_error("DetectorConfig.from_json", e))
+    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        clustering_config_to_dict(py, &self.inner)
     }
 }
 
-/// Read hits from a TPX3 file and return as numpy structured arrays.
-#[pyfunction]
-#[pyo3(signature = (path, detector_config=None))]
-fn read_tpx3_file_numpy<'py>(
-    py: Python<'py>,
-    path: &str,
-    detector_config: Option<PyDetectorConfig>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| io_error(&format!("read_tpx3_file_numpy: open {path}"), e))?;
-
-    if let Some(config) = detector_config {
-        reader = reader.with_config(config.inner);
-    }
-
-    let batch = reader
-        .read_batch()
-        .map_err(|e| value_error("read_tpx3_file_numpy: read_batch", e))?;
-
-    let dict = hits_dict_from_batch(py, batch)?;
-    Ok(dict.into_any())
+#[pyclass(name = "ExtractionConfig")]
+#[derive(Clone)]
+struct PyExtractionConfig {
+    inner: ExtractionConfig,
 }
 
-fn hits_dict_from_batch<'py>(
-    py: Python<'py>,
-    batch: HitBatch,
-) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    let HitBatch {
-        x,
-        y,
-        tof,
-        tot,
-        timestamp,
-        chip_id,
-        cluster_id,
-    } = batch;
+#[pymethods]
+impl PyExtractionConfig {
+    #[new]
+    #[pyo3(signature = (super_resolution_factor=None, weighted_by_tot=None, min_tot_threshold=None))]
+    fn new(
+        super_resolution_factor: Option<f64>,
+        weighted_by_tot: Option<bool>,
+        min_tot_threshold: Option<u16>,
+    ) -> Self {
+        let mut config = ExtractionConfig::default();
+        if let Some(value) = super_resolution_factor {
+            config.super_resolution_factor = value;
+        }
+        if let Some(value) = weighted_by_tot {
+            config.weighted_by_tot = value;
+        }
+        if let Some(value) = min_tot_threshold {
+            config.min_tot_threshold = value;
+        }
+        Self { inner: config }
+    }
 
-    let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", PyArray1::from_vec(py, x))?;
-    dict.set_item("y", PyArray1::from_vec(py, y))?;
-    dict.set_item("tof", PyArray1::from_vec(py, tof))?;
-    dict.set_item("tot", PyArray1::from_vec(py, tot))?;
-    dict.set_item("timestamp", PyArray1::from_vec(py, timestamp))?;
-    dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
-    if !cluster_id.is_empty() {
+    #[staticmethod]
+    fn venus_defaults() -> Self {
+        Self {
+            inner: ExtractionConfig::venus_defaults(),
+        }
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        extraction_config_to_dict(py, &self.inner)
+    }
+}
+
+#[pyclass(name = "HitBatch")]
+struct PyHitBatch {
+    batch: Option<HitBatch>,
+    metadata: BatchMetadata,
+}
+
+#[pymethods]
+impl PyHitBatch {
+    fn len(&self) -> usize {
+        self.batch.as_ref().map_or(0, HitBatch::len)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.batch.as_ref().map_or(true, HitBatch::is_empty)
+    }
+
+    fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.metadata.to_pydict(py)
+    }
+
+    /// Convert the batch to NumPy arrays (moves the underlying buffers).
+    fn to_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let batch = self
+            .batch
+            .take()
+            .ok_or_else(|| PyValueError::new_err("HitBatch data has already been moved"))?;
+
+        let HitBatch {
+            x,
+            y,
+            tof,
+            tot,
+            timestamp,
+            chip_id,
+            cluster_id,
+        } = batch;
+
+        let dict = PyDict::new(py);
+        dict.set_item("x", PyArray1::from_vec(py, x))?;
+        dict.set_item("y", PyArray1::from_vec(py, y))?;
+        dict.set_item("tof", PyArray1::from_vec(py, tof))?;
+        dict.set_item("tot", PyArray1::from_vec(py, tot))?;
+        dict.set_item("timestamp", PyArray1::from_vec(py, timestamp))?;
+        dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
         dict.set_item("cluster_id", PyArray1::from_vec(py, cluster_id))?;
+        Ok(dict.into_any().unbind())
     }
 
-    Ok(dict)
+    fn __repr__(&self) -> String {
+        format!("HitBatch(len={})", self.len())
+    }
 }
 
-fn arrow_table_from_dict<'py>(
-    py: Python<'py>,
-    dict: &Bound<'py, pyo3::types::PyDict>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let pyarrow = py
-        .import("pyarrow")
-        .map_err(|_| pyo3::exceptions::PyImportError::new_err("pyarrow is required"))?;
-    pyarrow.call_method("table", (dict,), None)
+#[pyclass(name = "NeutronBatch")]
+struct PyNeutronBatch {
+    neutrons: Vec<Neutron>,
+    metadata: BatchMetadata,
 }
 
-/// Read hits from a TPX3 file and return as a PyArrow table.
+#[pymethods]
+impl PyNeutronBatch {
+    fn len(&self) -> usize {
+        self.neutrons.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.neutrons.is_empty()
+    }
+
+    fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
+        self.metadata.to_pydict(py)
+    }
+
+    /// Convert neutrons to NumPy arrays (SoA layout).
+    fn to_numpy(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let mut x = Vec::with_capacity(self.neutrons.len());
+        let mut y = Vec::with_capacity(self.neutrons.len());
+        let mut tof = Vec::with_capacity(self.neutrons.len());
+        let mut tot = Vec::with_capacity(self.neutrons.len());
+        let mut n_hits = Vec::with_capacity(self.neutrons.len());
+        let mut chip_id = Vec::with_capacity(self.neutrons.len());
+
+        for neutron in &self.neutrons {
+            x.push(neutron.x);
+            y.push(neutron.y);
+            tof.push(neutron.tof);
+            tot.push(neutron.tot);
+            n_hits.push(neutron.n_hits);
+            chip_id.push(neutron.chip_id);
+        }
+
+        let dict = PyDict::new(py);
+        dict.set_item("x", PyArray1::from_vec(py, x))?;
+        dict.set_item("y", PyArray1::from_vec(py, y))?;
+        dict.set_item("tof", PyArray1::from_vec(py, tof))?;
+        dict.set_item("tot", PyArray1::from_vec(py, tot))?;
+        dict.set_item("n_hits", PyArray1::from_vec(py, n_hits))?;
+        dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
+        Ok(dict.into_any().unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("NeutronBatch(len={})", self.len())
+    }
+}
+
+#[pyclass(name = "HitBatchStream", unsendable)]
+struct PyHitBatchStream {
+    stream: TimeOrderedHitStream,
+    metadata: BatchMetadata,
+}
+
+#[pymethods]
+impl PyHitBatchStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> Option<PyHitBatch> {
+        self.stream.next().map(|batch| PyHitBatch {
+            batch: Some(batch),
+            metadata: self.metadata.clone(),
+        })
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (path, detector_config=None, time_ordered=true, output_path=None))]
+fn read_tpx3_hits(
+    path: &str,
+    detector_config: Option<PyRef<'_, PyDetectorConfig>>,
+    time_ordered: bool,
+    output_path: Option<&str>,
+) -> PyResult<PyHitBatch> {
+    ensure_hdf5_disabled(output_path)?;
+    let config = detector_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+
+    let reader = Tpx3FileReader::open(path)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        .with_config(config.clone());
+
+    let batch = if time_ordered {
+        reader
+            .read_batch_time_ordered()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+    } else {
+        reader
+            .read_batch()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+    };
+
+    Ok(PyHitBatch {
+        batch: Some(batch),
+        metadata: BatchMetadata {
+            detector: config,
+            clustering: None,
+            extraction: None,
+            algorithm: None,
+            source_path: Some(path.to_string()),
+            time_ordered,
+        },
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    path,
+    detector_config=None,
+    clustering_config=None,
+    extraction_config=None,
+    algorithm="abs",
+    abs_scan_interval=None,
+    dbscan_min_points=None,
+    grid_cell_size=None,
+    time_ordered=true,
+    output_path=None
+))]
+fn process_tpx3_neutrons(
+    path: &str,
+    detector_config: Option<PyRef<'_, PyDetectorConfig>>,
+    clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
+    extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
+    algorithm: &str,
+    abs_scan_interval: Option<usize>,
+    dbscan_min_points: Option<usize>,
+    grid_cell_size: Option<usize>,
+    time_ordered: bool,
+    output_path: Option<&str>,
+) -> PyResult<PyNeutronBatch> {
+    ensure_hdf5_disabled(output_path)?;
+
+    let detector = detector_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+    let clustering = clustering_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+    let extraction = extraction_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+
+    let mut params = AlgorithmParams::default();
+    if let Some(value) = abs_scan_interval {
+        params.abs_scan_interval = value;
+    }
+    if let Some(value) = dbscan_min_points {
+        params.dbscan_min_points = value;
+    }
+    if let Some(value) = grid_cell_size {
+        params.grid_cell_size = value;
+    }
+
+    let algo = parse_algorithm(algorithm)?;
+
+    let reader = Tpx3FileReader::open(path)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        .with_config(detector.clone());
+
+    let mut batch = if time_ordered {
+        reader
+            .read_batch_time_ordered()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+    } else {
+        reader
+            .read_batch()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+    };
+
+    let neutrons = cluster_and_extract(&mut batch, algo, &clustering, &extraction, &params)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    Ok(PyNeutronBatch {
+        neutrons,
+        metadata: BatchMetadata {
+            detector,
+            clustering: Some(clustering),
+            extraction: Some(extraction),
+            algorithm: Some(algorithm.to_string()),
+            source_path: Some(path.to_string()),
+            time_ordered,
+        },
+    })
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    batch,
+    clustering_config=None,
+    extraction_config=None,
+    algorithm="abs",
+    abs_scan_interval=None,
+    dbscan_min_points=None,
+    grid_cell_size=None,
+    output_path=None
+))]
+fn cluster_hits(
+    mut batch: PyRefMut<'_, PyHitBatch>,
+    clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
+    extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
+    algorithm: &str,
+    abs_scan_interval: Option<usize>,
+    dbscan_min_points: Option<usize>,
+    grid_cell_size: Option<usize>,
+    output_path: Option<&str>,
+) -> PyResult<PyNeutronBatch> {
+    ensure_hdf5_disabled(output_path)?;
+
+    let clustering = clustering_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+    let extraction = extraction_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+
+    let mut params = AlgorithmParams::default();
+    if let Some(value) = abs_scan_interval {
+        params.abs_scan_interval = value;
+    }
+    if let Some(value) = dbscan_min_points {
+        params.dbscan_min_points = value;
+    }
+    if let Some(value) = grid_cell_size {
+        params.grid_cell_size = value;
+    }
+
+    let algo = parse_algorithm(algorithm)?;
+
+    let batch_ref = batch
+        .batch
+        .as_mut()
+        .ok_or_else(|| PyValueError::new_err("HitBatch data has already been moved"))?;
+
+    let neutrons = cluster_and_extract(batch_ref, algo, &clustering, &extraction, &params)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    Ok(PyNeutronBatch {
+        neutrons,
+        metadata: BatchMetadata {
+            detector: batch.metadata.detector.clone(),
+            clustering: Some(clustering),
+            extraction: Some(extraction),
+            algorithm: Some(algorithm.to_string()),
+            source_path: batch.metadata.source_path.clone(),
+            time_ordered: batch.metadata.time_ordered,
+        },
+    })
+}
+
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None))]
-fn read_tpx3_file_arrow<'py>(
-    py: Python<'py>,
+fn stream_tpx3_hits(
     path: &str,
-    detector_config: Option<PyDetectorConfig>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| io_error(&format!("read_tpx3_file_arrow: open {path}"), e))?;
+    detector_config: Option<PyRef<'_, PyDetectorConfig>>,
+) -> PyResult<PyHitBatchStream> {
+    let detector = detector_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
 
-    if let Some(config) = detector_config {
-        reader = reader.with_config(config.inner);
-    }
+    let reader = Tpx3FileReader::open(path)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        .with_config(detector.clone());
 
-    let batch = reader
-        .read_batch()
-        .map_err(|e| value_error("read_tpx3_file_arrow: read_batch", e))?;
-    let dict = hits_dict_from_batch(py, batch)?;
-    arrow_table_from_dict(py, &dict)
+    let stream = reader
+        .stream_time_ordered()
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    Ok(PyHitBatchStream {
+        stream,
+        metadata: BatchMetadata {
+            detector,
+            clustering: None,
+            extraction: None,
+            algorithm: None,
+            source_path: Some(path.to_string()),
+            time_ordered: true,
+        },
+    })
 }
 
-fn batch_from_numpy(
-    x: PyReadonlyArray1<u16>,
-    y: PyReadonlyArray1<u16>,
-    tof: PyReadonlyArray1<u32>,
-    tot: PyReadonlyArray1<u16>,
-    timestamp: Option<PyReadonlyArray1<u32>>,
-    chip_id: Option<PyReadonlyArray1<u8>>,
-) -> PyResult<HitBatch> {
-    let len = x.len()?;
-    let y_len = y.len()?;
-    if y_len != len {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Length mismatch: y={}, x={}",
-            y_len, len
-        )));
-    }
-    let tof_len = tof.len()?;
-    if tof_len != len {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Length mismatch: tof={}, x={}",
-            tof_len, len
-        )));
-    }
-    let tot_len = tot.len()?;
-    if tot_len != len {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Length mismatch: tot={}, x={}",
-            tot_len, len
-        )));
-    }
+#[pymodule]
+fn rustpix(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyDetectorConfig>()?;
+    m.add_class::<PyClusteringConfig>()?;
+    m.add_class::<PyExtractionConfig>()?;
+    m.add_class::<PyHitBatch>()?;
+    m.add_class::<PyNeutronBatch>()?;
+    m.add_class::<PyHitBatchStream>()?;
 
-    if let Some(ref ts) = timestamp {
-        let ts_len = ts.len()?;
-        if ts_len != len {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Length mismatch: timestamp={}, x={}",
-                ts_len, len
-            )));
-        }
-    }
-    if let Some(ref chip) = chip_id {
-        let chip_len = chip.len()?;
-        if chip_len != len {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Length mismatch: chip_id={}, x={}",
-                chip_len, len
-            )));
-        }
-    }
-
-    let x = x.as_slice()?;
-    let y = y.as_slice()?;
-    let tof = tof.as_slice()?;
-    let tot = tot.as_slice()?;
-    let timestamp = timestamp.as_ref().map(|ts| ts.as_slice()).transpose()?;
-    let chip_id = chip_id.as_ref().map(|chip| chip.as_slice()).transpose()?;
-
-    let mut batch = HitBatch::with_capacity(len);
-    for i in 0..len {
-        let ts = timestamp.map_or(0, |ts| ts[i]);
-        let chip = chip_id.map_or(0, |chip| chip[i]);
-        batch.push(x[i], y[i], tof[i], tot[i], ts, chip);
-    }
-
-    Ok(batch)
+    m.add_function(wrap_pyfunction!(read_tpx3_hits, m)?)?;
+    m.add_function(wrap_pyfunction!(process_tpx3_neutrons, m)?)?;
+    m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;
+    m.add_function(wrap_pyfunction!(stream_tpx3_hits, m)?)?;
+    Ok(())
 }
 
-/// Cluster hits using SoA numpy arrays.
-#[pyfunction]
-#[pyo3(signature = (x, y, tof, tot, timestamp=None, chip_id=None, config=None, algorithm="abs"))]
-#[allow(clippy::too_many_arguments)]
-fn cluster_hits_numpy<'py>(
-    py: Python<'py>,
-    x: PyReadonlyArray1<u16>,
-    y: PyReadonlyArray1<u16>,
-    tof: PyReadonlyArray1<u32>,
-    tot: PyReadonlyArray1<u16>,
-    timestamp: Option<PyReadonlyArray1<u32>>,
-    chip_id: Option<PyReadonlyArray1<u8>>,
-    config: Option<PyClusteringConfig>,
-    algorithm: &str,
-) -> PyResult<(Bound<'py, PyArray1<i32>>, usize)> {
-    let mut batch = batch_from_numpy(x, y, tof, tot, timestamp, chip_id)?;
-    let num_clusters = cluster_from_batch(&mut batch, config, algorithm)?;
-    let labels = PyArray1::from_vec(py, batch.cluster_id);
-    Ok((labels, num_clusters))
-}
-
-/// Extract neutrons from SoA numpy arrays and labels.
-#[pyfunction]
-#[pyo3(signature = (x, y, tof, tot, labels, num_clusters, super_resolution=8.0, tot_weighted=true, timestamp=None, chip_id=None))]
-#[allow(clippy::too_many_arguments)]
-fn extract_neutrons_numpy<'py>(
-    py: Python<'py>,
-    x: PyReadonlyArray1<u16>,
-    y: PyReadonlyArray1<u16>,
-    tof: PyReadonlyArray1<u32>,
-    tot: PyReadonlyArray1<u16>,
-    labels: PyReadonlyArray1<i32>,
-    num_clusters: usize,
-    super_resolution: f64,
-    tot_weighted: bool,
-    timestamp: Option<PyReadonlyArray1<u32>>,
-    chip_id: Option<PyReadonlyArray1<u8>>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let labels = labels.as_slice()?;
-    let mut batch = batch_from_numpy(x, y, tof, tot, timestamp, chip_id)?;
-    if labels.len() != batch.len() {
-        return Err(value_error(
-            "extract_neutrons_numpy",
-            format!(
-                "Length mismatch: labels={}, hits={}",
-                labels.len(),
-                batch.len()
-            ),
+fn ensure_hdf5_disabled(output_path: Option<&str>) -> PyResult<()> {
+    if output_path.is_some() {
+        return Err(PyNotImplementedError::new_err(
+            "HDF5 output is not implemented yet",
         ));
     }
-    for (i, label) in labels.iter().enumerate() {
-        batch.cluster_id[i] = *label;
-    }
-
-    let mut extractor = SimpleCentroidExtraction::new();
-    extractor.configure(
-        ExtractionConfig::default()
-            .with_super_resolution(super_resolution)
-            .with_weighted_by_tot(tot_weighted),
-    );
-
-    let neutrons = extractor
-        .extract_soa(&batch, num_clusters)
-        .map_err(|e| value_error("extract_neutrons_numpy: extract_soa", e))?;
-
-    let x: Vec<f64> = neutrons.iter().map(|n| n.x).collect();
-    let y: Vec<f64> = neutrons.iter().map(|n| n.y).collect();
-    let tof: Vec<u32> = neutrons.iter().map(|n| n.tof).collect();
-    let tot: Vec<u16> = neutrons.iter().map(|n| n.tot).collect();
-    let n_hits: Vec<u16> = neutrons.iter().map(|n| n.n_hits).collect();
-    let chip_id: Vec<u8> = neutrons.iter().map(|n| n.chip_id).collect();
-
-    let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", PyArray1::from_vec(py, x))?;
-    dict.set_item("y", PyArray1::from_vec(py, y))?;
-    dict.set_item("tof", PyArray1::from_vec(py, tof))?;
-    dict.set_item("tot", PyArray1::from_vec(py, tot))?;
-    dict.set_item("n_hits", PyArray1::from_vec(py, n_hits))?;
-    dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
-
-    Ok(dict.into_any())
-}
-
-fn cluster_from_batch(
-    batch: &mut HitBatch,
-    config: Option<PyClusteringConfig>,
-    algorithm: &str,
-) -> PyResult<usize> {
-    let config = config.unwrap_or_else(|| PyClusteringConfig::new(5.0, 75.0, 1, None));
-
-    let algorithm = algorithm.to_lowercase();
-    match algorithm.as_str() {
-        "abs" => {
-            let algo_config = rustpix_algorithms::AbsConfig {
-                radius: config.inner.radius,
-                neutron_correlation_window_ns: config.inner.temporal_window_ns,
-                min_cluster_size: config.inner.min_cluster_size,
-                scan_interval: 100, // default
-            };
-            let algo = AbsClustering::new(algo_config);
-            let mut state = AbsState::default();
-            algo.cluster(batch, &mut state)
-                .map_err(|e| value_error(&format!("cluster_from_batch({algorithm})"), e))
-        }
-        "dbscan" => {
-            let algo_config = rustpix_algorithms::DbscanConfig {
-                epsilon: config.inner.radius, // Map radius to epsilon
-                temporal_window_ns: config.inner.temporal_window_ns,
-                min_points: 2, // Default or hardcoded?
-                min_cluster_size: config.inner.min_cluster_size,
-            };
-            let algo = DbscanClustering::new(algo_config);
-            let mut state = DbscanState::default();
-            algo.cluster(batch, &mut state)
-                .map_err(|e| value_error(&format!("cluster_from_batch({algorithm})"), e))
-        }
-        "grid" => {
-            let algo_config = rustpix_algorithms::GridConfig {
-                radius: config.inner.radius,
-                temporal_window_ns: config.inner.temporal_window_ns,
-                min_cluster_size: config.inner.min_cluster_size,
-                cell_size: 32, // default
-                max_cluster_size: config.inner.max_cluster_size.map(|s| s as usize),
-            };
-            let algo = GridClustering::new(algo_config);
-            let mut state = GridState::default();
-            algo.cluster(batch, &mut state)
-                .map_err(|e| value_error(&format!("cluster_from_batch({algorithm})"), e))
-        }
-        "graph" => Err(pyo3::exceptions::PyValueError::new_err(
-            "Algorithm 'graph' is deprecated/removed. Use 'abs', 'dbscan', or 'grid'",
-        )),
-        _ => Err(value_error(
-            "cluster_from_batch",
-            format!("Unknown algorithm: {algorithm}. Use 'abs', 'dbscan', or 'grid'"),
-        )),
-    }
-}
-
-/// Helper to read hits directly into batch from file (internal usage).
-fn read_file_to_batch(path: &str, detector_config: Option<PyDetectorConfig>) -> PyResult<HitBatch> {
-    let mut reader = Tpx3FileReader::open(path)
-        .map_err(|e| io_error(&format!("read_file_to_batch: open {path}"), e))?;
-
-    if let Some(config) = detector_config {
-        reader = reader.with_config(config.inner);
-    }
-
-    reader
-        .read_batch()
-        .map_err(|e| value_error("read_file_to_batch: read_batch", e))
-}
-
-/// Process a TPX3 file: read, cluster, and extract neutrons.
-#[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true, detector_config=None))]
-fn process_tpx3_file(
-    path: &str,
-    config: Option<PyClusteringConfig>,
-    algorithm: &str,
-    super_resolution: f64,
-    tot_weighted: bool,
-    detector_config: Option<PyDetectorConfig>,
-) -> PyResult<Vec<PyNeutron>> {
-    let mut batch = read_file_to_batch(path, detector_config)?;
-    let num_clusters = cluster_from_batch(&mut batch, config, algorithm)?;
-
-    let mut extractor = SimpleCentroidExtraction::new();
-    extractor.configure(
-        ExtractionConfig::default()
-            .with_super_resolution(super_resolution)
-            .with_weighted_by_tot(tot_weighted),
-    );
-
-    let neutrons = extractor
-        .extract_soa(&batch, num_clusters)
-        .map_err(|e| value_error("process_tpx3_file: extract_soa", e))?;
-
-    Ok(neutrons
-        .into_iter()
-        .map(|n| PyNeutron { inner: n })
-        .collect())
-}
-
-/// Process a TPX3 file and return neutrons as numpy arrays.
-#[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true, detector_config=None))]
-fn process_tpx3_file_numpy<'py>(
-    py: Python<'py>,
-    path: &str,
-    config: Option<PyClusteringConfig>,
-    algorithm: &str,
-    super_resolution: f64,
-    tot_weighted: bool,
-    detector_config: Option<PyDetectorConfig>,
-) -> PyResult<Bound<'py, PyAny>> {
-    // Reuse the process_tpx3_file logic but return dict
-    // Actually, calling process_tpx3_file creates Vec<PyNeutron>.
-    // Then we act on it.
-    let neutrons_vec = process_tpx3_file(
-        path,
-        config,
-        algorithm,
-        super_resolution,
-        tot_weighted,
-        detector_config,
-    )?;
-
-    let x: Vec<f64> = neutrons_vec.iter().map(|n| n.inner.x).collect();
-    let y: Vec<f64> = neutrons_vec.iter().map(|n| n.inner.y).collect();
-    let tof: Vec<u32> = neutrons_vec.iter().map(|n| n.inner.tof).collect();
-    let tot: Vec<u16> = neutrons_vec.iter().map(|n| n.inner.tot).collect();
-    let n_hits: Vec<u16> = neutrons_vec.iter().map(|n| n.inner.n_hits).collect();
-    let chip_id: Vec<u8> = neutrons_vec.iter().map(|n| n.inner.chip_id).collect();
-
-    let dict = pyo3::types::PyDict::new(py);
-    dict.set_item("x", PyArray1::from_vec(py, x))?;
-    dict.set_item("y", PyArray1::from_vec(py, y))?;
-    dict.set_item("tof", PyArray1::from_vec(py, tof))?;
-    dict.set_item("tot", PyArray1::from_vec(py, tot))?;
-    dict.set_item("n_hits", PyArray1::from_vec(py, n_hits))?;
-    dict.set_item("chip_id", PyArray1::from_vec(py, chip_id))?;
-
-    Ok(dict.into_any())
-}
-
-/// Process a TPX3 file and return neutrons as a PyArrow table.
-#[pyfunction]
-#[pyo3(signature = (path, config=None, algorithm="abs", super_resolution=8.0, tot_weighted=true, detector_config=None))]
-fn process_tpx3_file_arrow<'py>(
-    py: Python<'py>,
-    path: &str,
-    config: Option<PyClusteringConfig>,
-    algorithm: &str,
-    super_resolution: f64,
-    tot_weighted: bool,
-    detector_config: Option<PyDetectorConfig>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let dict_any = process_tpx3_file_numpy(
-        py,
-        path,
-        config,
-        algorithm,
-        super_resolution,
-        tot_weighted,
-        detector_config,
-    )?;
-    let dict = dict_any.downcast::<pyo3::types::PyDict>()?;
-    arrow_table_from_dict(py, dict)
-}
-
-/// Python module for rustpix.
-#[pymodule]
-fn rustpix(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyNeutron>()?;
-    m.add_class::<PyClusteringConfig>()?;
-    m.add_class::<PyChipTransform>()?;
-    m.add_class::<PyDetectorConfig>()?;
-    m.add_class::<streaming::MeasurementStream>()?;
-    m.add_function(wrap_pyfunction!(read_tpx3_file_numpy, m)?)?;
-    m.add_function(wrap_pyfunction!(read_tpx3_file_arrow, m)?)?;
-    m.add_function(wrap_pyfunction!(cluster_hits_numpy, m)?)?;
-    m.add_function(wrap_pyfunction!(extract_neutrons_numpy, m)?)?;
-    m.add_function(wrap_pyfunction!(process_tpx3_file, m)?)?;
-    m.add_function(wrap_pyfunction!(process_tpx3_file_numpy, m)?)?;
-    m.add_function(wrap_pyfunction!(process_tpx3_file_arrow, m)?)?;
     Ok(())
+}
+
+fn parse_algorithm(name: &str) -> PyResult<ClusteringAlgorithm> {
+    match name.to_ascii_lowercase().as_str() {
+        "abs" => Ok(ClusteringAlgorithm::Abs),
+        "dbscan" => Ok(ClusteringAlgorithm::Dbscan),
+        "grid" => Ok(ClusteringAlgorithm::Grid),
+        _ => Err(PyValueError::new_err(format!(
+            "Unknown algorithm '{}'. Expected one of: abs, dbscan, grid",
+            name
+        ))),
+    }
+}
+
+fn detector_config_to_dict(py: Python<'_>, config: &DetectorConfig) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("tdc_frequency_hz", config.tdc_frequency_hz)?;
+    dict.set_item(
+        "enable_missing_tdc_correction",
+        config.enable_missing_tdc_correction,
+    )?;
+    dict.set_item("chip_size_x", config.chip_size_x)?;
+    dict.set_item("chip_size_y", config.chip_size_y)?;
+
+    let transforms: Vec<(i32, i32, i32, i32, i32, i32)> = config
+        .chip_transforms
+        .iter()
+        .map(|t| (t.a, t.b, t.c, t.d, t.tx, t.ty))
+        .collect();
+    dict.set_item("chip_transforms", transforms)?;
+    Ok(dict.into_any().unbind())
+}
+
+fn clustering_config_to_dict(py: Python<'_>, config: &ClusteringConfig) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("radius", config.radius)?;
+    dict.set_item("temporal_window_ns", config.temporal_window_ns)?;
+    dict.set_item("min_cluster_size", config.min_cluster_size)?;
+    dict.set_item("max_cluster_size", config.max_cluster_size)?;
+    Ok(dict.into_any().unbind())
+}
+
+fn extraction_config_to_dict(py: Python<'_>, config: &ExtractionConfig) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("super_resolution_factor", config.super_resolution_factor)?;
+    dict.set_item("weighted_by_tot", config.weighted_by_tot)?;
+    dict.set_item("min_tot_threshold", config.min_tot_threshold)?;
+    Ok(dict.into_any().unbind())
 }

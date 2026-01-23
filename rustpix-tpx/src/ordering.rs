@@ -70,8 +70,11 @@ impl Ord for PulseBatch {
 /// Reads a stream of sections for a single chip and yields sorted PulseBatches.
 ///
 /// Implements a 1-pulse lookahead to handle "late hits" and independent timestamp rollovers.
-pub struct PulseReader<'a> {
-    data: &'a [u8],
+pub struct PulseReader<D>
+where
+    D: AsRef<[u8]> + Clone,
+{
+    data: D,
     sections: Vec<Tpx3Section>,
     section_idx: usize,
     packet_idx: usize,
@@ -87,15 +90,18 @@ pub struct PulseReader<'a> {
     ready_queue: VecDeque<PulseBatch>,
 
     tdc_correction: u32,
-    chip_transform: Box<dyn Fn(u8, u16, u16) -> (u16, u16) + 'a>,
+    chip_transform: Box<dyn Fn(u8, u16, u16) -> (u16, u16) + 'static>,
 }
 
-impl<'a> PulseReader<'a> {
+impl<D> PulseReader<D>
+where
+    D: AsRef<[u8]> + Clone,
+{
     pub fn new(
-        data: &'a [u8],
+        data: D,
         sections: &[Tpx3Section],
         tdc_correction: u32,
-        chip_transform: impl Fn(u8, u16, u16) -> (u16, u16) + 'a + 'static,
+        chip_transform: impl Fn(u8, u16, u16) -> (u16, u16) + 'static,
     ) -> Self {
         let owned_sections = sections.to_vec();
 
@@ -126,18 +132,16 @@ impl<'a> PulseReader<'a> {
             return Some(batch);
         }
 
+        let data = self.data.as_ref();
         while self.section_idx < self.sections.len() {
             let section = &self.sections[self.section_idx];
-            let section_data = &self.data[section.start_offset..section.end_offset];
+            let section_data = &data[section.start_offset..section.end_offset];
             let num_packets = section_data.len() / PACKET_SIZE;
 
             while self.packet_idx < num_packets {
                 let offset = self.packet_idx * PACKET_SIZE;
-                let raw = u64::from_le_bytes(
-                    section_data[offset..offset + PACKET_SIZE]
-                        .try_into()
-                        .unwrap(),
-                );
+                let raw =
+                    u64::from_le_bytes(section_data[offset..offset + PACKET_SIZE].try_into().unwrap());
                 let packet = Tpx3Packet::new(raw);
                 self.packet_idx += 1;
 
@@ -295,13 +299,19 @@ impl<'a> PulseReader<'a> {
 }
 
 /// Iterator that yields time-ordered hits from multiple chips.
-pub struct TimeOrderedStream<'a> {
-    readers: Vec<PulseReader<'a>>,
+pub struct TimeOrderedStream<D>
+where
+    D: AsRef<[u8]> + Clone,
+{
+    readers: Vec<PulseReader<D>>,
     heap: BinaryHeap<PulseBatch>,
 }
 
-impl<'a> TimeOrderedStream<'a> {
-    pub fn new(data: &'a [u8], sections: &[Tpx3Section], config: &DetectorConfig) -> Self {
+impl<D> TimeOrderedStream<D>
+where
+    D: AsRef<[u8]> + Clone,
+{
+    pub fn new(data: D, sections: &[Tpx3Section], config: &DetectorConfig) -> Self {
         // Group sections by chip
         let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0);
         let mut sections_by_chip: Vec<Vec<Tpx3Section>> = vec![Vec::new(); (max_chip + 1) as usize];
@@ -327,8 +337,12 @@ impl<'a> TimeOrderedStream<'a> {
 
             let transform_closure = move |_cid, x, y| transform.apply(x, y);
 
-            let mut reader =
-                PulseReader::new(data, &chip_sections, tdc_correction, transform_closure);
+            let mut reader = PulseReader::new(
+                data.clone(),
+                &chip_sections,
+                tdc_correction,
+                transform_closure,
+            );
 
             if let Some(batch) = reader.next_pulse() {
                 heap.push(batch);
@@ -341,7 +355,10 @@ impl<'a> TimeOrderedStream<'a> {
     }
 }
 
-impl Iterator for TimeOrderedStream<'_> {
+impl<D> Iterator for TimeOrderedStream<D>
+where
+    D: AsRef<[u8]> + Clone,
+{
     type Item = HitBatch;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -355,10 +372,8 @@ impl Iterator for TimeOrderedStream<'_> {
                         let batch = self.heap.pop().unwrap();
 
                         // Replenish from the corresponding reader
-                        if let Some(reader) = self
-                            .readers
-                            .iter_mut()
-                            .find(|r| reader_chip_id(r) == batch.chip_id)
+                        if let Some(reader) =
+                            self.readers.iter_mut().find(|r| reader_chip_id(r) == batch.chip_id)
                         {
                             if let Some(next) = reader.next_pulse() {
                                 self.heap.push(next);
@@ -383,6 +398,9 @@ impl Iterator for TimeOrderedStream<'_> {
     }
 }
 
-fn reader_chip_id(reader: &PulseReader) -> u8 {
+fn reader_chip_id<D>(reader: &PulseReader<D>) -> u8
+where
+    D: AsRef<[u8]> + Clone,
+{
     reader.sections.first().map_or(0, |s| s.chip_id)
 }

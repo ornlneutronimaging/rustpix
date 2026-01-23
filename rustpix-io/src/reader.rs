@@ -17,13 +17,14 @@ use rustpix_tpx::section::{discover_sections, process_section_into_batch};
 use rustpix_tpx::{DetectorConfig, Tpx3Packet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A memory-mapped file reader.
 ///
 /// Uses memmap2 to efficiently access file contents without
 /// loading the entire file into memory.
 pub struct MappedFileReader {
-    mmap: Mmap,
+    mmap: Arc<Mmap>,
     path: PathBuf,
 }
 
@@ -35,14 +36,14 @@ impl MappedFileReader {
         // This is the standard safety contract for memory mapping.
         let mmap = unsafe { Mmap::map(&file)? };
         Ok(Self {
-            mmap,
+            mmap: Arc::new(mmap),
             path: path.as_ref().to_path_buf(),
         })
     }
 
     /// Returns the file contents as a byte slice.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.mmap
+        &self.mmap[..]
     }
 
     /// Returns the file size in bytes.
@@ -58,6 +59,28 @@ impl MappedFileReader {
     /// Returns an iterator over 8-byte chunks.
     pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
         self.mmap.chunks(8)
+    }
+}
+
+#[derive(Clone)]
+struct SharedMmap(Arc<Mmap>);
+
+impl AsRef<[u8]> for SharedMmap {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[..]
+    }
+}
+
+/// Time-ordered stream of hit batches that owns the underlying file mapping.
+pub struct TimeOrderedHitStream {
+    inner: TimeOrderedStream<SharedMmap>,
+}
+
+impl Iterator for TimeOrderedHitStream {
+    type Item = HitBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
     }
 }
 
@@ -163,6 +186,22 @@ impl Tpx3FileReader {
             batch.append(&pulse_batch);
         }
         Ok(batch)
+    }
+
+    /// Returns a time-ordered stream of hit batches (pulse-merged).
+    pub fn stream_time_ordered(&self) -> Result<TimeOrderedHitStream> {
+        if !self.reader.len().is_multiple_of(8) {
+            return Err(Error::InvalidFormat(format!(
+                "file size {} is not a multiple of 8 (file: {})",
+                self.reader.len(),
+                self.reader.path.display()
+            )));
+        }
+
+        let sections = discover_sections(self.reader.as_bytes());
+        let stream =
+            TimeOrderedStream::new(SharedMmap(self.reader.mmap.clone()), &sections, &self.config);
+        Ok(TimeOrderedHitStream { inner: stream })
     }
 
     /// Returns an iterator over raw packets.

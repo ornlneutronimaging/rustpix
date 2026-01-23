@@ -10,6 +10,6 @@ pub mod scanner;
 mod writer;
 
 pub use error::{Error, Result};
-pub use reader::{MappedFileReader, Tpx3FileReader};
+pub use reader::{MappedFileReader, TimeOrderedHitStream, Tpx3FileReader};
 pub use scanner::PacketScanner;
 pub use writer::DataFileWriter;

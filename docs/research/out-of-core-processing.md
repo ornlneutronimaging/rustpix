@@ -90,7 +90,7 @@ independent of file size.
    - Provide a windowed wrapper for Grid/DBSCAN.
    - Use AbsState for true streaming.
 3) Add streaming extraction using per-cluster accumulators.
-4) Expose a CLI and Python binding entry-point for out-of-core processing.
+4) Expose CLI and Python entry-points for out-of-core processing.
 5) Add tests:
    - Cross-chunk correctness (clusters spanning boundary).
    - TDC rollover ordering across long scans.

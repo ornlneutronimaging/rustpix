@@ -1,6 +1,6 @@
 # rustpix
 
-High-performance Rust library for pixel detector data processing. Supports Timepix3 (TPX3) neutron detection with 96M+ hits/sec throughput. Features multiple clustering algorithms (ABS, DBSCAN, Graph, Grid), centroid extraction, and first-class Python bindings via PyO3. Designed for extensibility to TPX4 and other detector types.
+High-performance Rust library for pixel detector data processing. Supports Timepix3 (TPX3) neutron detection with 96M+ hits/sec throughput. Features multiple clustering algorithms (ABS, DBSCAN, Graph, Grid), centroid extraction, and thin Python bindings. Designed for extensibility to TPX4 and other detector types.
 
 ## Workspace Structure
 
@@ -24,9 +24,9 @@ High-performance Rust library for pixel detector data processing. Supports Timep
   - memmap2-based memory-mapped file reading
   - CSV and binary output writers
 
-- **rustpix-python**: Python bindings
-  - PyO3-based Python module
-  - NumPy structured array support for efficient data exchange
+- **rustpix-python**: Python bindings (thin wrapper)
+  - PyO3 module exposing Rust pipelines
+  - NumPy SoA outputs with metadata
 
 - **rustpix-cli**: Command-line interface
   - Process TPX3 files to extract neutron events
@@ -42,7 +42,7 @@ cargo build --workspace
 cargo build --workspace --release
 
 # Run tests
-cargo test --workspace --exclude rustpix-python
+cargo test --workspace
 ```
 
 ## CLI Usage
@@ -69,45 +69,25 @@ rustpix benchmark input.tpx3 --iterations 5
 ```python
 import rustpix
 
-# Get numpy arrays directly (SoA)
-data = rustpix.read_tpx3_file_numpy("input.tpx3")
-# data["x"], data["y"], data["tof"], data["tot"], data["timestamp"], data["chip_id"] are numpy arrays
+# Read hits (SoA) with metadata
+hits = rustpix.read_tpx3_hits("input.tpx3")
+hits_np = hits.to_numpy()
+meta = hits.metadata()
 
-# Optional Arrow export (requires pyarrow)
-hits_arrow = rustpix.read_tpx3_file_arrow("input.tpx3")
+# Stream hits in time order (pulse-merged)
+for batch in rustpix.stream_tpx3_hits("input.tpx3"):
+    batch_np = batch.to_numpy()
 
-# Or process file in one call
-config = rustpix.ClusteringConfig(radius=1.5, temporal_window_ns=1000, min_cluster_size=2)
-neutrons = rustpix.process_tpx3_file("input.tpx3", config=config, algorithm="abs")
-
-# Or return numpy arrays for neutrons
-neutrons_np = rustpix.process_tpx3_file_numpy("input.tpx3", config=config, algorithm="abs")
-
-# Arrow output for neutrons (requires pyarrow)
-neutrons_arrow = rustpix.process_tpx3_file_arrow("input.tpx3", config=config, algorithm="abs")
-
-# SoA-native numpy inputs (no per-hit objects)
-labels, num_clusters = rustpix.cluster_hits_numpy(
-    data["x"],
-    data["y"],
-    data["tof"],
-    data["tot"],
-    timestamp=data["timestamp"],
-    chip_id=data["chip_id"],
-    config=config,
+# Process file directly into neutrons
+clustering = rustpix.ClusteringConfig(radius=5.0, temporal_window_ns=75.0, min_cluster_size=1)
+extraction = rustpix.ExtractionConfig(super_resolution_factor=8.0, weighted_by_tot=True, min_tot_threshold=10)
+neutrons = rustpix.process_tpx3_neutrons(
+    "input.tpx3",
+    clustering_config=clustering,
+    extraction_config=extraction,
     algorithm="abs",
 )
-
-neutrons_np = rustpix.extract_neutrons_numpy(
-    data["x"],
-    data["y"],
-    data["tof"],
-    data["tot"],
-    labels,
-    num_clusters,
-    timestamp=data["timestamp"],
-    chip_id=data["chip_id"],
-)
+neutrons_np = neutrons.to_numpy()
 ```
 
 ## License

@@ -1,27 +1,18 @@
 [package]
 name = "rustpix-python"
-version.workspace = true
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
-description = "PyO3 Python bindings for rustpix"
-
-[lints]
-workspace = true
+version = "0.1.0"
+edition = "2021"
+publish = false
 
 [lib]
 name = "rustpix"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustpix-core.workspace = true
-rustpix-tpx.workspace = true
-rustpix-algorithms.workspace = true
-rustpix-io.workspace = true
-pyo3.workspace = true
-numpy.workspace = true
-rayon.workspace = true
+pyo3 = { workspace = true, features = ["extension-module"] }
+numpy = { workspace = true }
 
-[features]
-default = []
+rustpix-core = { workspace = true }
+rustpix-tpx = { workspace = true }
+rustpix-io = { workspace = true }
+rustpix-algorithms = { workspace = true }
