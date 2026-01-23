@@ -30,13 +30,22 @@ use std::collections::VecDeque;
 pub struct PulseBatch {
     pub chip_id: u8,
     pub tdc_timestamp: u32,
+    pub tdc_epoch: u64,
     pub hits: HitBatch,
+}
+
+impl PulseBatch {
+    #[inline]
+    #[must_use]
+    pub fn extended_tdc(&self) -> u64 {
+        (self.tdc_epoch << 30) | self.tdc_timestamp as u64
+    }
 }
 
 // Order by TDC timestamp (reverse for Min-Heap)
 impl PartialEq for PulseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.tdc_timestamp == other.tdc_timestamp && self.chip_id == other.chip_id
+        self.extended_tdc() == other.extended_tdc() && self.chip_id == other.chip_id
     }
 }
 
@@ -52,8 +61,8 @@ impl Ord for PulseBatch {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for Min-Heap (smallest timestamp first)
         other
-            .tdc_timestamp
-            .cmp(&self.tdc_timestamp)
+            .extended_tdc()
+            .cmp(&self.extended_tdc())
             .then_with(|| other.chip_id.cmp(&self.chip_id))
     }
 }
@@ -71,6 +80,8 @@ pub struct PulseReader<'a> {
     prev_batch: Option<PulseBatch>,
     curr_tdc: Option<u32>,
     curr_batch: HitBatch,
+    tdc_epoch: u64,
+    last_tdc: Option<u32>,
 
     // Ready batches to be yielded
     ready_queue: VecDeque<PulseBatch>,
@@ -100,6 +111,8 @@ impl<'a> PulseReader<'a> {
             curr_tdc: initial_tdc,
             curr_batch: HitBatch::with_capacity(4096),
             ready_queue: VecDeque::new(),
+            tdc_epoch: 0,
+            last_tdc: initial_tdc,
             tdc_correction,
             chip_transform: Box::new(chip_transform),
         }
@@ -130,6 +143,7 @@ impl<'a> PulseReader<'a> {
 
                 if packet.is_tdc() {
                     let new_tdc = packet.tdc_timestamp();
+                    let rollover = self.last_tdc.is_some_and(|last| new_tdc < last);
 
                     // TDC marks the start of a new pulse (or end of previous).
 
@@ -148,13 +162,18 @@ impl<'a> PulseReader<'a> {
                         let batch = PulseBatch {
                             chip_id: section.chip_id, // Approximation: assumes pulse doesn't cross chips differently
                             tdc_timestamp: old_tdc,
+                            tdc_epoch: self.tdc_epoch,
                             hits: std::mem::take(&mut self.curr_batch),
                         };
                         self.prev_batch = Some(batch);
                     }
 
                     // 3. Start new `curr`
+                    if rollover {
+                        self.tdc_epoch += 1;
+                    }
                     self.curr_tdc = Some(new_tdc);
+                    self.last_tdc = Some(new_tdc);
 
                     // If we have items in ready_queue, return immediately.
                     // This pauses parsing, preserving state.
@@ -265,6 +284,7 @@ impl<'a> PulseReader<'a> {
                 self.ready_queue.push_back(PulseBatch {
                     chip_id: last_chip,
                     tdc_timestamp: curr_tdc,
+                    tdc_epoch: self.tdc_epoch,
                     hits: std::mem::take(&mut self.curr_batch),
                 });
             }
@@ -327,11 +347,11 @@ impl Iterator for TimeOrderedStream<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(head) = self.heap.peek() {
-                let min_tdc = head.tdc_timestamp;
+                let min_tdc = head.extended_tdc();
                 let mut merged_batch = HitBatch::default();
 
                 while let Some(batch) = self.heap.peek() {
-                    if batch.tdc_timestamp == min_tdc {
+                    if batch.extended_tdc() == min_tdc {
                         let batch = self.heap.pop().unwrap();
 
                         // Replenish from the corresponding reader

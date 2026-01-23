@@ -212,6 +212,44 @@ fn test_late_hit_boundary() {
 }
 
 #[test]
+fn test_tdc_rollover_ordering() {
+    let mut data = Vec::new();
+
+    let tdc_pre_a = 0x3FFFF000;
+    let tdc_pre_b = 0x3FFFF100;
+    let tdc_post = 0x00001000;
+
+    // --- Chip 0 Section (rollover) ---
+    data.extend_from_slice(&make_header(0).to_le_bytes());
+    data.extend_from_slice(&make_tdc(tdc_pre_a).to_le_bytes());
+    data.extend_from_slice(&make_hit(tdc_pre_a + 10, 10, 0).to_le_bytes());
+    data.extend_from_slice(&make_tdc(tdc_post).to_le_bytes());
+    data.extend_from_slice(&make_hit(tdc_post + 30, 10, 1).to_le_bytes());
+
+    // --- Chip 1 Section (pre-rollover only, slightly later) ---
+    data.extend_from_slice(&make_header(1).to_le_bytes());
+    data.extend_from_slice(&make_tdc(tdc_pre_b).to_le_bytes());
+    data.extend_from_slice(&make_hit(tdc_pre_b + 20, 10, 2).to_le_bytes());
+
+    let sections = discover_sections(&data);
+    let config = DetectorConfig::default();
+    let stream = TimeOrderedStream::new(&data, &sections, &config);
+    let hits = collect_batches(stream);
+
+    assert_eq!(hits.len(), 3);
+
+    // Expected order: pre-rollover pulses (chip 0 then chip 1), then post-rollover.
+    assert_eq!(hits.chip_id[0], 0);
+    assert_eq!(hits.tof[0], 10);
+
+    assert_eq!(hits.chip_id[1], 1);
+    assert_eq!(hits.tof[1], 20);
+
+    assert_eq!(hits.chip_id[2], 0);
+    assert_eq!(hits.tof[2], 30);
+}
+
+#[test]
 #[ignore] // Run with `cargo test -- --ignored` to benchmark
 fn test_performance_synthetic() {
     // Generate 1 million hits across 4 chips
