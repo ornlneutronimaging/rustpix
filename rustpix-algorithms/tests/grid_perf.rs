@@ -17,8 +17,7 @@ fn test_grid_vs_abs_performance() {
 
     let mut rng_seed: u64 = 12345;
     let mut rand = || {
-        rng_seed =
-            (rng_seed.wrapping_mul(1_103_515_245).wrapping_add(12_345)) & 0x7fff_ffff;
+        rng_seed = (rng_seed.wrapping_mul(1_103_515_245).wrapping_add(12_345)) & 0x7fff_ffff;
         u16::try_from(rng_seed & 0xFFFF).unwrap_or(0)
     };
 
