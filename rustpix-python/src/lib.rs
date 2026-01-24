@@ -502,7 +502,7 @@ fn process_tpx3_neutrons(
 
     if !collect && !processing.time_ordered {
         return Err(PyValueError::new_err(
-            "process_tpx3_neutrons(streaming) requires time_ordered=True; set collect=True to return a full batch",
+            "Streaming mode (collect=False) requires time_ordered=True; set collect=True to return a full batch with time_ordered=False",
         ));
     }
 
