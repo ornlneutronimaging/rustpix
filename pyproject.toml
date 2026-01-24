@@ -42,6 +42,9 @@ default = { features = [] }
 [tool.pixi.tasks]
 # Core tasks
 test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && test -d tests && python -m pytest tests/ -v || echo 'No Python tests yet'", description = "Run all tests (Rust + Python)" }
+clippy = { cmd = "cargo clippy --workspace --all-targets --all-features", description = "Run clippy for all Rust crates/targets/features" }
+fmt = { cmd = "cargo fmt --all", description = "Format all Rust crates" }
+lint = { cmd = "cargo fmt --all && cargo clippy --workspace --all-targets --all-features", description = "Format and clippy all Rust crates/targets/features" }
 build = { cmd = "maturin develop --release --strip", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build with highest optimization + editable install" }
 build-debug = { cmd = "maturin develop", description = "Build in debug mode + editable install" }
 gui = { cmd = "cargo run -p rustpix-gui --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build and run GUI in release mode" }
