@@ -32,6 +32,55 @@ impl Default for AlgorithmParams {
     }
 }
 
+pub struct ClusterAndExtractStream<I>
+where
+    I: Iterator<Item = HitBatch>,
+{
+    batches: I,
+    algorithm: ClusteringAlgorithm,
+    clustering: ClusteringConfig,
+    extraction: ExtractionConfig,
+    params: AlgorithmParams,
+}
+
+impl<I> Iterator for ClusterAndExtractStream<I>
+where
+    I: Iterator<Item = HitBatch>,
+{
+    type Item = Result<NeutronBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.batches.next().map(|mut batch| {
+            cluster_and_extract_batch(
+                &mut batch,
+                self.algorithm,
+                &self.clustering,
+                &self.extraction,
+                &self.params,
+            )
+        })
+    }
+}
+
+pub fn cluster_and_extract_stream_iter<I>(
+    batches: I,
+    algorithm: ClusteringAlgorithm,
+    clustering: ClusteringConfig,
+    extraction: ExtractionConfig,
+    params: AlgorithmParams,
+) -> ClusterAndExtractStream<I::IntoIter>
+where
+    I: IntoIterator<Item = HitBatch>,
+{
+    ClusterAndExtractStream {
+        batches: batches.into_iter(),
+        algorithm,
+        clustering,
+        extraction,
+        params,
+    }
+}
+
 /// Cluster hits in-place, then extract neutrons using the configured algorithm.
 ///
 /// # Errors
@@ -151,10 +200,73 @@ where
     I: IntoIterator<Item = HitBatch>,
 {
     let mut all_neutrons = NeutronBatch::default();
-    for mut batch in batches {
-        let neutrons =
-            cluster_and_extract_batch(&mut batch, algorithm, clustering, extraction, params)?;
+    let iter = cluster_and_extract_stream_iter(
+        batches,
+        algorithm,
+        clustering.clone(),
+        extraction.clone(),
+        params.clone(),
+    );
+    for neutrons in iter {
+        let neutrons = neutrons?;
         all_neutrons.append(&neutrons);
     }
     Ok(all_neutrons)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stream_iter_matches_batch_results() {
+        let mut batch1 = HitBatch::with_capacity(2);
+        batch1.push((10, 10, 100, 5, 1_000, 0));
+        batch1.push((11, 10, 102, 6, 1_002, 0));
+
+        let mut batch2 = HitBatch::with_capacity(2);
+        batch2.push((20, 20, 200, 7, 2_000, 1));
+        batch2.push((21, 20, 202, 8, 2_002, 1));
+
+        let algorithm = ClusteringAlgorithm::Abs;
+        let clustering = ClusteringConfig::default();
+        let extraction = ExtractionConfig::default();
+        let params = AlgorithmParams::default();
+
+        let mut expected1 = batch1.clone();
+        let expected1 =
+            cluster_and_extract_batch(&mut expected1, algorithm, &clustering, &extraction, &params)
+                .unwrap();
+
+        let mut expected2 = batch2.clone();
+        let expected2 =
+            cluster_and_extract_batch(&mut expected2, algorithm, &clustering, &extraction, &params)
+                .unwrap();
+
+        let mut iter = cluster_and_extract_stream_iter(
+            vec![batch1, batch2],
+            algorithm,
+            clustering,
+            extraction,
+            params,
+        );
+
+        let batch_out1 = iter.next().unwrap().unwrap();
+        assert_eq!(batch_out1.x, expected1.x);
+        assert_eq!(batch_out1.y, expected1.y);
+        assert_eq!(batch_out1.tof, expected1.tof);
+        assert_eq!(batch_out1.tot, expected1.tot);
+        assert_eq!(batch_out1.n_hits, expected1.n_hits);
+        assert_eq!(batch_out1.chip_id, expected1.chip_id);
+
+        let batch_out2 = iter.next().unwrap().unwrap();
+        assert_eq!(batch_out2.x, expected2.x);
+        assert_eq!(batch_out2.y, expected2.y);
+        assert_eq!(batch_out2.tof, expected2.tof);
+        assert_eq!(batch_out2.tot, expected2.tot);
+        assert_eq!(batch_out2.n_hits, expected2.n_hits);
+        assert_eq!(batch_out2.chip_id, expected2.chip_id);
+
+        assert!(iter.next().is_none());
+    }
 }

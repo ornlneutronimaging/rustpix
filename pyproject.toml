@@ -13,6 +13,11 @@ classifiers = [
 ]
 dependencies = ["numpy"]
 
+[project.optional-dependencies]
+arrow = ["pyarrow"]
+hdf5 = ["h5py"]
+io = ["pyarrow", "h5py"]
+
 [tool.maturin]
 manifest-path = "rustpix-python/Cargo.toml"
 features = ["pyo3/extension-module"]
@@ -26,6 +31,8 @@ platforms = ["osx-arm64", "linux-64"]
 [tool.pixi.dependencies]
 python = ">=3.11,<3.14"
 numpy = "*"
+pyarrow = "*"
+h5py = "*"
 maturin = "*"
 rust = "*"
 pip = "*"
