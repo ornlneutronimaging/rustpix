@@ -151,22 +151,10 @@ impl NeutronExtraction for SimpleCentroidExtraction {
         num_clusters: usize,
     ) -> Result<Vec<Neutron>, ExtractionError> {
         let mut accumulators = vec![ClusterAccumulator::default(); num_clusters];
-        let labels = &batch.cluster_id;
-        let x_values = &batch.x;
-        let y_values = &batch.y;
-        let time_of_flight = &batch.tof;
-        let time_over_threshold = &batch.tot;
-        let chip_ids = &batch.chip_id;
-
         if self.config.weighted_by_tot {
             accumulate_weighted(
                 &mut accumulators,
-                labels,
-                x_values,
-                y_values,
-                time_over_threshold,
-                time_of_flight,
-                chip_ids,
+                batch,
                 num_clusters,
                 self.config.min_tot_threshold,
             );
@@ -177,12 +165,7 @@ impl NeutronExtraction for SimpleCentroidExtraction {
         } else {
             accumulate_unweighted(
                 &mut accumulators,
-                labels,
-                x_values,
-                y_values,
-                time_over_threshold,
-                time_of_flight,
-                chip_ids,
+                batch,
                 num_clusters,
                 self.config.min_tot_threshold,
             );
@@ -201,22 +184,10 @@ impl SimpleCentroidExtraction {
         num_clusters: usize,
     ) -> Result<NeutronBatch, ExtractionError> {
         let mut accumulators = vec![ClusterAccumulator::default(); num_clusters];
-        let labels = &batch.cluster_id;
-        let x_values = &batch.x;
-        let y_values = &batch.y;
-        let time_of_flight = &batch.tof;
-        let time_over_threshold = &batch.tot;
-        let chip_ids = &batch.chip_id;
-
         if self.config.weighted_by_tot {
             accumulate_weighted(
                 &mut accumulators,
-                labels,
-                x_values,
-                y_values,
-                time_over_threshold,
-                time_of_flight,
-                chip_ids,
+                batch,
                 num_clusters,
                 self.config.min_tot_threshold,
             );
@@ -227,12 +198,7 @@ impl SimpleCentroidExtraction {
         } else {
             accumulate_unweighted(
                 &mut accumulators,
-                labels,
-                x_values,
-                y_values,
-                time_over_threshold,
-                time_of_flight,
-                chip_ids,
+                batch,
                 num_clusters,
                 self.config.min_tot_threshold,
             );
@@ -260,21 +226,23 @@ fn cluster_index(label: i32, num_clusters: usize) -> Option<usize> {
 
 fn accumulate_weighted(
     accumulators: &mut [ClusterAccumulator],
-    labels: &[i32],
-    x_values: &[u16],
-    y_values: &[u16],
-    tot_values: &[u16],
-    tof_values: &[u32],
-    chip_ids: &[u8],
+    batch: &crate::soa::HitBatch,
     num_clusters: usize,
     min_tot: u16,
 ) {
+    let labels = &batch.cluster_id;
+    let x_values = &batch.x;
+    let y_values = &batch.y;
+    let time_over_threshold = &batch.tot;
+    let time_of_flight = &batch.tof;
+    let chip_ids = &batch.chip_id;
+
     if min_tot > 0 {
         for i in 0..labels.len() {
             let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
                 continue;
             };
-            let tot = tot_values[i];
+            let tot = time_over_threshold[i];
             if tot < min_tot {
                 continue;
             }
@@ -293,7 +261,7 @@ fn accumulate_weighted(
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.rep_tof = tof_values[i];
+                acc.rep_tof = time_of_flight[i];
                 acc.rep_chip = chip_ids[i];
             }
         }
@@ -302,7 +270,7 @@ fn accumulate_weighted(
             let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
                 continue;
             };
-            let tot = tot_values[i];
+            let tot = time_over_threshold[i];
             let acc = &mut accumulators[cluster_idx];
             let x = x_values[i] as f64;
             let y = y_values[i] as f64;
@@ -317,7 +285,7 @@ fn accumulate_weighted(
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.rep_tof = tof_values[i];
+                acc.rep_tof = time_of_flight[i];
                 acc.rep_chip = chip_ids[i];
             }
         }
@@ -326,21 +294,23 @@ fn accumulate_weighted(
 
 fn accumulate_unweighted(
     accumulators: &mut [ClusterAccumulator],
-    labels: &[i32],
-    x_values: &[u16],
-    y_values: &[u16],
-    tot_values: &[u16],
-    tof_values: &[u32],
-    chip_ids: &[u8],
+    batch: &crate::soa::HitBatch,
     num_clusters: usize,
     min_tot: u16,
 ) {
+    let labels = &batch.cluster_id;
+    let x_values = &batch.x;
+    let y_values = &batch.y;
+    let time_over_threshold = &batch.tot;
+    let time_of_flight = &batch.tof;
+    let chip_ids = &batch.chip_id;
+
     if min_tot > 0 {
         for i in 0..labels.len() {
             let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
                 continue;
             };
-            let tot = tot_values[i];
+            let tot = time_over_threshold[i];
             if tot < min_tot {
                 continue;
             }
@@ -356,7 +326,7 @@ fn accumulate_unweighted(
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.rep_tof = tof_values[i];
+                acc.rep_tof = time_of_flight[i];
                 acc.rep_chip = chip_ids[i];
             }
         }
@@ -365,7 +335,7 @@ fn accumulate_unweighted(
             let Some(cluster_idx) = cluster_index(labels[i], num_clusters) else {
                 continue;
             };
-            let tot = tot_values[i];
+            let tot = time_over_threshold[i];
 
             let acc = &mut accumulators[cluster_idx];
             let x = x_values[i] as f64;
@@ -378,17 +348,14 @@ fn accumulate_unweighted(
 
             if tot >= acc.max_tot {
                 acc.max_tot = tot;
-                acc.rep_tof = tof_values[i];
+                acc.rep_tof = time_of_flight[i];
                 acc.rep_chip = chip_ids[i];
             }
         }
     }
 }
 
-fn build_neutrons_weighted(
-    accumulators: Vec<ClusterAccumulator>,
-    scale: f64,
-) -> Vec<Neutron> {
+fn build_neutrons_weighted(accumulators: Vec<ClusterAccumulator>, scale: f64) -> Vec<Neutron> {
     let mut neutrons = Vec::with_capacity(accumulators.len());
     for acc in accumulators {
         if acc.count == 0 {
@@ -420,10 +387,7 @@ fn build_neutrons_weighted(
     neutrons
 }
 
-fn build_neutrons_unweighted(
-    accumulators: Vec<ClusterAccumulator>,
-    scale: f64,
-) -> Vec<Neutron> {
+fn build_neutrons_unweighted(accumulators: Vec<ClusterAccumulator>, scale: f64) -> Vec<Neutron> {
     let mut neutrons = Vec::with_capacity(accumulators.len());
     for acc in accumulators {
         if acc.count == 0 {
@@ -448,10 +412,7 @@ fn build_neutrons_unweighted(
     neutrons
 }
 
-fn build_neutron_batch_weighted(
-    accumulators: Vec<ClusterAccumulator>,
-    scale: f64,
-) -> NeutronBatch {
+fn build_neutron_batch_weighted(accumulators: Vec<ClusterAccumulator>, scale: f64) -> NeutronBatch {
     let mut batch = NeutronBatch::with_capacity(accumulators.len());
     for acc in accumulators {
         if acc.count == 0 {

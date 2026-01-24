@@ -28,9 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // Logic Imports
-use rustpix_algorithms::{
-    cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm,
-};
+use rustpix_algorithms::{cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm};
 
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;

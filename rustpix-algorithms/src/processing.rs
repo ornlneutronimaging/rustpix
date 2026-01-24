@@ -33,6 +33,9 @@ impl Default for AlgorithmParams {
 }
 
 /// Cluster hits in-place, then extract neutrons using the configured algorithm.
+///
+/// # Errors
+/// Returns an error if clustering or extraction fails.
 pub fn cluster_and_extract(
     batch: &mut HitBatch,
     algorithm: ClusteringAlgorithm,
@@ -76,9 +79,15 @@ pub fn cluster_and_extract(
 
     let mut extractor = SimpleCentroidExtraction::new();
     extractor.configure(extraction.clone());
-    extractor.extract_soa(batch, num_clusters).map_err(Into::into)
+    extractor
+        .extract_soa(batch, num_clusters)
+        .map_err(Into::into)
 }
 
+/// Cluster hits in-place, then extract neutrons into a `NeutronBatch`.
+///
+/// # Errors
+/// Returns an error if clustering or extraction fails.
 pub fn cluster_and_extract_batch(
     batch: &mut HitBatch,
     algorithm: ClusteringAlgorithm,
@@ -127,6 +136,10 @@ pub fn cluster_and_extract_batch(
         .map_err(Into::into)
 }
 
+/// Cluster hits in batches, then extract and append neutrons into a single batch.
+///
+/// # Errors
+/// Returns an error if clustering or extraction fails for any batch.
 pub fn cluster_and_extract_stream<I>(
     batches: I,
     algorithm: ClusteringAlgorithm,

@@ -15,6 +15,8 @@ use rustpix_core::soa::HitBatch;
 use rustpix_io::{TimeOrderedHitStream, Tpx3FileReader};
 use rustpix_tpx::{ChipTransform, DetectorConfig};
 
+type ChipTransformTuple = (i32, i32, i32, i32, i32, i32);
+
 #[derive(Clone)]
 struct BatchMetadata {
     detector: DetectorConfig,
@@ -28,12 +30,21 @@ struct BatchMetadata {
 impl BatchMetadata {
     fn to_pydict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
-        dict.set_item("detector_config", detector_config_to_dict(py, &self.detector)?)?;
+        dict.set_item(
+            "detector_config",
+            detector_config_to_dict(py, &self.detector)?,
+        )?;
         if let Some(ref clustering) = self.clustering {
-            dict.set_item("clustering_config", clustering_config_to_dict(py, clustering)?)?;
+            dict.set_item(
+                "clustering_config",
+                clustering_config_to_dict(py, clustering)?,
+            )?;
         }
         if let Some(ref extraction) = self.extraction {
-            dict.set_item("extraction_config", extraction_config_to_dict(py, extraction)?)?;
+            dict.set_item(
+                "extraction_config",
+                extraction_config_to_dict(py, extraction)?,
+            )?;
         }
         if let Some(ref algorithm) = self.algorithm {
             dict.set_item("algorithm", algorithm)?;
@@ -67,7 +78,7 @@ impl PyDetectorConfig {
         enable_missing_tdc_correction: Option<bool>,
         chip_size_x: Option<u16>,
         chip_size_y: Option<u16>,
-        chip_transforms: Option<Vec<(i32, i32, i32, i32, i32, i32)>>,
+        chip_transforms: Option<Vec<ChipTransformTuple>>,
     ) -> Self {
         let mut config = DetectorConfig::default();
         if let Some(value) = tdc_frequency_hz {
@@ -207,7 +218,7 @@ impl PyHitBatch {
     }
 
     fn is_empty(&self) -> bool {
-        self.batch.as_ref().map_or(true, HitBatch::is_empty)
+        self.batch.as_ref().is_none_or(HitBatch::is_empty)
     }
 
     fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -215,6 +226,7 @@ impl PyHitBatch {
     }
 
     /// Convert the batch to NumPy arrays (moves the underlying buffers).
+    #[allow(clippy::wrong_self_convention)]
     fn to_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let batch = self
             .batch
@@ -260,7 +272,7 @@ impl PyNeutronBatch {
     }
 
     fn is_empty(&self) -> bool {
-        self.batch.as_ref().map_or(true, NeutronBatch::is_empty)
+        self.batch.as_ref().is_none_or(NeutronBatch::is_empty)
     }
 
     fn metadata(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -268,6 +280,7 @@ impl PyNeutronBatch {
     }
 
     /// Convert neutrons to NumPy arrays (SoA layout).
+    #[allow(clippy::wrong_self_convention)]
     fn to_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let batch = self
             .batch
@@ -372,6 +385,7 @@ fn read_tpx3_hits(
     time_ordered=true,
     output_path=None
 ))]
+#[allow(clippy::too_many_arguments)]
 fn process_tpx3_neutrons(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
@@ -454,6 +468,7 @@ fn process_tpx3_neutrons(
     grid_cell_size=None,
     output_path=None
 ))]
+#[allow(clippy::too_many_arguments)]
 fn cluster_hits(
     mut batch: PyRefMut<'_, PyHitBatch>,
     clustering_config: Option<PyRef<'_, PyClusteringConfig>>,

@@ -59,7 +59,11 @@ impl DataFileWriter {
     }
 
     /// Writes neutron batch as CSV.
-    pub fn write_neutron_batch_csv(&mut self, batch: &NeutronBatch, include_header: bool) -> Result<()> {
+    pub fn write_neutron_batch_csv(
+        &mut self,
+        batch: &NeutronBatch,
+        include_header: bool,
+    ) -> Result<()> {
         if include_header {
             writeln!(self.writer, "x,y,tof,tot,n_hits,chip_id")?;
         }

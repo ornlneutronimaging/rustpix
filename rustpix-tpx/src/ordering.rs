@@ -140,8 +140,11 @@ where
 
             while self.packet_idx < num_packets {
                 let offset = self.packet_idx * PACKET_SIZE;
-                let raw =
-                    u64::from_le_bytes(section_data[offset..offset + PACKET_SIZE].try_into().unwrap());
+                let raw = u64::from_le_bytes(
+                    section_data[offset..offset + PACKET_SIZE]
+                        .try_into()
+                        .unwrap(),
+                );
                 let packet = Tpx3Packet::new(raw);
                 self.packet_idx += 1;
 
@@ -372,8 +375,10 @@ where
                         let batch = self.heap.pop().unwrap();
 
                         // Replenish from the corresponding reader
-                        if let Some(reader) =
-                            self.readers.iter_mut().find(|r| reader_chip_id(r) == batch.chip_id)
+                        if let Some(reader) = self
+                            .readers
+                            .iter_mut()
+                            .find(|r| reader_chip_id(r) == batch.chip_id)
                         {
                             if let Some(next) = reader.next_pulse() {
                                 self.heap.push(next);

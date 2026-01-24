@@ -199,8 +199,11 @@ impl Tpx3FileReader {
         }
 
         let sections = discover_sections(self.reader.as_bytes());
-        let stream =
-            TimeOrderedStream::new(SharedMmap(self.reader.mmap.clone()), &sections, &self.config);
+        let stream = TimeOrderedStream::new(
+            SharedMmap(self.reader.mmap.clone()),
+            &sections,
+            &self.config,
+        );
         Ok(TimeOrderedHitStream { inner: stream })
     }
 

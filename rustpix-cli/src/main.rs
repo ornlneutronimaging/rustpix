@@ -14,9 +14,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use rustpix_algorithms::{
-    cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm,
-};
+use rustpix_algorithms::{cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm};
 use rustpix_algorithms::{
     AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
 };
@@ -180,8 +178,7 @@ fn main() -> Result<()> {
             let output_format = output
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .map(|ext| ext.to_lowercase())
-                .unwrap_or_else(|| "bin".to_string());
+                .map_or_else(|| "bin".to_string(), |ext| ext.to_lowercase());
             let mut wrote_header = false;
             let mut warned_unknown = false;
 
@@ -199,8 +196,13 @@ fn main() -> Result<()> {
                     file_hits = file_hits.saturating_add(batch.len());
                     total_hits = total_hits.saturating_add(batch.len());
 
-                    let neutrons =
-                        cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params)?;
+                    let neutrons = cluster_and_extract_batch(
+                        &mut batch,
+                        algo,
+                        &clustering,
+                        &extraction,
+                        &params,
+                    )?;
                     file_neutrons = file_neutrons.saturating_add(neutrons.len());
                     total_neutrons = total_neutrons.saturating_add(neutrons.len());
 
