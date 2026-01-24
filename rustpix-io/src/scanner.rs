@@ -115,18 +115,16 @@ mod tests {
         let reader = MappedFileReader::open(path.to_str().unwrap()).unwrap();
         let (sections, consumed) = PacketScanner::scan_sections(reader.as_bytes(), true);
 
-        println!("Found {} sections", sections.len());
-        println!("Consumed {} bytes", consumed);
+        let sections_len = sections.len();
+        println!("Found {sections_len} sections");
+        println!("Consumed {consumed} bytes");
 
         assert_eq!(consumed, reader.len()); // Should consume everything at EOF
 
         for (i, section) in sections.iter().enumerate() {
-            println!(
-                "Section {}: Chip {}, {} bytes",
-                i,
-                section.chip_id,
-                section.end_offset - section.start_offset
-            );
+            let chip_id = section.chip_id;
+            let byte_len = section.end_offset - section.start_offset;
+            println!("Section {i}: Chip {chip_id}, {byte_len} bytes");
         }
 
         assert!(!sections.is_empty(), "Should find at least one section");

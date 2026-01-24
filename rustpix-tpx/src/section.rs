@@ -183,17 +183,20 @@ mod tests {
 
     // Helper to create a TPX3 header packet
     fn make_header(chip_id: u8) -> u64 {
-        Tpx3Packet::TPX3_HEADER_MAGIC | ((chip_id as u64) << 32)
+        Tpx3Packet::TPX3_HEADER_MAGIC | (u64::from(chip_id) << 32)
     }
 
     // Helper to create a TDC packet
     fn make_tdc(timestamp: u32) -> u64 {
-        0x6F00_0000_0000_0000 | ((timestamp as u64) << 12)
+        0x6F00_0000_0000_0000 | (u64::from(timestamp) << 12)
     }
 
     // Helper to create a Hit packet
     fn make_hit(toa: u16, tot: u16, addr: u16) -> u64 {
-        0xB000_0000_0000_0000 | ((toa as u64) << 30) | ((tot as u64) << 20) | ((addr as u64) << 44)
+        0xB000_0000_0000_0000
+            | (u64::from(toa) << 30)
+            | (u64::from(tot) << 20)
+            | (u64::from(addr) << 44)
     }
 
     #[test]

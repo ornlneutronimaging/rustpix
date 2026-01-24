@@ -175,10 +175,10 @@ mod tests {
 
     #[test]
     fn test_header_detection() {
-        let header = Tpx3Packet::new(0x33585054);
+        let header = Tpx3Packet::new(0x3358_5054);
         assert!(header.is_header());
 
-        let non_header = Tpx3Packet::new(0x12345678);
+        let non_header = Tpx3Packet::new(0x1234_5678);
         assert!(!non_header.is_header());
     }
 

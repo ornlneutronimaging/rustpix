@@ -52,16 +52,16 @@ mod tests {
 
         // Rollover case - extension needed
         let hit_ts = 0x100;
-        let tdc_ts = 0x500000;
+        let tdc_ts = 0x0050_0000;
         let corrected = correct_timestamp_rollover(hit_ts, tdc_ts);
-        assert_eq!(corrected, hit_ts + 0x40000000);
+        assert_eq!(corrected, hit_ts + 0x4000_0000);
     }
 
     #[test]
     fn test_tof_calculation() {
         let timestamp = 1000u32;
         let tdc_timestamp = 500u32;
-        let correction = 666667u32; // ~1/60Hz in 25ns units
+        let correction = 666_667_u32; // ~1/60Hz in 25ns units
 
         let tof = calculate_tof(timestamp, tdc_timestamp, correction);
         assert_eq!(tof, 500);

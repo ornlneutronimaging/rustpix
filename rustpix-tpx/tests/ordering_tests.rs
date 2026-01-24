@@ -6,12 +6,12 @@ use rustpix_tpx::Tpx3Packet;
 
 // Helper to create a TPX3 header packet
 fn make_header(chip_id: u8) -> u64 {
-    Tpx3Packet::TPX3_HEADER_MAGIC | ((chip_id as u64) << 32)
+    Tpx3Packet::TPX3_HEADER_MAGIC | (u64::from(chip_id) << 32)
 }
 
 // Helper to create a TDC packet
 fn make_tdc(timestamp: u32) -> u64 {
-    0x6F00_0000_0000_0000 | ((timestamp as u64) << 12)
+    0x6F00_0000_0000_0000 | (u64::from(timestamp) << 12)
 }
 
 // Helper to create a Hit packet (ID 0xB)
@@ -20,14 +20,14 @@ fn make_tdc(timestamp: u32) -> u64 {
 // packet.timestamp_coarse() = (spidr << 14) | toa
 // toa is 14 bits. spidr is 16 bits.
 fn make_hit(timestamp: u32, tot: u16, addr: u16) -> u64 {
-    let toa = (timestamp & 0x3FFF) as u16;
-    let spidr = (timestamp >> 14) as u16;
+    let toa = u16::try_from(timestamp & 0x3FFF).unwrap();
+    let spidr = u16::try_from((timestamp >> 14) & 0xFFFF).unwrap();
 
     0xB000_0000_0000_0000
-        | ((toa as u64) << 30)
-        | ((tot as u64) << 20)
-        | ((addr as u64) << 44)
-        | (spidr as u64)
+        | (u64::from(toa) << 30)
+        | (u64::from(tot) << 20)
+        | (u64::from(addr) << 44)
+        | u64::from(spidr)
 }
 
 fn collect_batches<D>(stream: TimeOrderedStream<D>) -> HitBatch
@@ -209,9 +209,9 @@ fn test_late_hit_boundary() {
 fn test_tdc_rollover_ordering() {
     let mut data = Vec::new();
 
-    let tdc_pre_a = 0x3FFFF000;
-    let tdc_pre_b = 0x3FFFF100;
-    let tdc_post = 0x00001000;
+    let tdc_pre_a = 0x3FFF_F000;
+    let tdc_pre_b = 0x3FFF_F100;
+    let tdc_post = 0x0000_1000;
 
     // --- Chip 0 Section (rollover) ---
     data.extend_from_slice(&make_header(0).to_le_bytes());
@@ -244,25 +244,25 @@ fn test_tdc_rollover_ordering() {
 }
 
 #[test]
-#[ignore] // Run with `cargo test -- --ignored` to benchmark
+#[ignore = "Run with `cargo test -- --ignored` to benchmark"]
 fn test_performance_synthetic() {
     // Generate 1 million hits across 4 chips
     let mut data = Vec::with_capacity(100 * 1024 * 1024);
-    let num_pulses = 1000;
-    let hits_per_pulse = 250;
+    let num_pulses: u32 = 1000;
+    let hits_per_pulse: u32 = 250;
 
     // Interleave chips: Pulse 0 for Chip 0..3, Pulse 1 for Chip 0..3, etc.
     // Actually sections are usually large (e.g. 1 second of data per section).
     // Let's make 4 large sections.
 
-    for chip in 0..4 {
+    for chip in 0u8..4 {
         data.extend_from_slice(&make_header(chip).to_le_bytes());
         for p in 0..num_pulses {
-            data.extend_from_slice(&make_tdc(p * 10000).to_le_bytes());
+            data.extend_from_slice(&make_tdc(p * 10_000).to_le_bytes());
             for i in 0..hits_per_pulse {
                 // Random TOF within pulse
-                let tof = (i * 10) as u32;
-                let ts = (p * 10000) + tof;
+                let tof = i * 10;
+                let ts = (p * 10_000) + tof;
                 data.extend_from_slice(&make_hit(ts, 1, 0).to_le_bytes());
             }
         }
@@ -273,13 +273,16 @@ fn test_performance_synthetic() {
 
     let start = std::time::Instant::now();
     let stream = TimeOrderedStream::new(&data, &sections, &config);
-    let count: usize = stream.map(|batch| batch.len()).sum();
+    let count: u64 = stream
+        .map(|batch| u64::try_from(batch.len()).unwrap())
+        .sum();
     let elapsed = start.elapsed();
 
-    println!("Processed {} hits in {:.2?}", count, elapsed);
-    assert_eq!(count, num_pulses as usize * hits_per_pulse as usize * 4);
+    println!("Processed {count} hits in {elapsed:.2?}");
+    let expected_count = u64::from(num_pulses) * u64::from(hits_per_pulse) * 4;
+    assert_eq!(count, expected_count);
 
     // Throughput
-    let hits_per_sec = count as f64 / elapsed.as_secs_f64();
+    let hits_per_sec = f64::from(u32::try_from(count).unwrap()) / elapsed.as_secs_f64();
     println!("Throughput: {:.2} M hits/s", hits_per_sec / 1e6);
 }

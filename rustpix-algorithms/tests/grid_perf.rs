@@ -17,7 +17,8 @@ fn test_grid_vs_abs_performance() {
 
     let mut rng_seed: u64 = 12345;
     let mut rand = || {
-        rng_seed = (rng_seed.wrapping_mul(1103515245).wrapping_add(12345)) & 0x7fffffff;
+        rng_seed =
+            (rng_seed.wrapping_mul(1_103_515_245).wrapping_add(12_345)) & 0x7fff_ffff;
         u16::try_from(rng_seed & 0xFFFF).unwrap_or(0)
     };
 
@@ -43,7 +44,7 @@ fn test_grid_vs_abs_performance() {
     let start_abs = Instant::now();
     let _ = abs.cluster(&mut batch_abs, &mut abs_state).unwrap();
     let duration_abs = start_abs.elapsed();
-    println!("ABS time: {:?}", duration_abs);
+    println!("ABS time: {duration_abs:?}");
 
     // Run Grid
     let grid_config = GridConfig {
@@ -58,7 +59,7 @@ fn test_grid_vs_abs_performance() {
     let start_grid = Instant::now();
     let _ = grid.cluster(&mut batch_grid, &mut grid_state).unwrap();
     let duration_grid = start_grid.elapsed();
-    println!("Grid time: {:?}", duration_grid);
+    println!("Grid time: {duration_grid:?}");
 
     // Performance check: Grid should be within 5x of ABS
     // (allows for CI variance; pre-optimization was 100x+ slower)

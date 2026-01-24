@@ -381,10 +381,17 @@ impl DetectorConfig {
 mod tests {
     use super::*;
 
+    fn assert_f64_eq(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= f64::EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn test_venus_defaults() {
         let config = DetectorConfig::venus_defaults();
-        assert_eq!(config.tdc_frequency_hz, 60.0);
+        assert_f64_eq(config.tdc_frequency_hz, 60.0);
         assert!(config.enable_missing_tdc_correction);
         assert_eq!(config.chip_transforms.len(), 4);
     }
@@ -452,7 +459,7 @@ mod tests {
 
         let config = DetectorConfig::from_json(json).expect("Failed to parse JSON");
 
-        assert_eq!(config.tdc_frequency_hz, 14.0);
+        assert_f64_eq(config.tdc_frequency_hz, 14.0);
         assert!(!config.enable_missing_tdc_correction);
         assert_eq!(config.chip_size_x, 256);
         assert_eq!(config.chip_size_y, 256);
@@ -483,7 +490,7 @@ mod tests {
 
         let config = DetectorConfig::from_json(json).expect("Should parse partial config");
 
-        assert_eq!(config.tdc_frequency_hz, 14.0); // Changed
+        assert_f64_eq(config.tdc_frequency_hz, 14.0); // Changed
         assert!(config.enable_missing_tdc_correction); // Default: true
         assert_eq!(config.chip_size_x, 256); // Default
         assert_eq!(config.chip_size_y, 256); // Default
@@ -497,7 +504,7 @@ mod tests {
 
         let config = DetectorConfig::from_json(json).expect("Should parse minimal config");
 
-        assert_eq!(config.tdc_frequency_hz, 60.0); // VENUS default
+        assert_f64_eq(config.tdc_frequency_hz, 60.0); // VENUS default
         assert_eq!(config.chip_transforms.len(), 4); // VENUS defaults
     }
 
@@ -514,7 +521,7 @@ mod tests {
 
         let config = DetectorConfig::from_json(json).expect("Should parse");
 
-        assert_eq!(config.tdc_frequency_hz, 60.0); // Default
+        assert_f64_eq(config.tdc_frequency_hz, 60.0); // Default
         assert_eq!(config.chip_transforms[0].tx, 260); // Custom
     }
 
@@ -542,8 +549,7 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("out-of-bounds"),
-            "Error should mention out-of-bounds: {}",
-            err
+            "Error should mention out-of-bounds: {err}"
         );
     }
 
