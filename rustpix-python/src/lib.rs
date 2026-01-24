@@ -1,12 +1,13 @@
 //! Thin Python bindings for rustpix.
 
 use numpy::PyArray1;
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyImportError, PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use rustpix_algorithms::{
-    cluster_and_extract_batch, cluster_and_extract_stream, AlgorithmParams, ClusteringAlgorithm,
+    cluster_and_extract_batch, cluster_and_extract_stream, cluster_and_extract_stream_iter,
+    AlgorithmParams, ClusterAndExtractStream, ClusteringAlgorithm,
 };
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;
@@ -254,6 +255,41 @@ impl PyHitBatch {
         Ok(dict.into_any().unbind())
     }
 
+    /// Convert the batch to a PyArrow Table (moves the underlying buffers).
+    #[pyo3(name = "to_arrow")]
+    fn take_arrow(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let batch = self
+            .batch
+            .take()
+            .ok_or_else(|| PyValueError::new_err("HitBatch data has already been moved"))?;
+
+        let HitBatch {
+            x,
+            y,
+            tof,
+            tot,
+            timestamp,
+            chip_id,
+            cluster_id,
+        } = batch;
+
+        let arrays = vec![
+            PyArray1::from_vec(py, x).into_any().unbind(),
+            PyArray1::from_vec(py, y).into_any().unbind(),
+            PyArray1::from_vec(py, tof).into_any().unbind(),
+            PyArray1::from_vec(py, tot).into_any().unbind(),
+            PyArray1::from_vec(py, timestamp).into_any().unbind(),
+            PyArray1::from_vec(py, chip_id).into_any().unbind(),
+            PyArray1::from_vec(py, cluster_id).into_any().unbind(),
+        ];
+
+        pyarrow_table_from_numpy(
+            py,
+            &arrays,
+            &["x", "y", "tof", "tot", "timestamp", "chip_id", "cluster_id"],
+        )
+    }
+
     fn __repr__(&self) -> String {
         format!("HitBatch(len={})", self.len())
     }
@@ -306,6 +342,35 @@ impl PyNeutronBatch {
         Ok(dict.into_any().unbind())
     }
 
+    /// Convert neutrons to a PyArrow Table (moves the underlying buffers).
+    #[pyo3(name = "to_arrow")]
+    fn take_arrow(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let batch = self
+            .batch
+            .take()
+            .ok_or_else(|| PyValueError::new_err("NeutronBatch data has already been moved"))?;
+
+        let NeutronBatch {
+            x,
+            y,
+            tof,
+            tot,
+            n_hits,
+            chip_id,
+        } = batch;
+
+        let arrays = vec![
+            PyArray1::from_vec(py, x).into_any().unbind(),
+            PyArray1::from_vec(py, y).into_any().unbind(),
+            PyArray1::from_vec(py, tof).into_any().unbind(),
+            PyArray1::from_vec(py, tot).into_any().unbind(),
+            PyArray1::from_vec(py, n_hits).into_any().unbind(),
+            PyArray1::from_vec(py, chip_id).into_any().unbind(),
+        ];
+
+        pyarrow_table_from_numpy(py, &arrays, &["x", "y", "tof", "tot", "n_hits", "chip_id"])
+    }
+
     fn __repr__(&self) -> String {
         format!("NeutronBatch(len={})", self.len())
     }
@@ -328,6 +393,30 @@ impl PyHitBatchStream {
             batch: Some(batch),
             metadata: self.metadata.clone(),
         })
+    }
+}
+
+#[pyclass(name = "NeutronBatchStream", unsendable)]
+struct PyNeutronBatchStream {
+    stream: ClusterAndExtractStream<TimeOrderedHitStream>,
+    metadata: BatchMetadata,
+}
+
+#[pymethods]
+impl PyNeutronBatchStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> PyResult<Option<PyNeutronBatch>> {
+        match self.stream.next() {
+            None => Ok(None),
+            Some(Ok(batch)) => Ok(Some(PyNeutronBatch {
+                batch: Some(batch),
+                metadata: self.metadata.clone(),
+            })),
+            Some(Err(err)) => Err(PyRuntimeError::new_err(err.to_string())),
+        }
     }
 }
 
@@ -477,6 +566,63 @@ fn cluster_hits(
 }
 
 #[pyfunction]
+#[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, **kwargs))]
+fn stream_tpx3_neutrons(
+    path: &str,
+    detector_config: Option<PyRef<'_, PyDetectorConfig>>,
+    clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
+    extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyNeutronBatchStream> {
+    let selection = parse_algorithm_kwargs(kwargs)?;
+    let output_path = parse_output_path(kwargs)?;
+    ensure_hdf5_disabled(output_path.as_deref())?;
+
+    let detector = detector_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+    let clustering = clustering_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+    let extraction = extraction_config
+        .as_ref()
+        .map(|cfg| cfg.inner.clone())
+        .unwrap_or_default();
+
+    let params = selection.params;
+    let algo = selection.algorithm;
+
+    let reader = Tpx3FileReader::open(path)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        .with_config(detector.clone());
+
+    let stream = reader
+        .stream_time_ordered()
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    let stream = cluster_and_extract_stream_iter(
+        stream,
+        algo,
+        clustering.clone(),
+        extraction.clone(),
+        params,
+    );
+
+    Ok(PyNeutronBatchStream {
+        stream,
+        metadata: BatchMetadata {
+            detector,
+            clustering: Some(clustering),
+            extraction: Some(extraction),
+            algorithm: Some(selection.name),
+            source_path: Some(path.to_string()),
+            time_ordered: true,
+        },
+    })
+}
+
+#[pyfunction]
 #[pyo3(signature = (path, detector_config=None))]
 fn stream_tpx3_hits(
     path: &str,
@@ -516,10 +662,12 @@ fn rustpix(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHitBatch>()?;
     m.add_class::<PyNeutronBatch>()?;
     m.add_class::<PyHitBatchStream>()?;
+    m.add_class::<PyNeutronBatchStream>()?;
 
     m.add_function(wrap_pyfunction!(read_tpx3_hits, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_neutrons, m)?)?;
     m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;
+    m.add_function(wrap_pyfunction!(stream_tpx3_neutrons, m)?)?;
     m.add_function(wrap_pyfunction!(stream_tpx3_hits, m)?)?;
     Ok(())
 }
@@ -656,4 +804,32 @@ fn extraction_config_to_dict(py: Python<'_>, config: &ExtractionConfig) -> PyRes
     dict.set_item("weighted_by_tot", config.weighted_by_tot)?;
     dict.set_item("min_tot_threshold", config.min_tot_threshold)?;
     Ok(dict.into_any().unbind())
+}
+
+fn pyarrow_table_from_numpy(
+    py: Python<'_>,
+    arrays: &[PyObject],
+    names: &[&str],
+) -> PyResult<PyObject> {
+    let pyarrow = PyModule::import(py, "pyarrow").map_err(|err| {
+        PyImportError::new_err(format!(
+            "pyarrow is required for to_arrow (import failed: {err})"
+        ))
+    })?;
+    let array_fn = pyarrow.getattr("array")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", false)?;
+
+    let mut arrow_arrays = Vec::with_capacity(arrays.len());
+    for array in arrays {
+        arrow_arrays.push(array_fn.call((array,), Some(&kwargs))?);
+    }
+
+    let arrays_list = PyList::new(py, arrow_arrays)?;
+    let names_list = PyList::new(py, names)?;
+    let table = pyarrow
+        .getattr("Table")?
+        .getattr("from_arrays")?
+        .call((arrays_list, names_list), None)?;
+    Ok(table.into_any().unbind())
 }
