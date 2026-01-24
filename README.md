@@ -78,14 +78,25 @@ meta = hits.metadata()
 for batch in rustpix.stream_tpx3_hits("input.tpx3"):
     batch_np = batch.to_numpy()
 
-# Process file directly into neutrons
+# Process file into neutrons (streaming by default)
 clustering = rustpix.ClusteringConfig(radius=5.0, temporal_window_ns=75.0, min_cluster_size=1)
 extraction = rustpix.ExtractionConfig(super_resolution_factor=8.0, weighted_by_tot=True, min_tot_threshold=10)
+neutron_stream = rustpix.process_tpx3_neutrons(
+    "input.tpx3",
+    clustering_config=clustering,
+    extraction_config=extraction,
+    algorithm="abs",
+)
+for batch in neutron_stream:
+    batch_np = batch.to_numpy()
+
+# Collect full batch (for small files)
 neutrons = rustpix.process_tpx3_neutrons(
     "input.tpx3",
     clustering_config=clustering,
     extraction_config=extraction,
     algorithm="abs",
+    collect=True,
 )
 neutrons_np = neutrons.to_numpy()
 ```

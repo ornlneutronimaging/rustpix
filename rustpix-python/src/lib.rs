@@ -461,15 +461,22 @@ fn read_tpx3_hits(
     })
 }
 
+/// Process a TPX3 file into neutrons.
+///
+/// By default this returns a streaming iterator (`NeutronBatchStream`) that yields
+/// pulse-bounded batches to keep memory usage bounded. Use `collect=True` to return
+/// a single `NeutronBatch` for small files.
 #[pyfunction]
-#[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, **kwargs))]
+#[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, collect=false, **kwargs))]
 fn process_tpx3_neutrons(
+    py: Python<'_>,
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
     clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
     extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
+    collect: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyNeutronBatch> {
+) -> PyResult<PyObject> {
     let processing = parse_processing_kwargs(kwargs)?;
     ensure_hdf5_disabled(processing.output_path.as_deref())?;
 
@@ -493,31 +500,64 @@ fn process_tpx3_neutrons(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(detector.clone());
 
-    let neutrons = if processing.time_ordered {
+    if !collect && !processing.time_ordered {
+        return Err(PyValueError::new_err(
+            "Streaming mode (collect=False) requires time_ordered=True; set collect=True to return a full batch with time_ordered=False",
+        ));
+    }
+
+    if collect {
+        let neutrons = if processing.time_ordered {
+            let stream = reader
+                .stream_time_ordered()
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+            cluster_and_extract_stream(stream, algo, &clustering, &extraction, &params)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        } else {
+            let mut batch = reader
+                .read_batch()
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+            cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+        };
+
+        let batch = PyNeutronBatch {
+            batch: Some(neutrons),
+            metadata: BatchMetadata {
+                detector,
+                clustering: Some(clustering),
+                extraction: Some(extraction),
+                algorithm: Some(processing.selection.name),
+                source_path: Some(path.to_string()),
+                time_ordered: processing.time_ordered,
+            },
+        };
+        Ok(Py::new(py, batch)?.into_any())
+    } else {
         let stream = reader
             .stream_time_ordered()
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        cluster_and_extract_stream(stream, algo, &clustering, &extraction, &params)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-    } else {
-        let mut batch = reader
-            .read_batch()
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-    };
+        let stream = cluster_and_extract_stream_iter(
+            stream,
+            algo,
+            clustering.clone(),
+            extraction.clone(),
+            params,
+        );
 
-    Ok(PyNeutronBatch {
-        batch: Some(neutrons),
-        metadata: BatchMetadata {
-            detector,
-            clustering: Some(clustering),
-            extraction: Some(extraction),
-            algorithm: Some(processing.selection.name),
-            source_path: Some(path.to_string()),
-            time_ordered: processing.time_ordered,
-        },
-    })
+        let stream = PyNeutronBatchStream {
+            stream,
+            metadata: BatchMetadata {
+                detector,
+                clustering: Some(clustering),
+                extraction: Some(extraction),
+                algorithm: Some(processing.selection.name),
+                source_path: Some(path.to_string()),
+                time_ordered: true,
+            },
+        };
+        Ok(Py::new(py, stream)?.into_any())
+    }
 }
 
 #[pyfunction]
