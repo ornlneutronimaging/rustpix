@@ -27,6 +27,9 @@ pub struct HitBatch {
     pub cluster_id: Vec<i32>,
 }
 
+/// Tuple-based hit representation used to push into a batch without `AoS` storage.
+pub type HitRecord = (u16, u16, u32, u16, u32, u8);
+
 impl HitBatch {
     /// Creates a new empty batch with specified capacity.
     #[must_use]
@@ -77,8 +80,8 @@ impl HitBatch {
     }
 
     /// Pushes a single hit into the batch.
-    #[allow(clippy::too_many_arguments)]
-    pub fn push(&mut self, x: u16, y: u16, tof: u32, tot: u16, timestamp: u32, chip_id: u8) {
+    pub fn push(&mut self, hit: HitRecord) {
+        let (x, y, tof, tot, timestamp, chip_id) = hit;
         self.x.push(x);
         self.y.push(y);
         self.tof.push(tof);
@@ -135,12 +138,12 @@ mod tests {
         let mut batch = HitBatch::with_capacity(10);
         assert!(batch.is_empty());
 
-        batch.push(10, 20, 1000, 5, 123_456, 0);
+        batch.push((10, 20, 1000, 5, 123_456, 0));
         assert_eq!(batch.len(), 1);
         assert_eq!(batch.x[0], 10);
         assert_eq!(batch.cluster_id[0], -1);
 
-        batch.push(11, 21, 1001, 6, 123_457, 0);
+        batch.push((11, 21, 1001, 6, 123_457, 0));
         assert_eq!(batch.len(), 2);
 
         batch.clear();

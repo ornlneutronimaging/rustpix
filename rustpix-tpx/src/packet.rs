@@ -1,5 +1,4 @@
 //! TPX3 packet parsing.
-#![allow(clippy::must_use_candidate, clippy::unreadable_literal)]
 //!
 
 /// TPX3 packet wrapper providing efficient field extraction.
@@ -7,9 +6,9 @@
 /// Packet format (64-bit):
 /// - Hit packets (ID 0xB*):
 ///   - Bits 0-15: SPIDR time
-///   - Bits 16-19: Fine ToA (4-bit)
-///   - Bits 20-29: ToT (10-bit)
-///   - Bits 30-43: ToA (14-bit)
+///   - Bits 16-19: Fine `ToA` (4-bit)
+///   - Bits 20-29: `ToT` (10-bit)
+///   - Bits 30-43: `ToA` (14-bit)
 ///   - Bits 44-59: Pixel address (16-bit)
 ///   - Bits 60-63: Packet type ID
 ///
@@ -21,84 +20,97 @@ pub struct Tpx3Packet(u64);
 
 impl Tpx3Packet {
     /// TPX3 header magic number ("TPX3" in little-endian).
-    pub const TPX3_HEADER_MAGIC: u64 = 0x33585054;
+    pub const TPX3_HEADER_MAGIC: u64 = 0x3358_5054;
 
     /// Create from raw 64-bit value.
     #[inline]
+    #[must_use]
     pub const fn new(raw: u64) -> Self {
         Self(raw)
     }
 
     /// Get raw packet value.
     #[inline]
+    #[must_use]
     pub const fn raw(&self) -> u64 {
         self.0
     }
 
     /// Check if this is a TPX3 header packet.
     #[inline]
+    #[must_use]
     pub const fn is_header(&self) -> bool {
-        (self.0 & 0xFFFFFFFF) == Self::TPX3_HEADER_MAGIC
+        (self.0 & 0xFFFF_FFFF) == Self::TPX3_HEADER_MAGIC
     }
 
     /// Check if this is a TDC packet (ID 0x6F).
     #[inline]
+    #[must_use]
     pub const fn is_tdc(&self) -> bool {
         (self.0 >> 56) & 0xFF == 0x6F
     }
 
     /// Check if this is a hit packet (ID 0xB*).
     #[inline]
+    #[must_use]
     pub const fn is_hit(&self) -> bool {
         (self.0 >> 60) & 0xF == 0xB
     }
 
     /// Get packet type identifier.
     #[inline]
+    #[must_use]
     pub const fn packet_type(&self) -> u8 {
         ((self.0 >> 56) & 0xFF) as u8
     }
 
     /// Get chip ID from header packet (bits 32-39).
     #[inline]
+    #[must_use]
     pub const fn chip_id(&self) -> u8 {
         ((self.0 >> 32) & 0xFF) as u8
     }
 
     /// Get 16-bit pixel address from hit packet.
     #[inline]
+    #[must_use]
     pub const fn pixel_address(&self) -> u16 {
         ((self.0 >> 44) & 0xFFFF) as u16
     }
 
     /// Get 14-bit Time of Arrival.
     #[inline]
+    #[must_use]
     pub const fn toa(&self) -> u16 {
         ((self.0 >> 30) & 0x3FFF) as u16
     }
 
     /// Get 10-bit Time over Threshold.
     #[inline]
+    #[must_use]
     pub const fn tot(&self) -> u16 {
         ((self.0 >> 20) & 0x3FF) as u16
     }
 
-    /// Get 4-bit fine ToA.
+    /// Get 4-bit fine `ToA`.
     #[inline]
+    #[must_use]
     pub const fn fine_toa(&self) -> u8 {
         ((self.0 >> 16) & 0xF) as u8
     }
 
     /// Get SPIDR time (16-bit).
     #[inline]
+    #[must_use]
     pub const fn spidr_time(&self) -> u16 {
         (self.0 & 0xFFFF) as u16
     }
 
     /// Get 30-bit TDC timestamp from TDC packet.
     #[inline]
+    #[must_use]
     pub const fn tdc_timestamp(&self) -> u32 {
-        ((self.0 >> 12) & 0x3FFFFFFF) as u32
+        ((self.0 >> 12) & 0x3FFF_FFFF) as u32
     }
 
     /// Decode pixel address to local (x, y) coordinates.
@@ -109,6 +121,7 @@ impl Tpx3Packet {
     /// - x = dcol + (pix >> 2)
     /// - y = spix + (pix & 0x3)
     #[inline]
+    #[must_use]
     pub const fn pixel_coordinates(&self) -> (u16, u16) {
         let addr = self.pixel_address();
         let dcol = (addr & 0xFE00) >> 8;
@@ -129,24 +142,27 @@ impl From<u64> for Tpx3Packet {
 impl Tpx3Packet {
     /// Create from 8-byte array (little-endian).
     #[inline]
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 8]) -> Self {
         Self::new(u64::from_le_bytes(bytes))
     }
 
-    /// Alias for is_hit - checks if this is pixel data.
+    /// Alias for `is_hit` - checks if this is pixel data.
     #[inline]
+    #[must_use]
     pub const fn is_pixel_data(&self) -> bool {
         self.is_hit()
     }
 
-    /// Calculate coarse timestamp in 25ns units from SPIDR time and ToA.
+    /// Calculate coarse timestamp in 25ns units from SPIDR time and `ToA`.
     ///
-    /// Formula: (spidr_time << 14) | toa
+    /// Formula: (`spidr_time` << 14) | toa
     /// Matches C++ reference implementation.
     #[inline]
+    #[must_use]
     pub fn timestamp_coarse(&self) -> u32 {
-        let spidr = self.spidr_time() as u32;
-        let toa = self.toa() as u32;
+        let spidr = u32::from(self.spidr_time());
+        let toa = u32::from(self.toa());
 
         // Combine SPIDR time and ToA to get 25ns timestamp
         (spidr << 14) | toa

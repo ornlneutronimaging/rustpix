@@ -1,14 +1,6 @@
 //! Analyze timestamp patterns in TPX3 data to understand rollover behavior.
-#![allow(
-    clippy::cast_lossless,
-    clippy::uninlined_format_args,
-    clippy::doc_markdown,
-    clippy::explicit_iter_loop,
-    clippy::cast_precision_loss,
-    clippy::unreadable_literal
-)]
 //!
-//! Run with: cargo run --bin analyze_timestamps -- <tpx3_file>
+//! Run with: cargo run --bin `analyze_timestamps` -- <`tpx3_file`>
 
 use std::collections::HashMap;
 use std::env;
@@ -46,7 +38,7 @@ fn main() -> std::io::Result<()> {
         let packet_type = (raw >> 56) & 0xFF;
 
         // Header packet - extract chip ID
-        if (raw & 0xFFFFFFFF) == 0x33585054 {
+        if (raw & 0xFFFF_FFFF) == 0x3358_5054 {
             current_chip = ((raw >> 32) & 0xFF) as u8;
             chip_stats
                 .entry(current_chip)
@@ -60,7 +52,7 @@ fn main() -> std::io::Result<()> {
 
         // TDC packet (0x6F)
         if packet_type == 0x6F {
-            let tdc_ts = ((raw >> 12) & 0x3FFFFFFF) as u32;
+            let tdc_ts = ((raw >> 12) & 0x3FFF_FFFF) as u32;
             stats.record_tdc(tdc_ts);
         }
         // Hit packet (0xB*)
@@ -73,8 +65,8 @@ fn main() -> std::io::Result<()> {
     }
 
     // Print results
-    for (chip_id, stats) in chip_stats.iter() {
-        println!("=== Chip {} ===", chip_id);
+    for (chip_id, stats) in &chip_stats {
+        println!("=== Chip {chip_id} ===");
         stats.print_summary();
         println!();
     }
@@ -163,11 +155,11 @@ impl ChipStats {
         println!("TDC packets: {}", self.tdc_count);
         println!("TDC decreases (rollovers): {}", self.tdc_decreases);
         if !self.tdc_timestamps.is_empty() {
+            let first = *self.tdc_timestamps.first().unwrap();
+            let last = self.tdc_last.unwrap_or(0);
             println!(
-                "TDC range: {} - {} (diff: {})",
-                self.tdc_timestamps.first().unwrap(),
-                self.tdc_last.unwrap_or(0),
-                self.tdc_last.unwrap_or(0) as i64 - *self.tdc_timestamps.first().unwrap() as i64
+                "TDC range: {first} - {last} (diff: {})",
+                i64::from(last) - i64::from(first)
             );
         }
 
@@ -176,20 +168,17 @@ impl ChipStats {
         println!("Hit timestamp decreases: {}", self.hit_decreases);
         println!(
             "Hit decrease rate: {:.4}%",
-            100.0 * self.hit_decreases as f64 / self.hit_count.max(1) as f64
+            100.0 * usize_to_f64(self.hit_decreases) / usize_to_f64(self.hit_count.max(1))
         );
 
         if !self.hits_per_tdc.is_empty() {
-            let avg_hits: f64 =
-                self.hits_per_tdc.iter().sum::<usize>() as f64 / self.hits_per_tdc.len() as f64;
+            let avg_hits: f64 = usize_to_f64(self.hits_per_tdc.iter().sum::<usize>())
+                / usize_to_f64(self.hits_per_tdc.len());
             let min_hits = self.hits_per_tdc.iter().min().unwrap_or(&0);
             let max_hits = self.hits_per_tdc.iter().max().unwrap_or(&0);
             println!();
             println!("Hits per TDC period:");
-            println!(
-                "  Avg: {:.1}, Min: {}, Max: {}",
-                avg_hits, min_hits, max_hits
-            );
+            println!("  Avg: {avg_hits:.1}, Min: {min_hits}, Max: {max_hits}");
         }
 
         // Print first few TDC timestamps to see pattern
@@ -199,10 +188,14 @@ impl ChipStats {
             if self.tdc_timestamps.len() > 5 {
                 let diffs: Vec<i64> = self.tdc_timestamps[..5]
                     .windows(2)
-                    .map(|w| w[1] as i64 - w[0] as i64)
+                    .map(|w| i64::from(w[1]) - i64::from(w[0]))
                     .collect();
-                println!("TDC diffs (first 4): {:?}", diffs);
+                println!("TDC diffs (first 4): {diffs:?}");
             }
         }
     }
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
 }

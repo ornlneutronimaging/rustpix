@@ -1,11 +1,6 @@
 //! Analyze behavior around TDC rollover point.
-#![allow(
-    clippy::uninlined_format_args,
-    clippy::unreadable_literal,
-    clippy::doc_markdown
-)]
 //!
-//! Run with: cargo run --bin analyze_rollover -- <tpx3_file>
+//! Run with: cargo run --bin `analyze_rollover` -- <`tpx3_file`>
 
 use std::env;
 use std::fs::File;
@@ -36,32 +31,32 @@ fn main() -> std::io::Result<()> {
         let packet_type = (raw >> 56) & 0xFF;
 
         // Header
-        if (raw & 0xFFFFFFFF) == 0x33585054 {
+        if (raw & 0xFFFF_FFFF) == 0x3358_5054 {
             current_chip = ((raw >> 32) & 0xFF) as u8;
             continue;
         }
 
         // TDC
         if packet_type == 0x6F {
-            let tdc_ts = ((raw >> 12) & 0x3FFFFFFF) as u32;
+            let tdc_ts = ((raw >> 12) & 0x3FFF_FFFF) as u32;
 
             // Check for rollover
             if let Some(last) = last_tdc {
                 if tdc_ts < last && (last - tdc_ts) > 500_000_000 {
                     println!("=== TDC ROLLOVER DETECTED ===");
-                    println!("Packet {}: TDC {} -> {}", i, last, tdc_ts);
-                    println!("Chip: {}", current_chip);
+                    println!("Packet {i}: TDC {last} -> {tdc_ts}");
+                    println!("Chip: {current_chip}");
 
                     // Print surrounding TDCs
                     println!("\nRecent TDCs before rollover:");
                     for (idx, chip, ts) in tdc_events.iter().rev().take(5).rev() {
-                        println!("  Packet {}, Chip {}: TDC {}", idx, chip, ts);
+                        println!("  Packet {idx}, Chip {chip}: TDC {ts}");
                     }
 
                     // Print recent hits
                     println!("\nRecent hits before rollover:");
                     for (idx, chip, ts) in hit_events.iter().rev().take(10).rev() {
-                        println!("  Packet {}, Chip {}: hit_ts {}", idx, chip, ts);
+                        println!("  Packet {idx}, Chip {chip}: hit_ts {ts}");
                     }
                     println!();
                 }
@@ -83,9 +78,9 @@ fn main() -> std::io::Result<()> {
             if let Some(last) = last_hit_ts {
                 if hit_ts < last && (last - hit_ts) > 500_000_000 {
                     println!("=== HIT TIMESTAMP ROLLOVER ===");
-                    println!("Packet {}: hit_ts {} -> {}", i, last, hit_ts);
-                    println!("Chip: {}", current_chip);
-                    println!("Current TDC: {:?}", last_tdc);
+                    println!("Packet {i}: hit_ts {last} -> {hit_ts}");
+                    println!("Chip: {current_chip}");
+                    println!("Current TDC: {last_tdc:?}");
                 }
             }
 
@@ -97,6 +92,6 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    println!("Analysis complete. {} packets processed.", packet_count);
+    println!("Analysis complete. {packet_count} packets processed.");
     Ok(())
 }

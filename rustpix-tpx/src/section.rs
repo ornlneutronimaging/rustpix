@@ -1,12 +1,8 @@
 //! Section-aware TPX3 file processing.
-#![allow(
-    clippy::cast_lossless,
-    clippy::items_after_statements,
-    clippy::must_use_candidate,
-    clippy::missing_panics_doc
-)]
 
 use super::packet::Tpx3Packet;
+
+const PACKET_SIZE: usize = 8;
 
 /// A contiguous section of TPX3 data for a single chip.
 #[derive(Clone, Debug)]
@@ -25,11 +21,13 @@ pub struct Tpx3Section {
 
 impl Tpx3Section {
     /// Number of bytes in this section.
+    #[must_use]
     pub fn byte_size(&self) -> usize {
         self.end_offset - self.start_offset
     }
 
     /// Number of 64-bit packets in this section.
+    #[must_use]
     pub fn packet_count(&self) -> usize {
         self.byte_size() / 8
     }
@@ -47,9 +45,8 @@ impl Tpx3Section {
 ///
 /// # Returns
 /// Vector of sections with TDC states populated.
+#[must_use]
 pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
-    const PACKET_SIZE: usize = 8;
-
     if data.len() < PACKET_SIZE {
         return Vec::new();
     }
@@ -62,7 +59,12 @@ pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
 
     for i in 0..num_packets {
         let offset = i * PACKET_SIZE;
-        let raw = u64::from_le_bytes(data[offset..offset + PACKET_SIZE].try_into().unwrap());
+        let Some(packet_bytes) = data.get(offset..offset + PACKET_SIZE) else {
+            break;
+        };
+        let mut bytes = [0u8; PACKET_SIZE];
+        bytes.copy_from_slice(packet_bytes);
+        let raw = u64::from_le_bytes(bytes);
         let packet = Tpx3Packet::new(raw);
 
         if packet.is_header() {
@@ -80,7 +82,7 @@ pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
                 start_offset: offset + PACKET_SIZE, // Skip header itself
                 end_offset: 0,
                 chip_id,
-                initial_tdc: per_chip_tdc[chip_id as usize],
+                initial_tdc: per_chip_tdc[usize::from(chip_id)],
                 final_tdc: None,
             });
         } else if packet.is_tdc() {
@@ -88,7 +90,7 @@ pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
             if let Some(ref mut section) = current_section {
                 let tdc_ts = packet.tdc_timestamp();
                 section.final_tdc = Some(tdc_ts);
-                per_chip_tdc[section.chip_id as usize] = Some(tdc_ts);
+                per_chip_tdc[usize::from(section.chip_id)] = Some(tdc_ts);
             }
         }
     }
@@ -104,7 +106,7 @@ pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
     sections
 }
 
-/// Process a single section into a HitBatch (SoA).
+/// Process a single section into a `HitBatch` (`SoA`).
 pub fn process_section_into_batch(
     data: &[u8],
     section: &Tpx3Section,
@@ -114,8 +116,6 @@ pub fn process_section_into_batch(
 ) -> Option<u32> {
     use super::hit::{calculate_tof, correct_timestamp_rollover};
 
-    const PACKET_SIZE: usize = 8;
-
     let section_data = &data[section.start_offset..section.end_offset];
     let num_packets = section_data.len() / PACKET_SIZE;
 
@@ -123,11 +123,12 @@ pub fn process_section_into_batch(
 
     for i in 0..num_packets {
         let offset = i * PACKET_SIZE;
-        let raw = u64::from_le_bytes(
-            section_data[offset..offset + PACKET_SIZE]
-                .try_into()
-                .unwrap(),
-        );
+        let Some(packet_bytes) = section_data.get(offset..offset + PACKET_SIZE) else {
+            break;
+        };
+        let mut bytes = [0u8; PACKET_SIZE];
+        bytes.copy_from_slice(packet_bytes);
+        let raw = u64::from_le_bytes(bytes);
         let packet = Tpx3Packet::new(raw);
 
         if packet.is_tdc() {
@@ -144,14 +145,14 @@ pub fn process_section_into_batch(
             let timestamp = correct_timestamp_rollover(raw_timestamp, tdc_ts);
             let tof = calculate_tof(timestamp, tdc_ts, tdc_correction_25ns);
 
-            batch.push(
+            batch.push((
                 global_x,
                 global_y,
                 tof,
                 packet.tot(),
                 timestamp,
                 section.chip_id,
-            );
+            ));
         }
     }
 
@@ -160,13 +161,15 @@ pub fn process_section_into_batch(
 
 /// Scans a section to find the final TDC timestamp.
 /// Used for state propagation before full processing.
+#[must_use]
 pub fn scan_section_tdc(data: &[u8], section: &Tpx3Section) -> Option<u32> {
     let section_data = &data[section.start_offset..section.end_offset];
-    const PACKET_SIZE: usize = 8;
     let mut final_tdc = section.initial_tdc;
 
     for chunk in section_data.chunks_exact(PACKET_SIZE) {
-        let raw = u64::from_le_bytes(chunk.try_into().unwrap());
+        let mut bytes = [0u8; PACKET_SIZE];
+        bytes.copy_from_slice(chunk);
+        let raw = u64::from_le_bytes(bytes);
         if ((raw >> 56) & 0xFF) == 0x6F {
             final_tdc = Some(((raw >> 12) & 0x3FFF_FFFF) as u32);
         }

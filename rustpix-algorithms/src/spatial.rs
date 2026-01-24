@@ -1,12 +1,4 @@
 //! Spatial indexing for efficient neighbor lookup.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    unsafe_code,
-    clippy::needless_pass_by_value,
-    clippy::must_use_candidate
-)]
 //!
 
 /// Spatial grid for efficient 2D neighbor queries.
@@ -30,6 +22,7 @@ impl<T: Clone> SpatialGrid<T> {
     /// * `cell_size` - Size of each cell in pixels (e.g., 32).
     /// * `width` - Total width of the detector in pixels (e.g., 256).
     /// * `height` - Total height of the detector in pixels (e.g., 256).
+    #[must_use]
     pub fn new(cell_size: usize, width: usize, height: usize) -> Self {
         // Ensure cell_size is non-zero
         let cell_size = cell_size.max(1);
@@ -92,18 +85,13 @@ impl<T: Clone> SpatialGrid<T> {
             return;
         }
 
-        let cx = (x as usize) / self.cell_size;
-        let cy = (y as usize) / self.cell_size;
+        let cx = usize::try_from(x).unwrap_or(0) / self.cell_size;
+        let cy = usize::try_from(y).unwrap_or(0) / self.cell_size;
 
         if cx < self.width_cells && cy < self.height_cells {
             let idx = cy * self.width_cells + cx;
-            // SAFETY: bounds checked above. `idx` is guaranteed to be < total_cells because:
-            // 1. cx < width_cells and cy < height_cells (checked by if conditions).
-            // 2. idx = cy * width_cells + cx.
-            // 3. total_cells = width_cells * height_cells.
-            // Therefore idx < total_cells.
-            unsafe {
-                self.cells.get_unchecked_mut(idx).push(value);
+            if let Some(cell) = self.cells.get_mut(idx) {
+                cell.push(value);
             }
         }
     }
@@ -114,8 +102,8 @@ impl<T: Clone> SpatialGrid<T> {
         if cx < 0 || cy < 0 {
             return None;
         }
-        let cx = cx as usize;
-        let cy = cy as usize;
+        let cx = usize::try_from(cx).ok()?;
+        let cy = usize::try_from(cy).ok()?;
 
         if cx < self.width_cells && cy < self.height_cells {
             Some(cy * self.width_cells + cx)
@@ -125,47 +113,50 @@ impl<T: Clone> SpatialGrid<T> {
     }
 
     /// Remove a value from the given coordinates.
-    pub fn remove(&mut self, x: i32, y: i32, value: T)
+    pub fn remove(&mut self, x: i32, y: i32, value: &T)
     where
         T: PartialEq,
     {
         if let Some(idx) = self.get_cell_index(x, y) {
-            // SAFETY: get_cell_index checks bounds
-            let cell = unsafe { self.cells.get_unchecked_mut(idx) };
-            if let Some(pos) = cell.iter().position(|x| *x == value) {
-                cell.swap_remove(pos);
+            if let Some(cell) = self.cells.get_mut(idx) {
+                if let Some(pos) = cell.iter().position(|item| item == value) {
+                    cell.swap_remove(pos);
+                }
             }
         }
     }
 
     /// Get reference to the slice of values in the cell at (x, y).
     #[inline]
+    #[must_use]
     pub fn get_cell_slice(&self, x: i32, y: i32) -> Option<&[T]> {
         if x < 0 || y < 0 {
             return None;
         }
-        let cx = (x as usize / self.cell_size) as i32;
-        let cy = (y as usize / self.cell_size) as i32;
-        self.get_cell_index(cx, cy).map(|idx| {
-            // SAFETY: get_cell_index checks bounds
-            unsafe { self.cells.get_unchecked(idx).as_slice() }
-        })
+        let cell_size = i32::try_from(self.cell_size).unwrap_or(i32::MAX);
+        let cx = x / cell_size;
+        let cy = y / cell_size;
+        self.get_cell_index(cx, cy)
+            .and_then(|idx| self.cells.get(idx).map(Vec::as_slice))
     }
 
     /// Get the grid width in cells.
     #[inline]
+    #[must_use]
     pub fn width_cells(&self) -> usize {
         self.width_cells
     }
 
     /// Get the grid height in cells.
     #[inline]
+    #[must_use]
     pub fn height_cells(&self) -> usize {
         self.height_cells
     }
 
     /// Get the configured cell size.
     #[inline]
+    #[must_use]
     pub fn cell_size(&self) -> usize {
         self.cell_size
     }
@@ -175,26 +166,32 @@ impl<T: Clone> SpatialGrid<T> {
     /// Appends neighbors to the provided buffer to avoid allocation.
     #[inline]
     pub fn query_neighborhood(&self, x: i32, y: i32, buffer: &mut Vec<T>) {
-        let cx = (x as usize / self.cell_size) as i32;
-        let cy = (y as usize / self.cell_size) as i32;
+        let cell_size = i32::try_from(self.cell_size).unwrap_or(i32::MAX);
+        let cx = x / cell_size;
+        let cy = y / cell_size;
+        let height_cells_i32 = i32::try_from(self.height_cells).unwrap_or(i32::MAX);
+        let width_cells_i32 = i32::try_from(self.width_cells).unwrap_or(i32::MAX);
 
         // Check 3x3 area
         for dy in -1..=1 {
             let ny = cy + dy;
-            if ny < 0 || ny >= self.height_cells as i32 {
+            if ny < 0 || ny >= height_cells_i32 {
                 continue;
             }
 
             for dx in -1..=1 {
                 let nx = cx + dx;
-                if nx < 0 || nx >= self.width_cells as i32 {
+                if nx < 0 || nx >= width_cells_i32 {
                     continue;
                 }
 
-                let idx = (ny as usize) * self.width_cells + (nx as usize);
-                // SAFETY: indexing logic guarantees bounds
-                let cell = unsafe { self.cells.get_unchecked(idx) };
-                buffer.extend_from_slice(cell);
+                let (Ok(row_idx), Ok(col_idx)) = (usize::try_from(ny), usize::try_from(nx)) else {
+                    continue;
+                };
+                let idx = row_idx * self.width_cells + col_idx;
+                if let Some(cell) = self.cells.get(idx) {
+                    buffer.extend_from_slice(cell);
+                }
             }
         }
     }

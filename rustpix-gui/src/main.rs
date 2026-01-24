@@ -1,28 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![allow(
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation,
-    clippy::too_many_lines,
-    clippy::match_same_arms,
-    clippy::uninlined_format_args,
-    clippy::cast_precision_loss,
-    clippy::redundant_closure_for_method_calls,
-    clippy::cast_lossless,
-    clippy::assigning_clones,
-    clippy::cast_possible_wrap,
-    clippy::explicit_iter_loop,
-    clippy::manual_let_else,
-    clippy::struct_excessive_bools,
-    clippy::items_after_statements,
-    clippy::format_push_string,
-    unsafe_code
-)]
 
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Plot, PlotImage, PlotPoint};
 use rayon::prelude::*;
 use rfd::FileDialog;
-use std::path::PathBuf;
+use std::fmt::Write;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -89,6 +72,30 @@ enum AppMessage {
     ProcessingError(String),
 }
 
+#[derive(Default)]
+struct UiState {
+    log_plot: bool,
+    show_histogram: bool,
+}
+
+struct ProcessingState {
+    is_loading: bool,
+    is_processing: bool,
+    progress: f32,
+    status_text: String,
+}
+
+impl Default for ProcessingState {
+    fn default() -> Self {
+        Self {
+            is_loading: false,
+            is_processing: false,
+            progress: 0.0,
+            status_text: "Ready".to_string(),
+        }
+    }
+}
+
 struct RustpixApp {
     selected_file: Option<PathBuf>,
 
@@ -110,16 +117,13 @@ struct RustpixApp {
 
     // Config
     tdc_frequency: f64,
-    log_plot: bool,
+    ui_state: UiState,
 
     // App Logic
     rx: Receiver<AppMessage>,
     tx: Sender<AppMessage>,
 
-    is_loading: bool,
-    is_processing: bool,
-    progress: f32,
-    status_text: String,
+    processing: ProcessingState,
 
     // Stats - Removed as per original code edit, but not explicitly requested to remove.
     // load_time: Option<Duration>,
@@ -131,7 +135,6 @@ struct RustpixApp {
 
     // Visualization
     colormap: Colormap,
-    show_histogram: bool,
 }
 
 impl Default for RustpixApp {
@@ -154,275 +157,49 @@ impl Default for RustpixApp {
 
             // Config
             tdc_frequency: 60.0,
-            log_plot: false,
-
+            ui_state: UiState::default(),
             rx,
             tx,
 
-            is_loading: false,
-            is_processing: false,
-            progress: 0.0,
-            status_text: "Ready".to_owned(),
+            processing: ProcessingState::default(),
 
             // load_time: None, // Removed
             // proc_time: None, // Removed
             texture: None,
             // histogram_bins: 512,
             colormap: Colormap::Green,
-            show_histogram: false,
         }
     }
 }
 
 impl RustpixApp {
     fn load_file(&mut self, path: PathBuf) {
-        self.selected_file = Some(path.clone());
-        self.is_loading = true;
-        self.progress = 0.0;
-        self.status_text = "Loading file...".to_owned();
+        self.reset_load_state(path.as_path());
+
+        let tx = self.tx.clone();
+        let tdc_frequency = self.tdc_frequency;
+        thread::spawn(move || load_file_worker(path.as_path(), &tx, tdc_frequency));
+    }
+
+    fn reset_load_state(&mut self, path: &Path) {
+        self.selected_file = Some(path.to_path_buf());
+        self.processing.is_loading = true;
+        self.processing.progress = 0.0;
+        self.processing.status_text.clear();
+        self.processing.status_text.push_str("Loading file...");
         self.hit_batch = None;
         self.hit_counts = None;
         self.neutrons.clear();
         self.texture = None;
         self.tof_hist_full = None;
-
-        let tx = self.tx.clone();
-        let tdc_frequency = self.tdc_frequency;
-
-        thread::spawn(move || {
-            let start = Instant::now();
-
-            let file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = tx.send(AppMessage::LoadError(e.to_string()));
-                    return;
-                }
-            };
-
-            let mmap = unsafe {
-                match memmap2::Mmap::map(&file) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let _ = tx.send(AppMessage::LoadError(e.to_string()));
-                        return;
-                    }
-                }
-            };
-
-            tx.send(AppMessage::LoadProgress(
-                0.1,
-                "Scanning sections...".to_string(),
-            ))
-            .unwrap();
-
-            // 2. Scan Sections
-            // 2. Scan Sections (Chunked for Progress)
-            let mut io_sections = Vec::new();
-            let mut offset = 0;
-            let chunk_size = 50 * 1024 * 1024; // 50MB chunks
-            let total_bytes = mmap.len();
-
-            while offset < total_bytes {
-                let end = (offset + chunk_size).min(total_bytes);
-                let is_eof = end == total_bytes;
-                let data = &mmap[offset..end];
-
-                let (sections, consumed) = PacketScanner::scan_sections(data, is_eof);
-
-                // Adjust offsets and add to list
-                for mut s in sections {
-                    s.start_offset += offset;
-                    s.end_offset += offset;
-                    io_sections.push(s);
-                }
-
-                offset += consumed;
-
-                // Report progress (0.0 to 0.15 range)
-                let p = 0.15 * (offset as f32 / total_bytes as f32);
-                let _ = tx.send(AppMessage::LoadProgress(
-                    p,
-                    format!(
-                        "Scanning sections... {:.0}%",
-                        (offset as f32 / total_bytes as f32) * 100.0
-                    ),
-                ));
-
-                if consumed == 0 && !is_eof {
-                    // Prevent infinite loop if scanner makes no progress
-                    // This creates a safe exit if buffer is stuck
-                    offset += chunk_size;
-                }
-            }
-            let total_sections = io_sections.len();
-
-            tx.send(AppMessage::LoadProgress(
-                0.15,
-                format!("Found {} sections. Prescanning TDCs...", total_sections),
-            ))
-            .unwrap();
-
-            // 2.5 Prescan TDCs
-            // We need to build Tpx3Sections with valid TDCs.
-            // We iterate strictly in order to propagate TDCs per chip.
-            let mut tpx_sections = Vec::with_capacity(total_sections);
-            let mut chip_tdc_state = [None; 256];
-
-            for s in io_sections {
-                let initial = chip_tdc_state[s.chip_id as usize];
-
-                let mut rules = Tpx3Section {
-                    start_offset: s.start_offset,
-                    end_offset: s.end_offset,
-                    chip_id: s.chip_id,
-                    initial_tdc: initial,
-                    final_tdc: None,
-                };
-
-                // Scan for final TDC to propagate
-                if let Some(final_t) = scan_section_tdc(&mmap, &rules) {
-                    rules.final_tdc = Some(final_t);
-                    chip_tdc_state[s.chip_id as usize] = Some(final_t);
-                }
-
-                tpx_sections.push(rules);
-            }
-
-            tx.send(AppMessage::LoadProgress(
-                0.25,
-                "Processing hits...".to_string(),
-            ))
-            .unwrap();
-
-            use rustpix_tpx::DetectorConfig;
-
-            // 3. Process into Batch
-            let mut det_config = DetectorConfig::venus_defaults();
-            // Override with user config
-            det_config.tdc_frequency_hz = tdc_frequency;
-            let tdc_correction = det_config.tdc_correction_25ns();
-
-            // Debug Info Calculation
-            let mut debug_str = format!("TDC Correction (25ns): {}\n", tdc_correction);
-            if let Some(sec) = tpx_sections.iter().find(|s| s.initial_tdc.is_some()) {
-                if let Some(tdc) = sec.initial_tdc {
-                    debug_str.push_str(&format!("Sec TDC Ref: {}\n", tdc));
-                    // Find first hit manually
-                    let sdata = &mmap[sec.start_offset..sec.end_offset];
-                    let mut found = false;
-                    for ch in sdata.chunks_exact(8) {
-                        let raw = u64::from_le_bytes(ch.try_into().unwrap());
-                        let p = rustpix_tpx::Tpx3Packet::new(raw);
-                        if p.is_hit() {
-                            let raw_ts = p.timestamp_coarse();
-                            let ts = rustpix_tpx::correct_timestamp_rollover(raw_ts, tdc);
-                            let raw_tof = ts.wrapping_sub(tdc);
-                            let tof = rustpix_tpx::calculate_tof(ts, tdc, tdc_correction);
-                            debug_str.push_str(&format!("Sample Hit:\n  RawTS: {}\n  CorrTS: {}\n  RawDelta: {}\n  CalcTOF: {}\n", raw_ts, ts, raw_tof, tof));
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        debug_str.push_str("Section has no hits.\n");
-                    }
-                }
-            } else {
-                debug_str.push_str("No sections with valid Initial TDC found.\n");
-            }
-
-            let num_packets: usize = tpx_sections.iter().map(|s| s.packet_count()).sum();
-            let mut full_batch = HitBatch::with_capacity(num_packets);
-
-            let chunk_size = 100;
-            let chunks: Vec<_> = tpx_sections.chunks(chunk_size).collect();
-            let total_chunks = chunks.len();
-
-            for (i, chunk) in chunks.iter().enumerate() {
-                let batches: Vec<HitBatch> = chunk
-                    .par_iter()
-                    .map(|sec| {
-                        let mut b = HitBatch::with_capacity(sec.packet_count());
-
-                        // precise-capture the reference to config if needed, or just clone lightweight struct?
-                        // DetectorConfig is Clone.
-                        let dc = det_config.clone();
-                        let transform = move |cid, x, y| dc.map_chip_to_global(cid, x, y);
-
-                        process_section_into_batch(&mmap, sec, tdc_correction, transform, &mut b);
-                        b
-                    })
-                    .collect();
-
-                for b in batches {
-                    full_batch.append(&b);
-                }
-
-                let p = 0.25 + 0.75 * (i as f32 / total_chunks as f32);
-                tx.send(AppMessage::LoadProgress(
-                    p,
-                    format!("Processed {}/{} hits...", full_batch.len(), num_packets),
-                ))
-                .unwrap();
-            }
-
-            // 4. Compute Metadata (Counts & Histogram) in background to avoid Main Thread hang
-            tx.send(AppMessage::LoadProgress(
-                0.95,
-                "Generating visualization data...".to_string(),
-            ))
-            .unwrap();
-
-            // Counts Grid (512x512)
-            let mut counts = vec![0u32; 512 * 512];
-            for i in 0..full_batch.len() {
-                let x = full_batch.x[i] as usize;
-                let y = full_batch.y[i] as usize;
-                if x < 512 && y < 512 {
-                    counts[y * 512 + x] += 1;
-                }
-            }
-
-            // ToF Histogram (Fixed 200 bins)
-            let n_bins = 200;
-            let mut hist = vec![0u64; n_bins];
-
-            // Use TDC period (frame time) as the natural maximum for the histogram
-            // instead of the raw max, because outliers (u32::MAX due to negativity) skew the scale.
-            let hist_max = tdc_correction as f64;
-            let bin_width = hist_max / n_bins as f64;
-
-            if bin_width > 0.0 {
-                for &t in &full_batch.tof {
-                    let val = t as f64;
-                    // Clamp to histogram range
-                    if val < hist_max {
-                        let bin = (val / bin_width) as usize;
-                        if bin < n_bins {
-                            hist[bin] += 1;
-                        }
-                    }
-                }
-            }
-
-            tx.send(AppMessage::LoadComplete(
-                Box::new(full_batch),
-                counts,
-                hist,
-                start.elapsed(),
-                // Debug info removed
-                String::new(),
-            ))
-            .unwrap();
-        });
     }
 
     fn run_processing(&mut self) {
         if let Some(path) = self.selected_file.clone() {
-            self.is_processing = true;
-            self.progress = 0.0;
-            self.status_text = "Clustering...".to_owned();
+            self.processing.is_processing = true;
+            self.processing.progress = 0.0;
+            self.processing.status_text.clear();
+            self.processing.status_text.push_str("Clustering...");
 
             let tx = self.tx.clone();
             let algo_type = self.algo_type;
@@ -509,7 +286,8 @@ impl RustpixApp {
                     }
 
                     if total_hits > 0 && last_update.elapsed() > Duration::from_millis(200) {
-                        let progress = (processed_hits as f32 / total_hits as f32).min(0.95);
+                        let progress =
+                            (usize_to_f32(processed_hits) / usize_to_f32(total_hits)).min(0.95);
                         let _ = tx.send(AppMessage::ProcessingProgress(
                             progress,
                             format!("Processing... {:.0}%", progress * 100.0),
@@ -525,18 +303,17 @@ impl RustpixApp {
     } // Close run_processing
 
     fn generate_histogram(&self) -> egui::ColorImage {
-        let counts = match &self.hit_counts {
-            Some(c) => c,
-            None => return egui::ColorImage::new([512, 512], egui::Color32::BLACK),
+        let Some(counts) = &self.hit_counts else {
+            return egui::ColorImage::new([512, 512], egui::Color32::BLACK);
         };
 
         // Find max for scaling
-        let max_count = counts.iter().max().copied().unwrap_or(1) as f32;
+        let max_count = u32_to_f32(counts.iter().max().copied().unwrap_or(1));
         let mut pixels = Vec::with_capacity(512 * 512 * 4);
 
         for &count in counts {
-            let val = (count as f32 / max_count).sqrt(); // Sqrt scale
-            let v = (val * 255.0) as u8;
+            let val = (u32_to_f32(count) / max_count).sqrt(); // Sqrt scale
+            let v = f32_to_u8(val * 255.0);
             if count == 0 {
                 pixels.extend_from_slice(&[0, 0, 0, 255]);
             } else {
@@ -548,21 +325,21 @@ impl RustpixApp {
                         if val < 0.5 {
                             // Red to Yellow
                             let r = 255;
-                            let g = (val * 2.0 * 255.0) as u8;
+                            let g = f32_to_u8(val * 2.0 * 255.0);
                             pixels.extend_from_slice(&[r, g, 0, 255]);
                         } else {
                             // Yellow to White
                             let r = 255;
                             let g = 255;
-                            let b = ((val - 0.5) * 2.0 * 255.0) as u8;
+                            let b = f32_to_u8((val - 0.5) * 2.0 * 255.0);
                             pixels.extend_from_slice(&[r, g, b, 255]);
                         }
                     }
                     Colormap::Viridis => {
                         // Approximate Viridis (Blue -> Teal -> Green -> Yellow)
-                        let r = (255.0 * val.powf(2.0)) as u8;
-                        let g = (255.0 * val) as u8;
-                        let b = (255.0 * (1.0 - val)) as u8;
+                        let r = f32_to_u8(255.0 * val.powf(2.0));
+                        let g = f32_to_u8(255.0 * val);
+                        let b = f32_to_u8(255.0 * (1.0 - val));
                         pixels.extend_from_slice(&[r, g, b, 255]);
                     }
                 }
@@ -571,44 +348,36 @@ impl RustpixApp {
 
         egui::ColorImage::from_rgba_unmultiplied([512, 512], &pixels)
     }
-}
 
-impl eframe::App for RustpixApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                AppMessage::LoadProgress(p, s) => {
-                    self.progress = p;
-                    self.status_text = s;
+                AppMessage::LoadProgress(p, s) | AppMessage::ProcessingProgress(p, s) => {
+                    self.processing.progress = p;
+                    self.processing.status_text = s;
                 }
                 AppMessage::LoadComplete(batch, counts, hist, dur, _dbg) => {
-                    self.is_loading = false;
-                    self.progress = 1.0;
-                    self.status_text =
+                    self.processing.is_loading = false;
+                    self.processing.progress = 1.0;
+                    self.processing.status_text =
                         format!("Loaded {} hits in {:.2}s", batch.len(), dur.as_secs_f64());
 
                     self.hit_counts = Some(counts);
-                    self.tof_hist_full = Some(hist); // Cached full histogram
+                    self.tof_hist_full = Some(hist);
                     self.hit_batch = Some(*batch);
-                    // self.debug_info = dbg; // Removed
 
-                    // Generate texture
                     let img = self.generate_histogram();
                     self.texture =
                         Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
                 }
                 AppMessage::LoadError(e) => {
-                    self.is_loading = false;
-                    self.status_text = format!("Error: {}", e);
-                }
-                AppMessage::ProcessingProgress(p, s) => {
-                    self.progress = p;
-                    self.status_text = s;
+                    self.processing.is_loading = false;
+                    self.processing.status_text = format!("Error: {e}");
                 }
                 AppMessage::ProcessingComplete(neutrons, dur) => {
-                    self.is_processing = false;
-                    self.progress = 1.0;
-                    self.status_text = format!(
+                    self.processing.is_processing = false;
+                    self.processing.progress = 1.0;
+                    self.processing.status_text = format!(
                         "Found {} neutrons in {:.2}ms",
                         neutrons.len(),
                         dur.as_secs_f64() * 1000.0
@@ -616,128 +385,151 @@ impl eframe::App for RustpixApp {
                     self.neutrons = neutrons;
                 }
                 AppMessage::ProcessingError(e) => {
-                    self.is_processing = false;
-                    self.status_text = format!("Error: {}", e);
+                    self.processing.is_processing = false;
+                    self.processing.status_text = format!("Error: {e}");
                 }
             }
         }
+    }
 
+    fn render_side_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("ctrl").show(ctx, |ui| {
             ui.heading("Rustpix GUI");
             ui.separator();
 
-            if ui.button("Open File").clicked() && !self.is_loading {
-                if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
-                    self.load_file(path);
-                }
-            }
-            if let Some(p) = &self.selected_file {
-                ui.label(p.file_name().unwrap_or_default().to_string_lossy());
-            }
-
+            self.render_file_controls(ui);
             ui.separator();
 
-            if self.is_loading {
-                ui.add(egui::ProgressBar::new(self.progress).text(&self.status_text));
-            } else {
-                ui.label(&self.status_text);
-            }
-
+            self.render_status(ui);
             ui.separator();
 
-            if let Some((x, y, count)) = self.cursor_info {
-                ui.label(egui::RichText::new("Pixel Info:").strong());
-                ui.label(format!("X: {}\nY: {}\nHits: {}", x, y, count));
-            } else {
-                ui.label("Hover over image for details.");
-            }
-
+            self.render_cursor_info(ui);
             ui.separator();
 
-            ui.heading("Visualization");
-            egui::ComboBox::from_label("Color")
-                .selected_text(self.colormap.to_string())
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_value(&mut self.colormap, Colormap::Green, "Green")
-                        .clicked()
-                    {
-                        self.texture = None;
-                    }
-                    if ui
-                        .selectable_value(&mut self.colormap, Colormap::Hot, "Hot")
-                        .clicked()
-                    {
-                        self.texture = None;
-                    }
-                    if ui
-                        .selectable_value(&mut self.colormap, Colormap::Grayscale, "Gray")
-                        .clicked()
-                    {
-                        self.texture = None;
-                    }
-                    if ui
-                        .selectable_value(&mut self.colormap, Colormap::Viridis, "Viridis")
-                        .clicked()
-                    {
-                        self.texture = None;
-                    }
-                });
-            if self.texture.is_none() && self.hit_counts.is_some() {
-                let img = self.generate_histogram();
-                self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
-            }
-
-            ui.toggle_value(&mut self.show_histogram, "Show TOF Histogram");
-
+            self.render_visualization_controls(ctx, ui);
             ui.separator();
 
-            ui.heading("Processing");
-            // ... same processing UI ...
-            ui.add(
-                egui::DragValue::new(&mut self.tdc_frequency)
-                    .speed(0.1)
-                    .range(1.0..=120.0)
-                    .prefix("TDC (Hz): "),
-            );
-
-            egui::ComboBox::from_label("Algo")
-                .selected_text(self.algo_type.to_string())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.algo_type, AlgorithmType::Grid, "Grid");
-                    ui.selectable_value(&mut self.algo_type, AlgorithmType::Abs, "ABS");
-                    ui.selectable_value(&mut self.algo_type, AlgorithmType::Dbscan, "DBSCAN");
-                });
-
-            ui.add(egui::Slider::new(&mut self.radius, 1.0..=50.0).text("Radius"));
-            ui.add(
-                egui::Slider::new(&mut self.temporal_window_ns, 10.0..=500.0)
-                    .text("Time Window (ns)"),
-            );
-            ui.add(egui::Slider::new(&mut self.min_cluster_size, 1..=10).text("Min Cluster"));
-
-            if self.algo_type == AlgorithmType::Dbscan {
-                ui.add(egui::Slider::new(&mut self.dbscan_min_points, 1..=10).text("Min Points"));
-            }
-
-            if ui
-                .add_enabled(
-                    !self.is_processing && self.hit_batch.is_some(),
-                    egui::Button::new("Run Clustering"),
-                )
-                .clicked()
-            {
-                self.run_processing();
-            }
-
-            if self.is_processing {
-                ui.add(egui::ProgressBar::new(self.progress).text(&self.status_text));
-            }
-
+            self.render_processing_controls(ui);
             ui.separator();
-            ui.label(format!("Neutrons: {}", self.neutrons.len()));
+
+            let neutron_count = self.neutrons.len();
+            ui.label(format!("Neutrons: {neutron_count}"));
         });
+    }
 
+    fn render_file_controls(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Open File").clicked() && !self.processing.is_loading {
+            if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
+                self.load_file(path);
+            }
+        }
+        if let Some(p) = &self.selected_file {
+            ui.label(p.file_name().unwrap_or_default().to_string_lossy());
+        }
+    }
+
+    fn render_status(&self, ui: &mut egui::Ui) {
+        if self.processing.is_loading {
+            ui.add(
+                egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
+            );
+        } else {
+            ui.label(&self.processing.status_text);
+        }
+    }
+
+    fn render_cursor_info(&self, ui: &mut egui::Ui) {
+        if let Some((x, y, count)) = self.cursor_info {
+            ui.label(egui::RichText::new("Pixel Info:").strong());
+            ui.label(format!("X: {x}\nY: {y}\nHits: {count}"));
+        } else {
+            ui.label("Hover over image for details.");
+        }
+    }
+
+    fn render_visualization_controls(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.heading("Visualization");
+        egui::ComboBox::from_label("Color")
+            .selected_text(self.colormap.to_string())
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Green, "Green")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Hot, "Hot")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Grayscale, "Gray")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Viridis, "Viridis")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+            });
+        if self.texture.is_none() && self.hit_counts.is_some() {
+            let img = self.generate_histogram();
+            self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
+        }
+
+        ui.toggle_value(&mut self.ui_state.show_histogram, "Show TOF Histogram");
+    }
+
+    fn render_processing_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Processing");
+        ui.add(
+            egui::DragValue::new(&mut self.tdc_frequency)
+                .speed(0.1)
+                .range(1.0..=120.0)
+                .prefix("TDC (Hz): "),
+        );
+
+        egui::ComboBox::from_label("Algo")
+            .selected_text(self.algo_type.to_string())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.algo_type, AlgorithmType::Grid, "Grid");
+                ui.selectable_value(&mut self.algo_type, AlgorithmType::Abs, "ABS");
+                ui.selectable_value(&mut self.algo_type, AlgorithmType::Dbscan, "DBSCAN");
+            });
+
+        ui.add(egui::Slider::new(&mut self.radius, 1.0..=50.0).text("Radius"));
+        ui.add(
+            egui::Slider::new(&mut self.temporal_window_ns, 10.0..=500.0).text("Time Window (ns)"),
+        );
+        ui.add(egui::Slider::new(&mut self.min_cluster_size, 1..=10).text("Min Cluster"));
+
+        if self.algo_type == AlgorithmType::Dbscan {
+            ui.add(egui::Slider::new(&mut self.dbscan_min_points, 1..=10).text("Min Points"));
+        }
+
+        if ui
+            .add_enabled(
+                !self.processing.is_processing && self.hit_batch.is_some(),
+                egui::Button::new("Run Clustering"),
+            )
+            .clicked()
+        {
+            self.run_processing();
+        }
+
+        if self.processing.is_processing {
+            ui.add(
+                egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
+            );
+        }
+    }
+
+    fn render_central_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(tex) = &self.texture {
                 Plot::new("plot").data_aspect(1.0).show(ui, |plot_ui| {
@@ -747,13 +539,16 @@ impl eframe::App for RustpixApp {
                         [512.0, 512.0],
                     ));
 
-                    // Update Cursor Information
                     if let Some(curr) = plot_ui.pointer_coordinate() {
                         let x = curr.x;
                         let y = curr.y;
                         if x >= 0.0 && y >= 0.0 && x < 512.0 && y < 512.0 {
-                            let xi = x as usize;
-                            let yi = y as usize;
+                            let (Some(xi), Some(yi)) =
+                                (f64_to_usize_bounded(x, 512), f64_to_usize_bounded(y, 512))
+                            else {
+                                self.cursor_info = None;
+                                return;
+                            };
                             let count = if let Some(counts) = &self.hit_counts {
                                 counts[yi * 512 + xi]
                             } else {
@@ -771,75 +566,364 @@ impl eframe::App for RustpixApp {
                 ui.centered_and_justified(|ui| ui.label("No Data"));
             }
         });
+    }
 
-        if self.show_histogram {
-            egui::Window::new("TOF Histogram").show(ctx, |ui| {
-                // Use pre-computed histogram ONLY. No heavy calculation here.
-                // Use pre-computed histogram ONLY. No heavy calculation here.
-                if let Some(full) = &self.tof_hist_full {
-                    // Recompute conversion for display
-                    let tdc_period = 1.0 / self.tdc_frequency; // s
-                    let max_us = tdc_period * 1e6; // microseconds
-                                                   // max_ticks removed
-                    let n_bins = full.len();
-                    let bin_width_us = max_us / n_bins as f64;
-                    // bin_width_ticks removed
-
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.log_plot, "Log Scale");
-                        ui.label(format!(
-                            "Range: 0 - {:.0} µs ({:.1} Hz)",
-                            max_us, self.tdc_frequency
-                        ));
-                    });
-
-                    Plot::new("tof_hist")
-                        .x_axis_label("Time-of-Flight (µs)")
-                        .y_axis_label(if self.log_plot {
-                            "Log10(Counts)"
-                        } else {
-                            "Counts"
-                        })
-                        .include_x(0.0)
-                        .include_x(max_us)
-                        .include_y(0.0) // Start Y at 0
-                        .show(ui, |plot_ui: &mut egui_plot::PlotUi| {
-                            // Plot full (Blue)
-                            let bars: Vec<Bar> = full
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &c)| {
-                                    // Scale x to microseconds
-                                    let x = i as f64 * bin_width_us;
-
-                                    // Manual log adjustment
-                                    // For log plot, we take log10(c). If c=0, use 0.
-                                    let val = if self.log_plot {
-                                        if c > 0 {
-                                            (c as f64).log10()
-                                        } else {
-                                            0.0
-                                        }
-                                    } else {
-                                        c as f64
-                                    };
-
-                                    Bar::new(x, val)
-                                        .width(bin_width_us)
-                                        .fill(egui::Color32::BLUE)
-                                })
-                                .collect();
-                            plot_ui.bar_chart(BarChart::new(bars).name("Full"));
-                        });
-
-                    // ui.label(...) moved to top
-                } else {
-                    ui.label("No Data");
-                }
-            });
+    fn render_histogram_window(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.show_histogram {
+            return;
         }
 
-        if self.is_loading || self.is_processing {
+        egui::Window::new("TOF Histogram").show(ctx, |ui| {
+            if let Some(full) = &self.tof_hist_full {
+                let tdc_period = 1.0 / self.tdc_frequency; // s
+                let max_us = tdc_period * 1e6; // microseconds
+                let n_bins = full.len();
+                let bin_width_us = max_us / usize_to_f64(n_bins);
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.ui_state.log_plot, "Log Scale");
+                    ui.label(format!(
+                        "Range: 0 - {:.0} µs ({:.1} Hz)",
+                        max_us, self.tdc_frequency
+                    ));
+                });
+
+                Plot::new("tof_hist")
+                    .x_axis_label("Time-of-Flight (µs)")
+                    .y_axis_label(if self.ui_state.log_plot {
+                        "Log10(Counts)"
+                    } else {
+                        "Counts"
+                    })
+                    .include_x(0.0)
+                    .include_x(max_us)
+                    .include_y(0.0)
+                    .show(ui, |plot_ui: &mut egui_plot::PlotUi| {
+                        let bars: Vec<Bar> = full
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &c)| {
+                                let x = usize_to_f64(i) * bin_width_us;
+                                let val = if self.ui_state.log_plot {
+                                    if c > 0 {
+                                        u64_to_f64(c).log10()
+                                    } else {
+                                        0.0
+                                    }
+                                } else {
+                                    u64_to_f64(c)
+                                };
+
+                                Bar::new(x, val)
+                                    .width(bin_width_us)
+                                    .fill(egui::Color32::BLUE)
+                            })
+                            .collect();
+                        plot_ui.bar_chart(BarChart::new(bars).name("Full"));
+                    });
+            } else {
+                ui.label("No Data");
+            }
+        });
+    }
+}
+
+fn load_file_worker(path: &Path, tx: &Sender<AppMessage>, tdc_frequency: f64) {
+    let start = Instant::now();
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tx.send(AppMessage::LoadError(e.to_string()));
+            return;
+        }
+    };
+
+    // SAFETY: The file is opened read-only and we assume it is not modified concurrently.
+    #[allow(unsafe_code)]
+    let mmap = unsafe {
+        match memmap2::Mmap::map(&file) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = tx.send(AppMessage::LoadError(e.to_string()));
+                return;
+            }
+        }
+    };
+
+    let _ = tx.send(AppMessage::LoadProgress(
+        0.1,
+        "Scanning sections...".to_string(),
+    ));
+
+    let io_sections = scan_sections_with_progress(&mmap, tx);
+    let total_sections = io_sections.len();
+    let _ = tx.send(AppMessage::LoadProgress(
+        0.15,
+        format!("Found {total_sections} sections. Prescanning TDCs..."),
+    ));
+
+    let tpx_sections = build_tpx_sections(&mmap, io_sections);
+
+    let mut det_config = DetectorConfig::venus_defaults();
+    det_config.tdc_frequency_hz = tdc_frequency;
+    let tdc_correction = det_config.tdc_correction_25ns();
+    let debug_str = build_debug_info(&mmap, &tpx_sections, tdc_correction);
+
+    let _ = tx.send(AppMessage::LoadProgress(
+        0.25,
+        "Processing hits...".to_string(),
+    ));
+
+    let full_batch =
+        process_sections_to_batch(&mmap, &tpx_sections, &det_config, tdc_correction, tx);
+
+    let _ = tx.send(AppMessage::LoadProgress(
+        0.95,
+        "Generating visualization data...".to_string(),
+    ));
+    let (counts, hist) = compute_counts_and_hist(&full_batch, tdc_correction);
+
+    let _ = tx.send(AppMessage::LoadComplete(
+        Box::new(full_batch),
+        counts,
+        hist,
+        start.elapsed(),
+        debug_str,
+    ));
+}
+
+fn scan_sections_with_progress(
+    mmap: &memmap2::Mmap,
+    tx: &Sender<AppMessage>,
+) -> Vec<rustpix_io::scanner::Section> {
+    let mut io_sections = Vec::new();
+    let mut offset = 0;
+    let chunk_size = 50 * 1024 * 1024; // 50MB chunks
+    let total_bytes = mmap.len().max(1);
+
+    while offset < total_bytes {
+        let end = (offset + chunk_size).min(total_bytes);
+        let is_eof = end == total_bytes;
+        let data = &mmap[offset..end];
+
+        let (sections, consumed) = PacketScanner::scan_sections(data, is_eof);
+        for mut section in sections {
+            section.start_offset += offset;
+            section.end_offset += offset;
+            io_sections.push(section);
+        }
+
+        offset = offset.saturating_add(consumed);
+
+        let ratio = usize_to_f32(offset) / usize_to_f32(total_bytes);
+        let _ = tx.send(AppMessage::LoadProgress(
+            0.15 * ratio,
+            format!("Scanning sections... {:.0}%", ratio * 100.0),
+        ));
+
+        if consumed == 0 && !is_eof {
+            offset = offset.saturating_add(chunk_size);
+        }
+    }
+
+    io_sections
+}
+
+fn build_tpx_sections(
+    mmap: &memmap2::Mmap,
+    io_sections: Vec<rustpix_io::scanner::Section>,
+) -> Vec<Tpx3Section> {
+    let mut tpx_sections = Vec::with_capacity(io_sections.len());
+    let mut chip_tdc_state = [None; 256];
+
+    for section in io_sections {
+        let initial = chip_tdc_state[usize::from(section.chip_id)];
+        let mut rules = Tpx3Section {
+            start_offset: section.start_offset,
+            end_offset: section.end_offset,
+            chip_id: section.chip_id,
+            initial_tdc: initial,
+            final_tdc: None,
+        };
+
+        if let Some(final_t) = scan_section_tdc(mmap, &rules) {
+            rules.final_tdc = Some(final_t);
+            chip_tdc_state[usize::from(section.chip_id)] = Some(final_t);
+        }
+
+        tpx_sections.push(rules);
+    }
+
+    tpx_sections
+}
+
+fn build_debug_info(mmap: &memmap2::Mmap, sections: &[Tpx3Section], tdc_correction: u32) -> String {
+    let mut debug_str = String::new();
+    let _ = writeln!(debug_str, "TDC Correction (25ns): {tdc_correction}");
+
+    if let Some(sec) = sections.iter().find(|s| s.initial_tdc.is_some()) {
+        if let Some(tdc) = sec.initial_tdc {
+            let _ = writeln!(debug_str, "Sec TDC Ref: {tdc}");
+            let sdata = &mmap[sec.start_offset..sec.end_offset];
+            let mut found = false;
+            for ch in sdata.chunks_exact(8) {
+                let raw = u64::from_le_bytes(ch.try_into().unwrap());
+                let packet = rustpix_tpx::Tpx3Packet::new(raw);
+                if packet.is_hit() {
+                    let raw_ts = packet.timestamp_coarse();
+                    let ts = rustpix_tpx::correct_timestamp_rollover(raw_ts, tdc);
+                    let raw_tof = ts.wrapping_sub(tdc);
+                    let tof = rustpix_tpx::calculate_tof(ts, tdc, tdc_correction);
+                    let _ = writeln!(
+                        debug_str,
+                        "Sample Hit:\n  RawTS: {raw_ts}\n  CorrTS: {ts}\n  RawDelta: {raw_tof}\n  CalcTOF: {tof}"
+                    );
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                let _ = writeln!(debug_str, "Section has no hits.");
+            }
+        }
+    } else {
+        let _ = writeln!(debug_str, "No sections with valid Initial TDC found.");
+    }
+
+    debug_str
+}
+
+fn process_sections_to_batch(
+    mmap: &memmap2::Mmap,
+    sections: &[Tpx3Section],
+    det_config: &DetectorConfig,
+    tdc_correction: u32,
+    tx: &Sender<AppMessage>,
+) -> HitBatch {
+    let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
+    let mut full_batch = HitBatch::with_capacity(num_packets);
+
+    let chunk_size = 100;
+    let chunks: Vec<_> = sections.chunks(chunk_size).collect();
+    let total_chunks = chunks.len().max(1);
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let batches: Vec<HitBatch> = chunk
+            .par_iter()
+            .map(|sec| {
+                let mut b = HitBatch::with_capacity(sec.packet_count());
+                let dc = det_config.clone();
+                let transform = move |cid, x, y| dc.map_chip_to_global(cid, x, y);
+                process_section_into_batch(mmap, sec, tdc_correction, transform, &mut b);
+                b
+            })
+            .collect();
+
+        for b in batches {
+            full_batch.append(&b);
+        }
+
+        let progress = 0.25 + 0.75 * (usize_to_f32(i) / usize_to_f32(total_chunks));
+        let _ = tx.send(AppMessage::LoadProgress(
+            progress,
+            format!("Processed {}/{} hits...", full_batch.len(), num_packets),
+        ));
+    }
+
+    full_batch
+}
+
+fn compute_counts_and_hist(batch: &HitBatch, tdc_correction: u32) -> (Vec<u32>, Vec<u64>) {
+    let mut counts = vec![0u32; 512 * 512];
+    for i in 0..batch.len() {
+        let x = usize::from(batch.x[i]);
+        let y = usize::from(batch.y[i]);
+        if x < 512 && y < 512 {
+            counts[y * 512 + x] += 1;
+        }
+    }
+
+    let n_bins = 200;
+    let mut hist = vec![0u64; n_bins];
+    let hist_max = u32_to_f64(tdc_correction);
+    let bin_width = hist_max / usize_to_f64(n_bins);
+
+    if bin_width > 0.0 {
+        for &t in &batch.tof {
+            let val = u32_to_f64(t);
+            if val < hist_max {
+                if let Some(bin) = f64_to_usize_bounded(val / bin_width, n_bins) {
+                    hist[bin] += 1;
+                }
+            }
+        }
+    }
+
+    (counts, hist)
+}
+
+fn usize_to_f32(value: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        value as f32
+    }
+}
+
+fn usize_to_f64(value: usize) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        value as f64
+    }
+}
+
+fn u32_to_f32(value: u32) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        value as f32
+    }
+}
+
+fn u32_to_f64(value: u32) -> f64 {
+    f64::from(value)
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        value as f64
+    }
+}
+
+fn f32_to_u8(value: f32) -> u8 {
+    let clamped = value.clamp(0.0, 255.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        clamped.round() as u8
+    }
+}
+
+fn f64_to_usize_bounded(value: f64, max_exclusive: usize) -> Option<usize> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let max_f64 = usize_to_f64(max_exclusive);
+    if value >= max_f64 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        Some(value as usize)
+    }
+}
+
+impl eframe::App for RustpixApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_messages(ctx);
+        self.render_side_panel(ctx);
+        self.render_central_panel(ctx);
+        self.render_histogram_window(ctx);
+
+        if self.processing.is_loading || self.processing.is_processing {
             ctx.request_repaint();
         }
     }

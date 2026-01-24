@@ -1,16 +1,9 @@
 //! Memory-mapped file readers.
-#![allow(
-    clippy::return_self_not_must_use,
-    clippy::must_use_candidate,
-    clippy::missing_errors_doc,
-    clippy::items_after_statements,
-    clippy::missing_panics_doc,
-    unsafe_code
-)]
 //!
 
 use crate::{Error, Result};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use rustpix_core::soa::HitBatch;
 use rustpix_tpx::ordering::TimeOrderedStream;
 use rustpix_tpx::section::{discover_sections, process_section_into_batch};
@@ -30,10 +23,14 @@ pub struct MappedFileReader {
 
 impl MappedFileReader {
     /// Opens a file for memory-mapped reading.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be opened or memory-mapped.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(&path)?;
         // SAFETY: The file is opened read-only and we assume it is not modified concurrently.
         // This is the standard safety contract for memory mapping.
+        #[allow(unsafe_code)]
         let mmap = unsafe { Mmap::map(&file)? };
         Ok(Self {
             mmap: Arc::new(mmap),
@@ -42,16 +39,19 @@ impl MappedFileReader {
     }
 
     /// Returns the file contents as a byte slice.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.mmap[..]
     }
 
     /// Returns the file size in bytes.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.mmap.len()
     }
 
     /// Returns true if the file is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.mmap.is_empty()
     }
@@ -92,6 +92,9 @@ pub struct Tpx3FileReader {
 
 impl Tpx3FileReader {
     /// Opens a TPX3 file for reading with default configuration.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be opened or memory-mapped.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let reader = MappedFileReader::open(path)?;
         Ok(Self {
@@ -101,22 +104,28 @@ impl Tpx3FileReader {
     }
 
     /// Sets the detector configuration.
+    #[must_use]
     pub fn with_config(mut self, config: DetectorConfig) -> Self {
         self.config = config;
         self
     }
 
     /// Returns the file size in bytes.
+    #[must_use]
     pub fn file_size(&self) -> usize {
         self.reader.len()
     }
 
     /// Returns the number of 8-byte packets in the file.
+    #[must_use]
     pub fn packet_count(&self) -> usize {
         self.reader.len() / 8
     }
 
     /// Reads and parses all hits from the file into a `HitBatch` (`SoA`).
+    ///
+    /// # Errors
+    /// Returns an error if the file size is invalid or the data cannot be parsed.
     pub fn read_batch(&self) -> Result<HitBatch> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
@@ -134,8 +143,6 @@ impl Tpx3FileReader {
         // Phase 2: Process sections
         let tdc_correction = self.config.tdc_correction_25ns();
         let config = &self.config;
-
-        use rayon::prelude::*;
 
         let mut section_batches: Vec<HitBatch> = sections
             .par_iter()
@@ -168,6 +175,9 @@ impl Tpx3FileReader {
     ///
     /// This uses a pulse-based K-way merge to produce time-ordered hits
     /// without loading the entire file or performing a global sort.
+    ///
+    /// # Errors
+    /// Returns an error if the file size is invalid.
     pub fn read_batch_time_ordered(&self) -> Result<HitBatch> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
@@ -189,6 +199,9 @@ impl Tpx3FileReader {
     }
 
     /// Returns a time-ordered stream of hit batches (pulse-merged).
+    ///
+    /// # Errors
+    /// Returns an error if the file size is invalid.
     pub fn stream_time_ordered(&self) -> Result<TimeOrderedHitStream> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
@@ -208,6 +221,10 @@ impl Tpx3FileReader {
     }
 
     /// Returns an iterator over raw packets.
+    ///
+    /// # Panics
+    /// Panics if a chunk is not exactly 8 bytes. This should be unreachable because
+    /// `chunks_exact(8)` guarantees each chunk length.
     pub fn iter_packets(&self) -> impl Iterator<Item = Tpx3Packet> + '_ {
         self.reader.as_bytes().chunks_exact(8).map(|chunk| {
             let bytes: [u8; 8] = chunk.try_into().unwrap();

@@ -1,5 +1,4 @@
 //! Efficient time-ordering of hits using a K-way merge strategy.
-#![allow(clippy::missing_panics_doc)]
 //!
 //! # Problem
 //! TPX3 data comes in "sections" (chunks) per chip. Packets within a chip are
@@ -38,7 +37,7 @@ impl PulseBatch {
     #[inline]
     #[must_use]
     pub fn extended_tdc(&self) -> u64 {
-        (self.tdc_epoch << 30) | self.tdc_timestamp as u64
+        (self.tdc_epoch << 30) | u64::from(self.tdc_timestamp)
     }
 }
 
@@ -67,7 +66,7 @@ impl Ord for PulseBatch {
     }
 }
 
-/// Reads a stream of sections for a single chip and yields sorted PulseBatches.
+/// Reads a stream of sections for a single chip and yields sorted `PulseBatch` values.
 ///
 /// Implements a 1-pulse lookahead to handle "late hits" and independent timestamp rollovers.
 pub struct PulseReader<D>
@@ -140,11 +139,12 @@ where
 
             while self.packet_idx < num_packets {
                 let offset = self.packet_idx * PACKET_SIZE;
-                let raw = u64::from_le_bytes(
-                    section_data[offset..offset + PACKET_SIZE]
-                        .try_into()
-                        .unwrap(),
-                );
+                let Some(packet_bytes) = section_data.get(offset..offset + PACKET_SIZE) else {
+                    break;
+                };
+                let mut bytes = [0u8; PACKET_SIZE];
+                bytes.copy_from_slice(packet_bytes);
+                let raw = u64::from_le_bytes(bytes);
                 let packet = Tpx3Packet::new(raw);
                 self.packet_idx += 1;
 
@@ -241,7 +241,7 @@ where
                                 // Definitely prev
                                 // Calculate correct TOF relative to prev
                                 let tof = calculate_tof(ts_prev, prev_tdc, self.tdc_correction);
-                                prev.hits.push(gx, gy, tof, tot, ts_prev, chip);
+                                prev.hits.push((gx, gy, tof, tot, ts_prev, chip));
                                 assigned_to_prev = true;
                             } else {
                                 // It is >= curr_tdc.
@@ -267,7 +267,7 @@ where
                         if let Some(curr_tdc) = self.curr_tdc {
                             let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
                             let tof = calculate_tof(ts_curr, curr_tdc, self.tdc_correction);
-                            self.curr_batch.push(gx, gy, tof, tot, ts_curr, chip);
+                            self.curr_batch.push((gx, gy, tof, tot, ts_curr, chip));
                         }
                     }
                 }
@@ -372,7 +372,9 @@ where
 
                 while let Some(batch) = self.heap.peek() {
                     if batch.extended_tdc() == min_tdc {
-                        let batch = self.heap.pop().unwrap();
+                        let Some(batch) = self.heap.pop() else {
+                            break;
+                        };
 
                         // Replenish from the corresponding reader
                         if let Some(reader) = self

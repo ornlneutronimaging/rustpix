@@ -1,17 +1,6 @@
 //! SoA-based Grid Clustering.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_lossless,
-    clippy::cast_sign_loss,
-    clippy::doc_markdown,
-    clippy::must_use_candidate,
-    clippy::missing_errors_doc,
-    clippy::too_many_lines,
-    clippy::items_after_statements
-)]
 //!
-//! Adapted from generic GridClustering to work directly on HitBatch (SoA).
+//! Adapted from generic `GridClustering` to work directly on `HitBatch` (`SoA`).
 
 use crate::SpatialGrid;
 use rustpix_core::clustering::ClusteringError;
@@ -55,8 +44,15 @@ pub struct GridClustering {
     config: GridConfig,
 }
 
+struct GridUnionContext {
+    radius_sq: f64,
+    window_tof: u32,
+    cell_size: i32,
+}
+
 impl GridClustering {
     /// Create with custom configuration.
+    #[must_use]
     pub fn new(config: GridConfig) -> Self {
         Self { config }
     }
@@ -64,6 +60,9 @@ impl GridClustering {
     /// Cluster a batch of hits in-place.
     ///
     /// Updates `cluster_id` field in `batch`.
+    ///
+    /// # Errors
+    /// Returns an error if clustering fails.
     pub fn cluster(
         &self,
         batch: &mut HitBatch,
@@ -74,160 +73,214 @@ impl GridClustering {
         }
 
         let n = batch.len();
+        let GridState {
+            hits_processed,
+            clusters_found,
+            grid,
+            parent,
+            rank,
+            roots,
+            cluster_sizes,
+            root_to_label,
+        } = state;
 
-        // Reset state
-        state.hits_processed = 0;
-        state.clusters_found = 0;
-
-        // Initialize labels to -1
+        *hits_processed = 0;
+        *clusters_found = 0;
         batch.cluster_id.fill(-1);
 
-        // Build spatial index (reuse allocations via state)
-        let mut max_x = 0;
-        let mut max_y = 0;
-        for i in 0..n {
-            let x = batch.x[i];
-            let y = batch.y[i];
-            if (x as usize) > max_x {
-                max_x = x as usize;
-            }
-            if (y as usize) > max_y {
-                max_y = y as usize;
+        let (width, height) = Self::batch_dimensions(batch);
+        Self::init_union_find(parent, rank, roots, cluster_sizes, root_to_label, n);
+
+        let grid = Self::prepare_grid(grid, self.config.cell_size, width, height);
+        Self::fill_grid(grid, batch);
+
+        let union_ctx = GridUnionContext {
+            radius_sq: self.config.radius * self.config.radius,
+            window_tof: float_to_u32((self.config.temporal_window_ns / 25.0).ceil()),
+            cell_size: i32::try_from(self.config.cell_size).unwrap_or(i32::MAX),
+        };
+
+        Self::union_hits(batch, grid, parent, rank, n, &union_ctx);
+
+        let clusters = Self::assign_labels(
+            batch,
+            parent,
+            roots,
+            cluster_sizes,
+            root_to_label,
+            n,
+            usize::from(self.config.min_cluster_size),
+        );
+
+        *hits_processed = n;
+        *clusters_found = clusters;
+        Ok(clusters)
+    }
+}
+
+fn find(parent: &mut [usize], i: usize) -> usize {
+    let mut root = i;
+    while root != parent[root] {
+        root = parent[root];
+    }
+    let mut curr = i;
+    while curr != root {
+        let next = parent[curr];
+        parent[curr] = root;
+        curr = next;
+    }
+    root
+}
+
+fn union_sets(parent: &mut [usize], rank: &mut [usize], i: usize, j: usize) {
+    let root_i = find(parent, i);
+    let root_j = find(parent, j);
+    if root_i != root_j {
+        if rank[root_i] < rank[root_j] {
+            parent[root_i] = root_j;
+        } else {
+            parent[root_j] = root_i;
+            if rank[root_i] == rank[root_j] {
+                rank[root_i] += 1;
             }
         }
+    }
+}
 
-        let width = max_x + 32;
-        let height = max_y + 32;
+impl GridClustering {
+    fn batch_dimensions(batch: &HitBatch) -> (usize, usize) {
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+        for i in 0..batch.len() {
+            let x = usize::from(batch.x[i]);
+            let y = usize::from(batch.y[i]);
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+        (max_x + 32, max_y + 32)
+    }
 
-        let grid = state
-            .grid
-            .get_or_insert_with(|| SpatialGrid::new(self.config.cell_size, width, height));
-
-        if grid.cell_size() == self.config.cell_size {
+    fn prepare_grid(
+        grid_slot: &mut Option<SpatialGrid<usize>>,
+        cell_size: usize,
+        width: usize,
+        height: usize,
+    ) -> &mut SpatialGrid<usize> {
+        let grid = grid_slot.get_or_insert_with(|| SpatialGrid::new(cell_size, width, height));
+        if grid.cell_size() == cell_size {
             grid.ensure_dimensions(width, height);
             grid.clear();
         } else {
-            *grid = SpatialGrid::new(self.config.cell_size, width, height);
+            *grid = SpatialGrid::new(cell_size, width, height);
         }
+        grid
+    }
 
+    fn fill_grid(grid: &mut SpatialGrid<usize>, batch: &HitBatch) {
+        for i in 0..batch.len() {
+            grid.insert(i32::from(batch.x[i]), i32::from(batch.y[i]), i);
+        }
+    }
+
+    fn init_union_find(
+        parent: &mut Vec<usize>,
+        rank: &mut Vec<usize>,
+        roots: &mut Vec<usize>,
+        cluster_sizes: &mut Vec<usize>,
+        root_to_label: &mut Vec<i32>,
+        n: usize,
+    ) {
+        if parent.len() < n {
+            parent.resize(n, 0);
+        }
+        if rank.len() < n {
+            rank.resize(n, 0);
+        }
+        if roots.len() < n {
+            roots.resize(n, 0);
+        }
+        if cluster_sizes.len() < n {
+            cluster_sizes.resize(n, 0);
+        }
+        if root_to_label.len() < n {
+            root_to_label.resize(n, -1);
+        }
         for i in 0..n {
-            grid.insert(batch.x[i] as i32, batch.y[i] as i32, i);
+            parent[i] = i;
+            rank[i] = 0;
         }
+    }
 
-        // Union-Find structure (reuse allocations)
-        if state.parent.len() < n {
-            state.parent.resize(n, 0);
-        }
-        if state.rank.len() < n {
-            state.rank.resize(n, 0);
-        }
-        if state.roots.len() < n {
-            state.roots.resize(n, 0);
-        }
-        if state.cluster_sizes.len() < n {
-            state.cluster_sizes.resize(n, 0);
-        }
-        if state.root_to_label.len() < n {
-            state.root_to_label.resize(n, -1);
-        }
-
+    fn union_hits(
+        batch: &HitBatch,
+        grid: &SpatialGrid<usize>,
+        parent: &mut [usize],
+        rank: &mut [usize],
+        n: usize,
+        ctx: &GridUnionContext,
+    ) {
         for i in 0..n {
-            state.parent[i] = i;
-            state.rank[i] = 0;
-        }
-
-        let radius_sq = self.config.radius * self.config.radius;
-        let window_tof = (self.config.temporal_window_ns / 25.0).ceil() as u32;
-        let cell_size = self.config.cell_size as i32;
-
-        // Union-Find Operations
-        fn find(parent: &mut [usize], i: usize) -> usize {
-            let mut root = i;
-            while root != parent[root] {
-                root = parent[root];
-            }
-            let mut curr = i;
-            while curr != root {
-                let next = parent[curr];
-                parent[curr] = root;
-                curr = next;
-            }
-            root
-        }
-
-        fn union_sets(parent: &mut [usize], rank: &mut [usize], i: usize, j: usize) {
-            let root_i = find(parent, i);
-            let root_j = find(parent, j);
-            if root_i != root_j {
-                if rank[root_i] < rank[root_j] {
-                    parent[root_i] = root_j;
-                } else {
-                    parent[root_j] = root_i;
-                    if rank[root_i] == rank[root_j] {
-                        rank[root_i] += 1;
-                    }
-                }
-            }
-        }
-
-        // Direct Sequential Clustering (Memory Efficient)
-        // We iterate hits and merge with neighbors immediately.
-        // This avoids allocating a massive edge list (which causes OOM/Swap on large data).
-        for i in 0..n {
-            let x = batch.x[i] as i32;
-            let y = batch.y[i] as i32;
+            let x = i32::from(batch.x[i]);
+            let y = i32::from(batch.y[i]);
 
             for dy in -1..=1 {
                 for dx in -1..=1 {
-                    let px = x + dx * cell_size;
-                    let py = y + dy * cell_size;
+                    let px = x + dx * ctx.cell_size;
+                    let py = y + dy * ctx.cell_size;
 
                     if let Some(cell) = grid.get_cell_slice(px, py) {
-                        // Only check neighbors with index > i (to avoid double checking and self-loop)
-                        // Assuming cell indices are sorted because we inserted them in order 0..n
                         let start = cell.partition_point(|&idx| idx <= i);
 
                         for &j in &cell[start..] {
-                            // Temporal Pruning: valid because input is TOF-sorted
                             let dt = batch.tof[j].wrapping_sub(batch.tof[i]);
-                            if dt > window_tof {
+                            if dt > ctx.window_tof {
                                 break;
                             }
 
-                            // Inline spatial check
-                            let dx = batch.x[i] as f64 - batch.x[j] as f64;
-                            let dy = batch.y[i] as f64 - batch.y[j] as f64;
+                            let dx = f64::from(batch.x[i]) - f64::from(batch.x[j]);
+                            let dy = f64::from(batch.y[i]) - f64::from(batch.y[j]);
                             let dist_sq = dx * dx + dy * dy;
 
-                            if dist_sq <= radius_sq {
-                                union_sets(&mut state.parent, &mut state.rank, i, j);
+                            if dist_sq <= ctx.radius_sq {
+                                union_sets(parent, rank, i, j);
                             }
                         }
                     }
                 }
             }
         }
+    }
 
-        // Count cluster sizes
-        state.cluster_sizes[..n].fill(0);
-        for i in 0..n {
-            let root = find(&mut state.parent, i);
-            state.roots[i] = root;
-            state.cluster_sizes[root] += 1;
+    fn assign_labels(
+        batch: &mut HitBatch,
+        parent: &mut [usize],
+        roots: &mut [usize],
+        cluster_sizes: &mut [usize],
+        root_to_label: &mut [i32],
+        n: usize,
+        min_cluster_size: usize,
+    ) -> usize {
+        cluster_sizes[..n].fill(0);
+        for (i, root_slot) in roots.iter_mut().enumerate().take(n) {
+            let root = find(parent, i);
+            *root_slot = root;
+            cluster_sizes[root] += 1;
         }
 
-        // Assign cluster labels
-        state.root_to_label[..n].fill(-1);
+        root_to_label[..n].fill(-1);
         let mut next_label = 0;
 
-        for i in 0..n {
-            let root = state.roots[i];
-            let size = state.cluster_sizes[root];
+        for (i, &root) in roots.iter().enumerate().take(n) {
+            let size = cluster_sizes[root];
 
-            if size < self.config.min_cluster_size as usize {
+            if size < min_cluster_size {
                 batch.cluster_id[i] = -1;
             } else {
-                let label_slot = &mut state.root_to_label[root];
+                let label_slot = &mut root_to_label[root];
                 if *label_slot < 0 {
                     *label_slot = next_label;
                     next_label += 1;
@@ -236,11 +289,18 @@ impl GridClustering {
             }
         }
 
-        state.hits_processed = n;
-        state.clusters_found = next_label as usize;
-
-        Ok(state.clusters_found)
+        usize::try_from(next_label).unwrap_or(0)
     }
+}
+
+fn float_to_u32(value: f64) -> u32 {
+    if value <= 0.0 {
+        return 0;
+    }
+    if value >= f64::from(u32::MAX) {
+        return u32::MAX;
+    }
+    format!("{value:.0}").parse::<u32>().unwrap_or(u32::MAX)
 }
 
 impl Default for GridClustering {
@@ -258,14 +318,14 @@ mod tests {
     fn test_soa_clustering() {
         let mut batch = HitBatch::default();
         // Cluster 1
-        batch.push(10, 10, 100, 5, 0, 0);
-        batch.push(11, 11, 102, 5, 0, 0); // Close in space and time
+        batch.push((10, 10, 100, 5, 0, 0));
+        batch.push((11, 11, 102, 5, 0, 0)); // Close in space and time
 
         // Cluster 2
-        batch.push(50, 50, 100, 5, 0, 0); // Far in space
+        batch.push((50, 50, 100, 5, 0, 0)); // Far in space
 
         // Noise
-        batch.push(100, 100, 10000, 5, 0, 0); // Far in time
+        batch.push((100, 100, 10000, 5, 0, 0)); // Far in time
 
         let algo = GridClustering::default();
         let mut state = GridState::default();
@@ -291,9 +351,9 @@ mod tests {
         // Result: A not linked to C, even though diff is 2.
 
         let mut batch = HitBatch::default();
-        batch.push(10, 10, 100, 5, 0, 0); // Hit A
-        batch.push(10, 10, 200, 5, 0, 0); // Hit B (far future)
-        batch.push(10, 10, 102, 5, 0, 0); // Hit C (should be with A)
+        batch.push((10, 10, 100, 5, 0, 0)); // Hit A
+        batch.push((10, 10, 200, 5, 0, 0)); // Hit B (far future)
+        batch.push((10, 10, 102, 5, 0, 0)); // Hit C (should be with A)
 
         // Window of 2 ticks (25ns each): 50ns / 25.0 = 2.0, ceil = 2
         let config = GridConfig {
@@ -326,9 +386,9 @@ mod tests {
         // If logic is correct, performance is O(N * window_density) not O(N^2).
 
         // Correctness check:
-        batch.push(10, 10, 100, 5, 0, 0);
-        batch.push(10, 10, 101, 5, 0, 0); // Linked to 0 (delta 1 tick = 25ns < 50ns)
-        batch.push(10, 10, 200, 5, 0, 0); // Not linked
+        batch.push((10, 10, 100, 5, 0, 0));
+        batch.push((10, 10, 101, 5, 0, 0)); // Linked to 0 (delta 1 tick = 25ns < 50ns)
+        batch.push((10, 10, 200, 5, 0, 0)); // Not linked
 
         let config = GridConfig {
             temporal_window_ns: 50.0, // ~2 ticks

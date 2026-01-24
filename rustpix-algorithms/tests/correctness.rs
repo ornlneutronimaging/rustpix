@@ -1,4 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
 use rustpix_algorithms::{
     AbsClustering, AbsConfig, AbsState, DbscanClustering, DbscanConfig, DbscanState,
     GridClustering, GridConfig, GridState,
@@ -9,11 +8,11 @@ fn generate_hits() -> HitBatch {
     let mut batch = HitBatch::with_capacity(20);
     // Cluster 1: centered at 100, 100, tof=1000
     for i in 0..10 {
-        batch.push(100 + (i % 3), 100 + (i / 3), 1000, 10, 0, 0);
+        batch.push((100 + (i % 3), 100 + (i / 3), 1000, 10, 0, 0));
     }
     // Cluster 2: centered at 150, 150, tof=2000
     for i in 0..10 {
-        batch.push(150 + (i % 3), 150 + (i / 3), 2000, 10, 0, 0);
+        batch.push((150 + (i % 3), 150 + (i / 3), 2000, 10, 0, 0));
     }
     batch
 }
@@ -30,7 +29,7 @@ fn test_verification_abs() {
     let algo = AbsClustering::new(config);
     let mut state = AbsState::default();
     let n = algo.cluster(&mut batch, &mut state).unwrap();
-    assert_eq!(n, 2, "ABS Found {} clusters, expected 2", n);
+    assert_eq!(n, 2, "ABS Found {n} clusters, expected 2");
 }
 
 #[test]
@@ -46,7 +45,7 @@ fn test_verification_grid() {
     let algo = GridClustering::new(config);
     let mut state = GridState::default();
     let n = algo.cluster(&mut batch, &mut state).unwrap();
-    assert_eq!(n, 2, "Grid Found {} clusters, expected 2", n);
+    assert_eq!(n, 2, "Grid Found {n} clusters, expected 2");
 }
 
 #[test]
@@ -61,5 +60,5 @@ fn test_verification_dbscan() {
     let algo = DbscanClustering::new(config);
     let mut state = DbscanState::default();
     let n = algo.cluster(&mut batch, &mut state).unwrap();
-    assert_eq!(n, 2, "DBSCAN Found {} clusters, expected 2", n);
+    assert_eq!(n, 2, "DBSCAN Found {n} clusters, expected 2");
 }

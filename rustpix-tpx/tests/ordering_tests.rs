@@ -1,12 +1,3 @@
-#![allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::uninlined_format_args,
-    clippy::cast_precision_loss,
-    clippy::unreadable_literal,
-    clippy::ignore_without_reason
-)]
 use rustpix_core::soa::HitBatch;
 use rustpix_tpx::ordering::TimeOrderedStream;
 use rustpix_tpx::section::discover_sections;

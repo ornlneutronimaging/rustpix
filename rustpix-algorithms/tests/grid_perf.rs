@@ -1,8 +1,3 @@
-#![allow(
-    clippy::uninlined_format_args,
-    clippy::cast_possible_truncation,
-    clippy::unreadable_literal
-)]
 use rustpix_algorithms::{
     AbsClustering, AbsConfig, AbsState, GridClustering, GridConfig, GridState,
 };
@@ -23,17 +18,17 @@ fn test_grid_vs_abs_performance() {
     let mut rng_seed: u64 = 12345;
     let mut rand = || {
         rng_seed = (rng_seed.wrapping_mul(1103515245).wrapping_add(12345)) & 0x7fffffff;
-        rng_seed as u16
+        u16::try_from(rng_seed & 0xFFFF).unwrap_or(0)
     };
 
     for i in 0..n {
         let x = rand() % 64; // Concentrated in 0..64
         let y = rand() % 64;
-        let tof = i as u32 * 10; // 10 ticks per hit, sorted by construction
-        batch.push(x, y, tof, 1, 0, 0);
+        let tof = u32::try_from(i).unwrap_or(u32::MAX).saturating_mul(10);
+        batch.push((x, y, tof, 1, 0, 0));
     }
 
-    println!("Generated {} hits", n);
+    println!("Generated {n} hits");
 
     // Run ABS
     let abs_config = AbsConfig {
@@ -68,7 +63,7 @@ fn test_grid_vs_abs_performance() {
     // Performance check: Grid should be within 5x of ABS
     // (allows for CI variance; pre-optimization was 100x+ slower)
     let ratio = duration_grid.as_secs_f64() / duration_abs.as_secs_f64();
-    println!("Ratio Grid/ABS: {:.2}x", ratio);
+    println!("Ratio Grid/ABS: {ratio:.2}x");
 
-    assert!(ratio < 5.0, "Grid is too slow! Ratio: {:.2}x", ratio);
+    assert!(ratio < 5.0, "Grid is too slow! Ratio: {ratio:.2}x");
 }

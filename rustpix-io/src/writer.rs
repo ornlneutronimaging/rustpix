@@ -1,5 +1,4 @@
 //! File writers for processed data.
-#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 //!
 
 use crate::Result;
@@ -17,6 +16,9 @@ pub struct DataFileWriter {
 
 impl DataFileWriter {
     /// Creates a new file writer.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be created.
     pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
@@ -24,6 +26,9 @@ impl DataFileWriter {
     }
 
     /// Writes neutrons as CSV.
+    ///
+    /// # Errors
+    /// Returns an error if writing to the underlying file fails.
     pub fn write_neutrons_csv(&mut self, neutrons: &[Neutron]) -> Result<()> {
         writeln!(self.writer, "x,y,tof,tot,n_hits,chip_id")?;
 
@@ -41,8 +46,13 @@ impl DataFileWriter {
 
     /// Writes neutrons as binary data.
     ///
-    /// Format per neutron: f64 (x) + f64 (y) + u32 (tof) + u16 (tot) + u16 (n_hits) + u8 (chip_id) + 3 reserved
-    /// Total: 28 bytes per neutron
+    /// Format per neutron: `f64` (x) + `f64` (y) + `u32` (tof) + `u16` (tot)
+    /// + `u16` (`n_hits`) + `u8` (`chip_id`) + 3 reserved bytes.
+    ///
+    /// Total: 28 bytes per neutron.
+    ///
+    /// # Errors
+    /// Returns an error if writing to the underlying file fails.
     pub fn write_neutrons_binary(&mut self, neutrons: &[Neutron]) -> Result<()> {
         for n in neutrons {
             self.writer.write_all(&n.x.to_le_bytes())?;
@@ -59,6 +69,9 @@ impl DataFileWriter {
     }
 
     /// Writes neutron batch as CSV.
+    ///
+    /// # Errors
+    /// Returns an error if writing to the underlying file fails.
     pub fn write_neutron_batch_csv(
         &mut self,
         batch: &NeutronBatch,
@@ -86,6 +99,9 @@ impl DataFileWriter {
     }
 
     /// Writes neutron batch as binary data.
+    ///
+    /// # Errors
+    /// Returns an error if writing to the underlying file fails.
     pub fn write_neutron_batch_binary(&mut self, batch: &NeutronBatch) -> Result<()> {
         for i in 0..batch.len() {
             self.writer.write_all(&batch.x[i].to_le_bytes())?;
@@ -102,6 +118,9 @@ impl DataFileWriter {
     }
 
     /// Flushes the writer.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying writer fails to flush.
     pub fn flush(&mut self) -> Result<()> {
         self.writer.flush()?;
         Ok(())

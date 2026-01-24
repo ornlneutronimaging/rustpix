@@ -226,8 +226,8 @@ impl PyHitBatch {
     }
 
     /// Convert the batch to NumPy arrays (moves the underlying buffers).
-    #[allow(clippy::wrong_self_convention)]
-    fn to_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+    #[pyo3(name = "to_numpy")]
+    fn take_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let batch = self
             .batch
             .take()
@@ -280,8 +280,8 @@ impl PyNeutronBatch {
     }
 
     /// Convert neutrons to NumPy arrays (SoA layout).
-    #[allow(clippy::wrong_self_convention)]
-    fn to_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+    #[pyo3(name = "to_numpy")]
+    fn take_numpy(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let batch = self
             .batch
             .take()
@@ -373,32 +373,16 @@ fn read_tpx3_hits(
 }
 
 #[pyfunction]
-#[pyo3(signature = (
-    path,
-    detector_config=None,
-    clustering_config=None,
-    extraction_config=None,
-    algorithm="abs",
-    abs_scan_interval=None,
-    dbscan_min_points=None,
-    grid_cell_size=None,
-    time_ordered=true,
-    output_path=None
-))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, **kwargs))]
 fn process_tpx3_neutrons(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
     clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
     extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
-    algorithm: &str,
-    abs_scan_interval: Option<usize>,
-    dbscan_min_points: Option<usize>,
-    grid_cell_size: Option<usize>,
-    time_ordered: bool,
-    output_path: Option<&str>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyNeutronBatch> {
-    ensure_hdf5_disabled(output_path)?;
+    let processing = parse_processing_kwargs(kwargs)?;
+    ensure_hdf5_disabled(processing.output_path.as_deref())?;
 
     let detector = detector_config
         .as_ref()
@@ -413,24 +397,14 @@ fn process_tpx3_neutrons(
         .map(|cfg| cfg.inner.clone())
         .unwrap_or_default();
 
-    let mut params = AlgorithmParams::default();
-    if let Some(value) = abs_scan_interval {
-        params.abs_scan_interval = value;
-    }
-    if let Some(value) = dbscan_min_points {
-        params.dbscan_min_points = value;
-    }
-    if let Some(value) = grid_cell_size {
-        params.grid_cell_size = value;
-    }
-
-    let algo = parse_algorithm(algorithm)?;
+    let params = processing.selection.params;
+    let algo = processing.selection.algorithm;
 
     let reader = Tpx3FileReader::open(path)
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(detector.clone());
 
-    let neutrons = if time_ordered {
+    let neutrons = if processing.time_ordered {
         let stream = reader
             .stream_time_ordered()
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
@@ -450,36 +424,24 @@ fn process_tpx3_neutrons(
             detector,
             clustering: Some(clustering),
             extraction: Some(extraction),
-            algorithm: Some(algorithm.to_string()),
+            algorithm: Some(processing.selection.name),
             source_path: Some(path.to_string()),
-            time_ordered,
+            time_ordered: processing.time_ordered,
         },
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (
-    batch,
-    clustering_config=None,
-    extraction_config=None,
-    algorithm="abs",
-    abs_scan_interval=None,
-    dbscan_min_points=None,
-    grid_cell_size=None,
-    output_path=None
-))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (batch, clustering_config=None, extraction_config=None, **kwargs))]
 fn cluster_hits(
     mut batch: PyRefMut<'_, PyHitBatch>,
     clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
     extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
-    algorithm: &str,
-    abs_scan_interval: Option<usize>,
-    dbscan_min_points: Option<usize>,
-    grid_cell_size: Option<usize>,
-    output_path: Option<&str>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyNeutronBatch> {
-    ensure_hdf5_disabled(output_path)?;
+    let selection = parse_algorithm_kwargs(kwargs)?;
+    let output_path = parse_output_path(kwargs)?;
+    ensure_hdf5_disabled(output_path.as_deref())?;
 
     let clustering = clustering_config
         .as_ref()
@@ -490,18 +452,8 @@ fn cluster_hits(
         .map(|cfg| cfg.inner.clone())
         .unwrap_or_default();
 
-    let mut params = AlgorithmParams::default();
-    if let Some(value) = abs_scan_interval {
-        params.abs_scan_interval = value;
-    }
-    if let Some(value) = dbscan_min_points {
-        params.dbscan_min_points = value;
-    }
-    if let Some(value) = grid_cell_size {
-        params.grid_cell_size = value;
-    }
-
-    let algo = parse_algorithm(algorithm)?;
+    let params = selection.params;
+    let algo = selection.algorithm;
 
     let batch_ref = batch
         .batch
@@ -517,7 +469,7 @@ fn cluster_hits(
             detector: batch.metadata.detector.clone(),
             clustering: Some(clustering),
             extraction: Some(extraction),
-            algorithm: Some(algorithm.to_string()),
+            algorithm: Some(selection.name),
             source_path: batch.metadata.source_path.clone(),
             time_ordered: batch.metadata.time_ordered,
         },
@@ -579,6 +531,83 @@ fn ensure_hdf5_disabled(output_path: Option<&str>) -> PyResult<()> {
         ));
     }
     Ok(())
+}
+
+struct AlgorithmSelection {
+    name: String,
+    algorithm: ClusteringAlgorithm,
+    params: AlgorithmParams,
+}
+
+struct ProcessingKwargs {
+    selection: AlgorithmSelection,
+    time_ordered: bool,
+    output_path: Option<String>,
+}
+
+fn extract_kwarg<'py, T: FromPyObject<'py>>(
+    kwargs: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<T>> {
+    match kwargs.get_item(key)? {
+        Some(value) => Ok(Some(value.extract()?)),
+        None => Ok(None),
+    }
+}
+
+fn parse_algorithm_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<AlgorithmSelection> {
+    let mut params = AlgorithmParams::default();
+    let mut name = "abs".to_string();
+
+    if let Some(kwargs) = kwargs {
+        if let Some(value) = extract_kwarg::<String>(kwargs, "algorithm")? {
+            name = value;
+        }
+        if let Some(value) = extract_kwarg::<usize>(kwargs, "abs_scan_interval")? {
+            params.abs_scan_interval = value;
+        }
+        if let Some(value) = extract_kwarg::<usize>(kwargs, "dbscan_min_points")? {
+            params.dbscan_min_points = value;
+        }
+        if let Some(value) = extract_kwarg::<usize>(kwargs, "grid_cell_size")? {
+            params.grid_cell_size = value;
+        }
+    }
+
+    let normalized = name.to_ascii_lowercase();
+    let algorithm = parse_algorithm(&normalized)?;
+
+    Ok(AlgorithmSelection {
+        name: normalized,
+        algorithm,
+        params,
+    })
+}
+
+fn parse_output_path(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Option<String>> {
+    if let Some(kwargs) = kwargs {
+        extract_kwarg::<String>(kwargs, "output_path")
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_processing_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ProcessingKwargs> {
+    let selection = parse_algorithm_kwargs(kwargs)?;
+    let output_path = parse_output_path(kwargs)?;
+
+    let mut time_ordered = true;
+    if let Some(kwargs) = kwargs {
+        if let Some(value) = extract_kwarg::<bool>(kwargs, "time_ordered")? {
+            time_ordered = value;
+        }
+    }
+
+    Ok(ProcessingKwargs {
+        selection,
+        time_ordered,
+        output_path,
+    })
 }
 
 fn parse_algorithm(name: &str) -> PyResult<ClusteringAlgorithm> {

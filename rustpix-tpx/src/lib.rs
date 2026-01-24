@@ -1,14 +1,4 @@
 //! rustpix-tpx: TPX3 packet parser, hit types, and file processor.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_lossless,
-    clippy::float_cmp,
-    clippy::uninlined_format_args,
-    clippy::doc_markdown,
-    clippy::checked_conversions,
-    clippy::missing_errors_doc
-)]
 //!
 //! This crate provides TPX3-specific data structures and parsing logic
 //! for Timepix3 pixel detector data.
@@ -41,8 +31,8 @@ use std::path::Path;
 /// Affine transformation for chip coordinate mapping.
 ///
 /// Formula:
-/// global_x = a * local_x + b * local_y + tx
-/// global_y = c * local_x + d * local_y + ty
+/// `global_x` = a * `local_x` + b * `local_y` + tx
+/// `global_y` = c * `local_x` + d * `local_y` + ty
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChipTransform {
     pub a: i32,
@@ -75,35 +65,38 @@ impl ChipTransform {
     #[inline]
     #[must_use]
     pub fn apply(&self, x: u16, y: u16) -> (u16, u16) {
-        let x = x as i32;
-        let y = y as i32;
+        let x = i32::from(x);
+        let y = i32::from(y);
 
         let gx = self.a * x + self.b * y + self.tx;
         let gy = self.c * x + self.d * y + self.ty;
 
         debug_assert!(
-            gx >= 0 && gx <= u16::MAX as i32,
-            "ChipTransform: X out of bounds: {}",
-            gx
+            u16::try_from(gx).is_ok(),
+            "ChipTransform: X out of bounds: {gx}"
         );
         debug_assert!(
-            gy >= 0 && gy <= u16::MAX as i32,
-            "ChipTransform: Y out of bounds: {}",
-            gy
+            u16::try_from(gy).is_ok(),
+            "ChipTransform: Y out of bounds: {gy}"
         );
 
         // Safety: bounds validated upfront via validate_bounds()
-        (gx as u16, gy as u16)
+        (
+            u16::try_from(gx).unwrap_or(u16::MAX),
+            u16::try_from(gy).unwrap_or(u16::MAX),
+        )
     }
 
     /// Validate that this transform produces valid u16 coordinates
-    /// for all inputs in the range [0, chip_size_x) x [0, chip_size_y).
+    /// for all inputs in the range [0, `chip_size_x`) x [0, `chip_size_y`).
     ///
     /// This checks all 4 corners of the input space, which is sufficient
     /// because affine transforms are linear (extremes occur at corners).
+    /// # Errors
+    /// Returns an error if the transform maps any corner outside the valid output range.
     pub fn validate_bounds(&self, chip_size_x: u16, chip_size_y: u16) -> Result<(), String> {
-        let max_x = (chip_size_x.saturating_sub(1)) as i32;
-        let max_y = (chip_size_y.saturating_sub(1)) as i32;
+        let max_x = i32::from(chip_size_x.saturating_sub(1));
+        let max_y = i32::from(chip_size_y.saturating_sub(1));
 
         // Check all 4 corners of the input space
         let corners = [(0, 0), (max_x, 0), (0, max_y), (max_x, max_y)];
@@ -112,18 +105,16 @@ impl ChipTransform {
             let gx = self.a * x + self.b * y + self.tx;
             let gy = self.c * x + self.d * y + self.ty;
 
-            if gx < 0 || gx > u16::MAX as i32 {
+            if gx < 0 || gx > i32::from(u16::MAX) {
                 return Err(format!(
-                    "Transform produces out-of-bounds x={} for input ({}, {}). \
+                    "Transform produces out-of-bounds x={gx} for input ({x}, {y}). \
                      Valid range is [0, 65535].",
-                    gx, x, y
                 ));
             }
-            if gy < 0 || gy > u16::MAX as i32 {
+            if gy < 0 || gy > i32::from(u16::MAX) {
                 return Err(format!(
-                    "Transform produces out-of-bounds y={} for input ({}, {}). \
+                    "Transform produces out-of-bounds y={gy} for input ({x}, {y}). \
                      Valid range is [0, 65535].",
-                    gy, x, y
                 ));
             }
         }
@@ -266,6 +257,9 @@ impl DetectorConfig {
     /// Load configuration from a JSON file (C++ compatible schema).
     ///
     /// Validates all chip transforms to ensure they produce valid coordinates.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or the JSON is invalid.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -276,6 +270,9 @@ impl DetectorConfig {
     /// Load configuration from a JSON string (C++ compatible schema).
     ///
     /// Validates all chip transforms to ensure they produce valid coordinates.
+    ///
+    /// # Errors
+    /// Returns an error if the JSON is invalid.
     pub fn from_json(json: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let json_config: JsonConfig = serde_json::from_str(json)?;
         Self::from_json_config(json_config)
@@ -333,11 +330,14 @@ impl DetectorConfig {
     ///
     /// This is called automatically when loading from JSON.
     /// For programmatically created configs, call this before processing.
+    ///
+    /// # Errors
+    /// Returns an error if any transform is invalid.
     pub fn validate_transforms(&self) -> Result<(), Box<dyn std::error::Error>> {
         for (i, transform) in self.chip_transforms.iter().enumerate() {
             transform
                 .validate_bounds(self.chip_size_x, self.chip_size_y)
-                .map_err(|e| format!("Chip {} transform invalid: {}", i, e))?;
+                .map_err(|e| format!("Chip {i} transform invalid: {e}"))?;
         }
         Ok(())
     }
@@ -351,7 +351,16 @@ impl DetectorConfig {
     /// TDC correction value in 25ns units.
     #[must_use]
     pub fn tdc_correction_25ns(&self) -> u32 {
-        (self.tdc_period_seconds() / 25e-9).round() as u32
+        let correction = (self.tdc_period_seconds() / 25e-9).round();
+        if correction <= 0.0 {
+            return 0;
+        }
+        if correction >= f64::from(u32::MAX) {
+            return u32::MAX;
+        }
+        format!("{correction:.0}")
+            .parse::<u32>()
+            .unwrap_or(u32::MAX)
     }
 
     /// Map local chip coordinates to global detector coordinates.

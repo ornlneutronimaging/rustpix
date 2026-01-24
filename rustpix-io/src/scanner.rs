@@ -1,9 +1,4 @@
 //! Section scanner for TPX3 files.
-#![allow(
-    clippy::missing_panics_doc,
-    clippy::must_use_candidate,
-    clippy::uninlined_format_args
-)]
 //!
 //! Identifies logical sections in the file based on TPX3 headers.
 
@@ -29,9 +24,6 @@ impl PacketScanner {
     /// Scans the provided data for TPX3 sections.
     ///
     /// The data should be 8-byte aligned.
-    /// Scans the provided data for TPX3 sections.
-    ///
-    /// The data should be 8-byte aligned.
     ///
     /// # Arguments
     /// * `data` - The byte slice to scan.
@@ -41,6 +33,11 @@ impl PacketScanner {
     /// A tuple `(sections, consumed_bytes)`.
     /// `consumed_bytes` indicates how many bytes can be safely advanced.
     /// Bytes after `consumed_bytes` belong to an incomplete section (unless `is_eof`).
+    ///
+    /// # Panics
+    /// Panics if a chunk is not exactly 8 bytes. This should be unreachable because
+    /// `chunks_exact(8)` guarantees each chunk length.
+    #[must_use]
     pub fn scan_sections(data: &[u8], is_eof: bool) -> (Vec<Section>, usize) {
         let mut sections = Vec::new();
         let mut current_section_start = 0;

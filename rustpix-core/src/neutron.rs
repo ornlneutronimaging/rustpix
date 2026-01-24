@@ -1,9 +1,4 @@
 //! Neutron event output type.
-#![allow(
-    clippy::cast_lossless,
-    clippy::pub_underscore_fields,
-    clippy::similar_names
-)]
 //!
 
 /// A detected neutron event after clustering and centroid extraction.
@@ -25,7 +20,8 @@ pub struct Neutron {
     /// Source chip ID.
     pub chip_id: u8,
     /// Reserved for alignment.
-    pub _reserved: [u8; 3],
+    #[doc(hidden)]
+    pub reserved: [u8; 3],
 }
 
 impl Neutron {
@@ -39,7 +35,7 @@ impl Neutron {
             tot,
             n_hits,
             chip_id,
-            _reserved: [0; 3],
+            reserved: [0; 3],
         }
     }
 
@@ -47,7 +43,7 @@ impl Neutron {
     #[inline]
     #[must_use]
     pub fn tof_ns(&self) -> f64 {
-        self.tof as f64 * 25.0
+        f64::from(self.tof) * 25.0
     }
 
     /// TOF in milliseconds.
@@ -163,28 +159,30 @@ impl NeutronBatch {
 
 impl NeutronStatistics {
     /// Calculate statistics from a slice of neutrons.
-    #[allow(clippy::cast_precision_loss, clippy::cast_lossless)]
     pub fn from_neutrons(neutrons: &[Neutron]) -> Self {
         if neutrons.is_empty() {
             return Self::default();
         }
 
         let count = neutrons.len();
-        let sum_tof: f64 = neutrons.iter().map(|n| n.tof as f64).sum();
-        let mean_tof = sum_tof / count as f64;
+        let count_u32_value = u32::try_from(count).unwrap_or(u32::MAX);
+        let count_as_f64 = f64::from(count_u32_value);
+        let sum_tof: f64 = neutrons.iter().map(|n| f64::from(n.tof)).sum();
+        let mean_tof = sum_tof / count_as_f64;
 
         let variance: f64 = neutrons
             .iter()
-            .map(|n| (n.tof as f64 - mean_tof).powi(2))
+            .map(|n| (f64::from(n.tof) - mean_tof).powi(2))
             .sum::<f64>()
-            / count as f64;
+            / count_as_f64;
         let std_tof = variance.sqrt();
 
-        let mean_tot = neutrons.iter().map(|n| n.tot as f64).sum::<f64>() / count as f64;
+        let mean_total_tot = neutrons.iter().map(|n| f64::from(n.tot)).sum::<f64>() / count_as_f64;
         let mean_cluster_size =
-            neutrons.iter().map(|n| n.n_hits as f64).sum::<f64>() / count as f64;
-        let single_hit_fraction =
-            neutrons.iter().filter(|n| n.n_hits == 1).count() as f64 / count as f64;
+            neutrons.iter().map(|n| f64::from(n.n_hits)).sum::<f64>() / count_as_f64;
+        let single_hit_count =
+            u32::try_from(neutrons.iter().filter(|n| n.n_hits == 1).count()).unwrap_or(u32::MAX);
+        let single_hit_fraction = f64::from(single_hit_count) / count_as_f64;
 
         let x_min = neutrons.iter().map(|n| n.x).fold(f64::INFINITY, f64::min);
         let x_max = neutrons
@@ -203,7 +201,7 @@ impl NeutronStatistics {
             count,
             mean_tof,
             std_tof,
-            mean_tot,
+            mean_tot: mean_total_tot,
             mean_cluster_size,
             single_hit_fraction,
             x_range: (x_min, x_max),
@@ -215,14 +213,13 @@ impl NeutronStatistics {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]
     fn test_neutron_creation() {
         let neutron = Neutron::new(1024.0, 2048.0, 1000, 150, 5, 0);
-        assert_eq!(neutron.x, 1024.0);
-        assert_eq!(neutron.y, 2048.0);
+        assert!((neutron.x - 1024.0).abs() < f64::EPSILON);
+        assert!((neutron.y - 2048.0).abs() < f64::EPSILON);
         assert_eq!(neutron.tof, 1000);
         assert_eq!(neutron.tot, 150);
         assert_eq!(neutron.n_hits, 5);
@@ -231,16 +228,16 @@ mod tests {
     #[test]
     fn test_tof_conversions() {
         let neutron = Neutron::new(0.0, 0.0, 1000, 0, 1, 0);
-        assert_eq!(neutron.tof_ns(), 25000.0);
-        assert_eq!(neutron.tof_ms(), 0.025);
+        assert!((neutron.tof_ns() - 25_000.0).abs() < f64::EPSILON);
+        assert!((neutron.tof_ms() - 0.025).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_pixel_coords() {
         let neutron = Neutron::new(800.0, 1600.0, 0, 0, 1, 0);
         let (px, py) = neutron.pixel_coords(8.0);
-        assert_eq!(px, 100.0);
-        assert_eq!(py, 200.0);
+        assert!((px - 100.0).abs() < f64::EPSILON);
+        assert!((py - 200.0).abs() < f64::EPSILON);
     }
 
     #[test]

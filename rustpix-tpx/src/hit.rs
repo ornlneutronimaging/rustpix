@@ -1,5 +1,4 @@
 //! TPX3 timing helpers.
-#![allow(clippy::must_use_candidate, clippy::unreadable_literal)]
 //!
 
 /// Timestamp rollover correction.
@@ -7,12 +6,12 @@
 /// TPX3 uses 30-bit timestamps that can roll over. This function
 /// corrects the hit timestamp relative to the TDC timestamp.
 ///
-/// Formula: if hit_ts + 0x400000 < tdc_ts, extend by 0x40000000
+/// Formula: if `hit_ts` + 0x400000 < `tdc_ts`, extend by 0x40000000
 #[inline]
 #[must_use]
 pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32 {
-    const EXTENSION_THRESHOLD: u32 = 0x400000;
-    const EXTENSION_VALUE: u32 = 0x40000000;
+    const EXTENSION_THRESHOLD: u32 = 0x0040_0000;
+    const EXTENSION_VALUE: u32 = 0x4000_0000;
 
     if hit_timestamp.wrapping_add(EXTENSION_THRESHOLD) < tdc_timestamp {
         hit_timestamp.wrapping_add(EXTENSION_VALUE)
@@ -29,7 +28,7 @@ pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32
 ///
 /// * `timestamp` - Hit timestamp in 25ns units.
 /// * `tdc_timestamp` - TDC timestamp in 25ns units.
-/// * `tdc_correction_25ns` - The TDC period in 25ns units (1 / TDC_frequency).
+/// * `tdc_correction_25ns` - The TDC period in 25ns units (1 / `TDC_frequency`).
 ///   For SNS (60Hz), this is approximately 666,667 units (16.67ms / 25ns).
 #[inline]
 #[must_use]

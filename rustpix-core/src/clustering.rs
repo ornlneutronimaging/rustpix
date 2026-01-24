@@ -1,5 +1,4 @@
 //! Clustering algorithm traits and configuration.
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 //!
 
 // Re-export ClusteringError for convenience
@@ -43,7 +42,14 @@ impl ClusteringConfig {
     #[inline]
     #[must_use]
     pub fn window_tof(&self) -> u32 {
-        (self.temporal_window_ns / 25.0).ceil() as u32
+        let window = (self.temporal_window_ns / 25.0).ceil();
+        if window <= 0.0 {
+            return 0;
+        }
+        if window >= f64::from(u32::MAX) {
+            return u32::MAX;
+        }
+        format!("{window:.0}").parse::<u32>().unwrap_or(u32::MAX)
     }
 
     /// Set spatial radius.
@@ -88,14 +94,13 @@ pub struct ClusteringStatistics {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)]
     use super::*;
 
     #[test]
     fn test_config_defaults() {
         let config = ClusteringConfig::default();
-        assert_eq!(config.radius, 5.0);
-        assert_eq!(config.temporal_window_ns, 75.0);
+        assert!((config.radius - 5.0).abs() < f64::EPSILON);
+        assert!((config.temporal_window_ns - 75.0).abs() < f64::EPSILON);
         assert_eq!(config.min_cluster_size, 1);
         assert_eq!(config.max_cluster_size, None);
     }
@@ -115,8 +120,8 @@ mod tests {
             .with_min_cluster_size(2)
             .with_max_cluster_size(100);
 
-        assert_eq!(config.radius, 10.0);
-        assert_eq!(config.temporal_window_ns, 100.0);
+        assert!((config.radius - 10.0).abs() < f64::EPSILON);
+        assert!((config.temporal_window_ns - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.min_cluster_size, 2);
         assert_eq!(config.max_cluster_size, Some(100));
     }
