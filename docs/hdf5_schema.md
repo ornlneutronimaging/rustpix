@@ -3,8 +3,8 @@
 This document defines the on-disk HDF5 layout for rustpix event data and
 histograms. The goal is **scipp compatibility** via **NeXus**, using
 **NXevent_data** for events and **NXdata** for histograms, while keeping the
-layout simple and stable for large files. SNS/ISIS event files commonly use
-NXevent_data, and Mantid expects NXevent_data groups when loading event data.
+layout simple and stable for large files. NeXus recommends NXevent_data for
+event-mode neutron data, and SNS/ISIS event files use that base class.
 
 This is a **format contract** for issues #47 and #48.
 
@@ -41,7 +41,7 @@ This is a **format contract** for issues #47 and #48.
 ## Event data (hits / neutrons) — NXevent_data
 
 Event groups follow the NeXus **NXevent_data** base class, which is used by
-SNS/ISIS event files and expected by Mantid.
+SNS/ISIS event files for pulsed-source event data.
 
 Group attributes:
 
@@ -125,6 +125,12 @@ NeXus specifies that `AXISNAME_indices` attributes are integer arrays (scalar
 integers are valid for 1-D axes) and that axis lengths must match the data
 dimensions (or be length+1 for histogram edges).
 
+Axis order rationale:
+
+- Imaging data is naturally a stack of 2-D frames `(rot_angle, y, x)`.
+- `time_of_flight` is added as the energy-resolving axis.
+- Consumers **must** use `axes`/`*_indices` and not assume a fixed order.
+
 ### Required datasets
 
 | Name             | Type | Shape        | Units | Notes |
@@ -137,12 +143,11 @@ dimensions (or be length+1 for histogram edges).
 
 Axis representation:
 
-- **Centers**: axis length = N, `axis_mode = "centers"`
-- **Edges**: axis length = N+1, `axis_mode = "edges"`
+- **Centers**: axis length = N
+- **Edges**: axis length = N+1 (bin edges)
 
-Writers must set `axis_mode` for each axis dataset to disambiguate centers vs
-edges. The axes attribute defines the mapping, so consumers should not assume
-a particular axis order beyond `axes`/`_indices`.
+The axes attribute defines the mapping, so consumers should not assume a
+particular axis order beyond `axes`/`_indices`.
 
 ### Optional derived energy axis
 
@@ -158,8 +163,8 @@ If either metadata field is missing, `energy_eV` must be absent.
 Relationship between TOF and energy:
 
 Mantid defines energy conversion from TOF using the non-relativistic relation
-`E = (m_n / 2) * (L / t)^2`, where `t` is the time-of-flight and `L` is
-source-to-detector flight path.
+`E = (m_n / 2) * (L / t)^2`, where `t` is the time-of-flight and `L` is the
+total flight path length. Here, `L` should be taken from `flight_path_m`.
 
 For rustpix, use:
 
@@ -203,3 +208,14 @@ datasets are used instead, they must be additive and documented.
   on benchmarks. Consider shuffle + compression for integer datasets.
 - Use `u64` for `event_time_offset` and `event_time_zero` in ns to prevent
   overflow when converting from 25 ns ticks.
+
+## References
+
+- NeXus: Storing Event Data (SNS/ISIS event files and NXevent_data usage)
+  https://www.nexusformat.org/Storing_Event_Data.html
+- NeXus: NXevent_data base class
+  https://manual.nexusformat.org/classes/base_classes/NXevent_data.html
+- NeXus: NXdata base class (axes and *_indices rules)
+  https://manual.nexusformat.org/classes/base_classes/NXdata.html
+- Mantid: TOF <-> Energy conversion (UnitFactory)
+  https://docs.mantidproject.org/nightly/concepts/UnitFactory.html
