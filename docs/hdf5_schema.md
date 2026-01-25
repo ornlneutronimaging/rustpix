@@ -158,7 +158,7 @@ If either metadata field is missing, `energy_eV` must be absent.
 Relationship between TOF and energy:
 
 Mantid defines energy conversion from TOF using the non-relativistic relation
-`E = (m_n / 2) * (L_tot / t)^2`, where `t` is the time-of-flight and `L_tot` is
+`E = (m_n / 2) * (L / t)^2`, where `t` is the time-of-flight and `L` is
 source-to-detector flight path.
 
 For rustpix, use:
