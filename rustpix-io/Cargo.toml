@@ -17,6 +17,8 @@ memmap2 = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
+hdf5 = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -24,3 +26,4 @@ tempfile.workspace = true
 [features]
 default = []
 serde = ["dep:serde", "rustpix-core/serde"]
+hdf5 = ["dep:hdf5", "dep:ndarray"]

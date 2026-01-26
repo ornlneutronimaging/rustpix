@@ -84,6 +84,28 @@ impl Iterator for TimeOrderedHitStream {
     }
 }
 
+/// A pulse-ordered event batch with its TDC timestamp (25ns ticks).
+pub struct EventBatch {
+    pub tdc_timestamp_25ns: u64,
+    pub hits: HitBatch,
+}
+
+/// Time-ordered stream of event batches that owns the underlying file mapping.
+pub struct TimeOrderedEventStream {
+    inner: TimeOrderedStream<SharedMmap>,
+}
+
+impl Iterator for TimeOrderedEventStream {
+    type Item = EventBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next_pulse_batch().map(|batch| EventBatch {
+            tdc_timestamp_25ns: batch.tdc_timestamp,
+            hits: batch.hits,
+        })
+    }
+}
+
 /// A TPX3 file reader with memory-mapped I/O.
 pub struct Tpx3FileReader {
     reader: MappedFileReader,
@@ -218,6 +240,28 @@ impl Tpx3FileReader {
             &self.config,
         );
         Ok(TimeOrderedHitStream { inner: stream })
+    }
+
+    /// Returns a time-ordered stream of event batches (pulse-merged with TDC).
+    ///
+    /// # Errors
+    /// Returns an error if the file size is invalid.
+    pub fn stream_time_ordered_events(&self) -> Result<TimeOrderedEventStream> {
+        if !self.reader.len().is_multiple_of(8) {
+            return Err(Error::InvalidFormat(format!(
+                "file size {} is not a multiple of 8 (file: {})",
+                self.reader.len(),
+                self.reader.path.display()
+            )));
+        }
+
+        let sections = discover_sections(self.reader.as_bytes());
+        let stream = TimeOrderedStream::new(
+            SharedMmap(self.reader.mmap.clone()),
+            &sections,
+            &self.config,
+        );
+        Ok(TimeOrderedEventStream { inner: stream })
     }
 
     /// Returns an iterator over raw packets.

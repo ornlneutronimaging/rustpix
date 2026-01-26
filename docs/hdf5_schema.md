@@ -71,6 +71,7 @@ sources.
 | `time_over_threshold` | u64  | (N)   | ns    | time-over-threshold in nanoseconds |
 | `chip_id`             | u8   | (N)   | id    | chip identifier |
 | `cluster_id`          | i32  | (N)   | id    | cluster assignment |
+| `n_hits`              | u16  | (N)   | count | hits per neutron (neutrons only) |
 | `x`                   | u16  | (N)   | pixel | global pixel X (auxiliary) |
 | `y`                   | u16  | (N)   | pixel | global pixel Y (auxiliary) |
 
