@@ -23,4 +23,9 @@ pub enum Error {
     /// Core library error.
     #[error("core error: {0}")]
     CoreError(#[from] rustpix_core::Error),
+
+    /// HDF5 error.
+    #[cfg(feature = "hdf5")]
+    #[error("hdf5 error: {0}")]
+    Hdf5(#[from] hdf5::Error),
 }

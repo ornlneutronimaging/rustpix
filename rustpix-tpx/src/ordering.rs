@@ -41,6 +41,13 @@ impl PulseBatch {
     }
 }
 
+/// A merged pulse batch across chips with the same TDC timestamp.
+#[derive(Debug, Clone)]
+pub struct MergedPulseBatch {
+    pub tdc_timestamp: u64,
+    pub hits: HitBatch,
+}
+
 // Order by TDC timestamp (reverse for Min-Heap)
 impl PartialEq for PulseBatch {
     fn eq(&self, other: &Self) -> bool {
@@ -356,15 +363,9 @@ where
 
         Self { readers, heap }
     }
-}
 
-impl<D> Iterator for TimeOrderedStream<D>
-where
-    D: AsRef<[u8]> + Clone,
-{
-    type Item = HitBatch;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Returns the next merged pulse batch with its TDC timestamp.
+    pub fn next_pulse_batch(&mut self) -> Option<MergedPulseBatch> {
         loop {
             if let Some(head) = self.heap.peek() {
                 let min_tdc = head.extended_tdc();
@@ -398,10 +399,24 @@ where
                 }
 
                 merged_batch.sort_by_tof();
-                return Some(merged_batch);
+                return Some(MergedPulseBatch {
+                    tdc_timestamp: min_tdc,
+                    hits: merged_batch,
+                });
             }
             return None;
         }
+    }
+}
+
+impl<D> Iterator for TimeOrderedStream<D>
+where
+    D: AsRef<[u8]> + Clone,
+{
+    type Item = HitBatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_pulse_batch().map(|batch| batch.hits)
     }
 }
 
