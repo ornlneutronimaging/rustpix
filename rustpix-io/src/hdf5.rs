@@ -502,6 +502,12 @@ impl HitEventWriter {
         let event_start = self.event_count;
         let event_end = event_start + count;
 
+        let event_index = i32::try_from(event_start).map_err(|_| {
+            Error::InvalidFormat(
+                "event_index exceeds i32 range; split file or reduce events".to_string(),
+            )
+        })?;
+
         let tdc_ns = batch.tdc_timestamp_25ns.saturating_mul(NS_PER_TICK);
 
         let mut event_id = Vec::with_capacity(count);
@@ -544,12 +550,6 @@ impl HitEventWriter {
         if let Some(ds) = &self.y {
             append_slice(ds, event_start, &batch.hits.y)?;
         }
-
-        let event_index = i32::try_from(event_start).map_err(|_| {
-            Error::InvalidFormat(
-                "event_index exceeds i32 range; split file or reduce events".to_string(),
-            )
-        })?;
 
         append_slice(&self.event_time_zero, self.pulse_count, &[tdc_ns])?;
         append_slice(&self.event_index, self.pulse_count, &[event_index])?;
@@ -713,6 +713,12 @@ impl NeutronEventWriter {
         let event_start = self.event_count;
         let event_end = event_start + count;
 
+        let event_index = i32::try_from(event_start).map_err(|_| {
+            Error::InvalidFormat(
+                "event_index exceeds i32 range; split file or reduce events".to_string(),
+            )
+        })?;
+
         let tdc_ns = batch.tdc_timestamp_25ns.saturating_mul(NS_PER_TICK);
 
         let mut x_values = Vec::with_capacity(count);
@@ -784,12 +790,6 @@ impl NeutronEventWriter {
         if let Some(ds) = &self.y {
             append_slice(ds, event_start, &y_values)?;
         }
-
-        let event_index = i32::try_from(event_start).map_err(|_| {
-            Error::InvalidFormat(
-                "event_index exceeds i32 range; split file or reduce events".to_string(),
-            )
-        })?;
 
         append_slice(&self.event_time_zero, self.pulse_count, &[tdc_ns])?;
         append_slice(&self.event_index, self.pulse_count, &[event_index])?;
@@ -1414,6 +1414,208 @@ mod tests {
         assert!(data.chip_id.is_none());
         assert!(data.cluster_id.is_none());
         assert!(data.attrs.energy_axis_kind.is_none());
+    }
+
+    #[test]
+    fn test_hdf5_hit_event_id_overflow() {
+        let mut batch = HitBatch::with_capacity(1);
+        batch.x.push(1);
+        batch.y.push(1);
+        batch.tof.push(10);
+        batch.tot.push(5);
+        batch.timestamp.push(100);
+        batch.chip_id.push(0);
+        batch.cluster_id.push(-1);
+
+        let event_batch = EventBatch {
+            tdc_timestamp_25ns: 1,
+            hits: batch,
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let options = HitWriteOptions {
+            x_size: i32::MAX as u32,
+            y_size: 2,
+            chunk_events: 10,
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: None,
+            include_xy: true,
+            include_tot: false,
+            include_chip_id: false,
+            include_cluster_id: false,
+        };
+
+        let err = write_hits_hdf5(file.path(), vec![event_batch], &options).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_hdf5_event_index_overflow() {
+        let file = NamedTempFile::new().unwrap();
+        let file = File::create(file.path()).unwrap();
+        let group = file.create_group("hits").unwrap();
+
+        let options = HitWriteOptions {
+            x_size: 10,
+            y_size: 10,
+            chunk_events: 10,
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: None,
+            include_xy: false,
+            include_tot: false,
+            include_chip_id: false,
+            include_cluster_id: false,
+        };
+
+        let mut writer = HitEventWriter::new(&group, &options).unwrap();
+        writer.event_count = i32::MAX as usize + 1;
+
+        let mut batch = HitBatch::with_capacity(1);
+        batch.x.push(0);
+        batch.y.push(0);
+        batch.tof.push(1);
+        batch.tot.push(1);
+        batch.timestamp.push(1);
+        batch.chip_id.push(0);
+        batch.cluster_id.push(-1);
+
+        let event_batch = EventBatch {
+            tdc_timestamp_25ns: 1,
+            hits: batch,
+        };
+
+        let err = writer.append_batch(&event_batch, &options).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_hdf5_neutron_negative_coords() {
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.push(-1.0);
+        neutrons.y.push(2.0);
+        neutrons.tof.push(10);
+        neutrons.tot.push(1);
+        neutrons.n_hits.push(1);
+        neutrons.chip_id.push(0);
+
+        let event_batch = NeutronEventBatch {
+            tdc_timestamp_25ns: 1,
+            neutrons,
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let options = NeutronWriteOptions {
+            x_size: 10,
+            y_size: 10,
+            chunk_events: 10,
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: None,
+            include_xy: true,
+            include_tot: false,
+            include_chip_id: false,
+            include_n_hits: false,
+        };
+
+        let err = write_neutrons_hdf5(file.path(), vec![event_batch], &options).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_hdf5_neutron_out_of_bounds_coords() {
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.push(10.0);
+        neutrons.y.push(0.0);
+        neutrons.tof.push(10);
+        neutrons.tot.push(1);
+        neutrons.n_hits.push(1);
+        neutrons.chip_id.push(0);
+
+        let event_batch = NeutronEventBatch {
+            tdc_timestamp_25ns: 1,
+            neutrons,
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let options = NeutronWriteOptions {
+            x_size: 10,
+            y_size: 10,
+            chunk_events: 10,
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: None,
+            include_xy: true,
+            include_tot: false,
+            include_chip_id: false,
+            include_n_hits: false,
+        };
+
+        let err = write_neutrons_hdf5(file.path(), vec![event_batch], &options).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_hdf5_histogram_counts_shape_mismatch() {
+        let data = HistogramWriteData {
+            counts: vec![1, 2, 3],
+            shape: HistogramShape {
+                rot_angle: 1,
+                y: 1,
+                x: 1,
+                time_of_flight: 2,
+            },
+            rot_angle: vec![0.0],
+            y: vec![0.0],
+            x: vec![0.0],
+            time_of_flight_ns: vec![10.0, 20.0],
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let options = HistogramWriteOptions {
+            compression: None,
+            shuffle: false,
+            ..HistogramWriteOptions::default()
+        };
+
+        let err = write_histogram_hdf5(file.path(), &data, &options).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_hdf5_histogram_axis_len_mismatch() {
+        let data = HistogramWriteData {
+            counts: vec![1, 2],
+            shape: HistogramShape {
+                rot_angle: 1,
+                y: 2,
+                x: 1,
+                time_of_flight: 1,
+            },
+            rot_angle: vec![0.0],
+            y: vec![0.0],
+            x: vec![0.0],
+            time_of_flight_ns: vec![10.0],
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        let options = HistogramWriteOptions {
+            compression: None,
+            shuffle: false,
+            ..HistogramWriteOptions::default()
+        };
+
+        let err = write_histogram_hdf5(file.path(), &data, &options).unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
     }
 
     #[test]
