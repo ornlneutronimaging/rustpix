@@ -401,6 +401,7 @@ fn run_cluster_once(algo_enum: Algorithm, batch: &mut HitBatch) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn run_ordering_benchmark() -> Result<()> {
     println!("Ordering benchmark removed: read_batch now uses the time-ordered stream.");
     Ok(())

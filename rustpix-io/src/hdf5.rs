@@ -1,4 +1,4 @@
-//! HDF5/NeXus event I/O (NXevent_data).
+//! HDF5/NeXus event I/O (`NXevent_data`).
 
 use crate::reader::EventBatch;
 use crate::{Error, Result};
@@ -15,6 +15,7 @@ const HISTOGRAM_AXES: [&str; 4] = ["rot_angle", "y", "x", "time_of_flight"];
 
 /// Event write configuration for hits.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct HitWriteOptions {
     pub x_size: u32,
     pub y_size: u32,
@@ -54,6 +55,7 @@ impl HitWriteOptions {
 
 /// Event write configuration for neutrons.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct NeutronWriteOptions {
     pub x_size: u32,
     pub y_size: u32,
@@ -91,7 +93,7 @@ impl NeutronWriteOptions {
     }
 }
 
-/// Event data loaded from an NXevent_data group (hits).
+/// Event data loaded from an `NXevent_data` group (hits).
 #[derive(Clone, Debug)]
 pub struct HitEventData {
     pub event_id: Vec<i32>,
@@ -106,7 +108,7 @@ pub struct HitEventData {
     pub attrs: EventAttributes,
 }
 
-/// Event data loaded from an NXevent_data group (neutrons).
+/// Event data loaded from an `NXevent_data` group (neutrons).
 #[derive(Clone, Debug)]
 pub struct NeutronEventData {
     pub event_id: Vec<i32>,
@@ -183,7 +185,7 @@ where
         &entry,
         options.flight_path_m,
         options.tof_offset_ns,
-        &options.energy_axis_kind,
+        options.energy_axis_kind.as_deref(),
     )?;
 
     let hits = entry.create_group("hits")?;
@@ -198,7 +200,7 @@ where
         &hits,
         options.flight_path_m,
         options.tof_offset_ns,
-        &options.energy_axis_kind,
+        options.energy_axis_kind.as_deref(),
     )?;
 
     let mut writer = HitEventWriter::new(&hits, options)?;
@@ -226,7 +228,7 @@ where
         &entry,
         options.flight_path_m,
         options.tof_offset_ns,
-        &options.energy_axis_kind,
+        options.energy_axis_kind.as_deref(),
     )?;
 
     let neutrons = entry.create_group("neutrons")?;
@@ -243,7 +245,7 @@ where
         &neutrons,
         options.flight_path_m,
         options.tof_offset_ns,
-        &options.energy_axis_kind,
+        options.energy_axis_kind.as_deref(),
     )?;
 
     let mut writer = NeutronEventWriter::new(&neutrons, options)?;
@@ -368,6 +370,7 @@ struct HitEventWriter {
 }
 
 impl HitEventWriter {
+    #[allow(clippy::too_many_lines)]
     fn new(group: &Group, options: &HitWriteOptions) -> Result<Self> {
         let event_id = create_extendable_dataset::<i32>(
             group,
@@ -575,6 +578,7 @@ struct NeutronEventWriter {
 }
 
 impl NeutronEventWriter {
+    #[allow(clippy::too_many_lines)]
     fn new(group: &Group, options: &NeutronWriteOptions) -> Result<Self> {
         let event_id = create_extendable_dataset::<i32>(
             group,
@@ -735,8 +739,18 @@ impl NeutronEventWriter {
                 ));
             }
 
-            let x_u32 = x_pixel as u32;
-            let y_u32 = y_pixel as u32;
+            let x_u32 = {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    x_pixel as u32
+                }
+            };
+            let y_u32 = {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    y_pixel as u32
+                }
+            };
 
             if x_u32 >= options.x_size || y_u32 >= options.y_size {
                 return Err(Error::InvalidFormat(
@@ -824,7 +838,7 @@ impl Default for HistogramWriteOptions {
     }
 }
 
-/// Histogram shape (rot_angle, y, x, time_of_flight).
+/// Histogram shape (`rot_angle`, y, x, `time_of_flight`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistogramShape {
     pub rot_angle: usize,
@@ -837,6 +851,11 @@ impl HistogramShape {
     #[must_use]
     pub fn len(&self) -> usize {
         self.rot_angle * self.y * self.x * self.time_of_flight
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -851,7 +870,7 @@ pub struct HistogramWriteData {
     pub time_of_flight_ns: Vec<f64>,
 }
 
-/// Histogram data loaded from NXdata.
+/// Histogram data loaded from `NXdata`.
 #[derive(Clone, Debug)]
 pub struct HistogramData {
     pub counts: Vec<u64>,
@@ -892,7 +911,7 @@ pub fn write_histogram_hdf5<P: AsRef<Path>>(
         &entry,
         options.flight_path_m,
         options.tof_offset_ns,
-        &options.energy_axis_kind,
+        options.energy_axis_kind.as_deref(),
     )?;
 
     let histogram = entry.create_group("histogram")?;
@@ -908,7 +927,7 @@ pub fn write_histogram_hdf5<P: AsRef<Path>>(
         &histogram,
         options.flight_path_m,
         options.tof_offset_ns,
-        &options.energy_axis_kind,
+        options.energy_axis_kind.as_deref(),
     )?;
 
     write_histogram_datasets(&histogram, data, options)?;
@@ -1213,7 +1232,7 @@ fn set_conversion_attrs(
     group: &Group,
     flight_path_m: Option<f64>,
     tof_offset_ns: Option<f64>,
-    energy_axis_kind: &Option<String>,
+    energy_axis_kind: Option<&str>,
 ) -> Result<()> {
     if let Some(value) = flight_path_m {
         group

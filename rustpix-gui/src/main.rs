@@ -20,8 +20,8 @@ use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
 use rustpix_io::Tpx3FileReader;
 use rustpix_tpx::ordering::{PulseBatch, PulseReader};
-use rustpix_tpx::ChipTransform;
 use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
+use rustpix_tpx::ChipTransform;
 use rustpix_tpx::DetectorConfig;
 
 // We probably need to re-export MappedFileReader or use Tpx3FileReader internals?
@@ -834,12 +834,8 @@ fn process_sections_to_batch(
 
             scope.spawn(move || {
                 let transform_closure = move |_cid, x, y| transform.apply(x, y);
-                let mut reader = PulseReader::new(
-                    mmap,
-                    &chip_sections,
-                    tdc_correction,
-                    transform_closure,
-                );
+                let mut reader =
+                    PulseReader::new(mmap, &chip_sections, tdc_correction, transform_closure);
                 while let Some(batch) = reader.next_pulse() {
                     if tx_batch.send(batch).is_err() {
                         break;
