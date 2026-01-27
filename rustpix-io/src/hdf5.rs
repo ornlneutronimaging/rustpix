@@ -29,25 +29,17 @@ impl Hdf5HitSink {
         let file = File::create(path)?;
         set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
 
-        let entry = file.create_group("entry")?;
-        set_attr_str_group(&entry, "NX_class", "NXentry")?;
-        set_conversion_attrs(
-            &entry,
+        let entry = create_entry(
+            &file,
             options.flight_path_m,
             options.tof_offset_ns,
             options.energy_axis_kind.as_deref(),
         )?;
-
-        let hits = entry.create_group("hits")?;
-        set_attr_str_group(&hits, "NX_class", "NXevent_data")?;
-        hits.new_attr::<u32>()
-            .create("x_size")?
-            .write_scalar(&options.x_size)?;
-        hits.new_attr::<u32>()
-            .create("y_size")?
-            .write_scalar(&options.y_size)?;
-        set_conversion_attrs(
-            &hits,
+        let hits = create_event_group(
+            &entry,
+            "hits",
+            options.x_size,
+            options.y_size,
             options.flight_path_m,
             options.tof_offset_ns,
             options.energy_axis_kind.as_deref(),
@@ -86,27 +78,17 @@ impl Hdf5NeutronSink {
         let file = File::create(path)?;
         set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
 
-        let entry = file.create_group("entry")?;
-        set_attr_str_group(&entry, "NX_class", "NXentry")?;
-        set_conversion_attrs(
-            &entry,
+        let entry = create_entry(
+            &file,
             options.flight_path_m,
             options.tof_offset_ns,
             options.energy_axis_kind.as_deref(),
         )?;
-
-        let neutrons = entry.create_group("neutrons")?;
-        set_attr_str_group(&neutrons, "NX_class", "NXevent_data")?;
-        neutrons
-            .new_attr::<u32>()
-            .create("x_size")?
-            .write_scalar(&options.x_size)?;
-        neutrons
-            .new_attr::<u32>()
-            .create("y_size")?
-            .write_scalar(&options.y_size)?;
-        set_conversion_attrs(
-            &neutrons,
+        let neutrons = create_event_group(
+            &entry,
+            "neutrons",
+            options.x_size,
+            options.y_size,
             options.flight_path_m,
             options.tof_offset_ns,
             options.energy_axis_kind.as_deref(),
@@ -283,6 +265,41 @@ fn detector_size(config: &DetectorConfig) -> (u32, u32) {
     (max_x + 1, max_y + 1)
 }
 
+fn create_entry(
+    file: &File,
+    flight_path_m: Option<f64>,
+    tof_offset_ns: Option<f64>,
+    energy_axis_kind: Option<&str>,
+) -> Result<Group> {
+    let entry = file.create_group("entry")?;
+    set_attr_str_group(&entry, "NX_class", "NXentry")?;
+    set_conversion_attrs(&entry, flight_path_m, tof_offset_ns, energy_axis_kind)?;
+    Ok(entry)
+}
+
+fn create_event_group(
+    entry: &Group,
+    name: &str,
+    x_size: u32,
+    y_size: u32,
+    flight_path_m: Option<f64>,
+    tof_offset_ns: Option<f64>,
+    energy_axis_kind: Option<&str>,
+) -> Result<Group> {
+    let group = entry.create_group(name)?;
+    set_attr_str_group(&group, "NX_class", "NXevent_data")?;
+    group
+        .new_attr::<u32>()
+        .create("x_size")?
+        .write_scalar(&x_size)?;
+    group
+        .new_attr::<u32>()
+        .create("y_size")?
+        .write_scalar(&y_size)?;
+    set_conversion_attrs(&group, flight_path_m, tof_offset_ns, energy_axis_kind)?;
+    Ok(group)
+}
+
 /// Writes hit events to an HDF5/NeXus file.
 ///
 /// # Errors
@@ -295,25 +312,17 @@ where
     let file = File::create(path)?;
     set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
 
-    let entry = file.create_group("entry")?;
-    set_attr_str_group(&entry, "NX_class", "NXentry")?;
-    set_conversion_attrs(
-        &entry,
+    let entry = create_entry(
+        &file,
         options.flight_path_m,
         options.tof_offset_ns,
         options.energy_axis_kind.as_deref(),
     )?;
-
-    let hits = entry.create_group("hits")?;
-    set_attr_str_group(&hits, "NX_class", "NXevent_data")?;
-    hits.new_attr::<u32>()
-        .create("x_size")?
-        .write_scalar(&options.x_size)?;
-    hits.new_attr::<u32>()
-        .create("y_size")?
-        .write_scalar(&options.y_size)?;
-    set_conversion_attrs(
-        &hits,
+    let hits = create_event_group(
+        &entry,
+        "hits",
+        options.x_size,
+        options.y_size,
         options.flight_path_m,
         options.tof_offset_ns,
         options.energy_axis_kind.as_deref(),
@@ -338,27 +347,17 @@ where
     let file = File::create(path)?;
     set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
 
-    let entry = file.create_group("entry")?;
-    set_attr_str_group(&entry, "NX_class", "NXentry")?;
-    set_conversion_attrs(
-        &entry,
+    let entry = create_entry(
+        &file,
         options.flight_path_m,
         options.tof_offset_ns,
         options.energy_axis_kind.as_deref(),
     )?;
-
-    let neutrons = entry.create_group("neutrons")?;
-    set_attr_str_group(&neutrons, "NX_class", "NXevent_data")?;
-    neutrons
-        .new_attr::<u32>()
-        .create("x_size")?
-        .write_scalar(&options.x_size)?;
-    neutrons
-        .new_attr::<u32>()
-        .create("y_size")?
-        .write_scalar(&options.y_size)?;
-    set_conversion_attrs(
-        &neutrons,
+    let neutrons = create_event_group(
+        &entry,
+        "neutrons",
+        options.x_size,
+        options.y_size,
         options.flight_path_m,
         options.tof_offset_ns,
         options.energy_axis_kind.as_deref(),
