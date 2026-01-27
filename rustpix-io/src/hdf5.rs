@@ -1558,6 +1558,7 @@ mod tests {
         let mut sink = Hdf5HitSink::create(file.path(), options).unwrap();
         sink.write_hits(&batches[0]).unwrap();
         sink.write_hits(&batches[1]).unwrap();
+        drop(sink);
 
         let data = read_hits_hdf5(file.path()).unwrap();
         assert_eq!(data.event_id.len(), 3);
