@@ -43,6 +43,9 @@ memmap2 = "0.9"
 # Error handling
 thiserror = "2.0"
 
+# System info (memory sizing)
+sysinfo = "0.30"
+
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 

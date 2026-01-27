@@ -16,6 +16,7 @@ rustpix-tpx = { workspace = true }
 memmap2 = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
+sysinfo = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 hdf5 = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
