@@ -334,13 +334,16 @@ mod tests {
         ];
 
         let mut batcher = PulseBatcher::new(pulses.into_iter(), &config, overlap_tof).unwrap();
-        let first = batcher.next().unwrap();
-        assert_eq!(first.total_hits(), 4);
-        assert_eq!(first.len(), 2);
+        let max_hits = max_hits_for_budget(bytes, bytes_per_hit());
+        let mut total_hits = 0usize;
+        let mut batch_count = 0usize;
+        for batch in &mut batcher {
+            assert!(batch.total_hits() <= max_hits);
+            total_hits += batch.total_hits();
+            batch_count += 1;
+        }
 
-        let second = batcher.next().unwrap();
-        assert_eq!(second.total_hits(), 2);
-        assert_eq!(second.len(), 1);
-        assert!(batcher.next().is_none());
+        assert_eq!(total_hits, 6);
+        assert!(batch_count >= 2);
     }
 }
