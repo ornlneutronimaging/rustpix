@@ -1617,6 +1617,7 @@ mod tests {
         let mut sink = Hdf5NeutronSink::create(file.path(), options).unwrap();
         sink.write_neutrons(&batches[0]).unwrap();
         sink.write_neutrons(&batches[1]).unwrap();
+        drop(sink);
 
         let data = read_neutrons_hdf5(file.path()).unwrap();
         assert_eq!(data.event_id.len(), 3);
