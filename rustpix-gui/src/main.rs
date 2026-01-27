@@ -812,7 +812,8 @@ fn process_sections_to_batch(
 
     let total_hits = num_packets.max(1);
     let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
-        vec![None; max_chip + 1];
+        Vec::with_capacity(max_chip + 1);
+    receivers.resize_with(max_chip + 1, || None);
     let mut heap = BinaryHeap::new();
 
     std::thread::scope(|scope| {
