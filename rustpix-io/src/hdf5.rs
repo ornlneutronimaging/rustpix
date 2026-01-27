@@ -13,7 +13,7 @@ use std::str::FromStr;
 const NS_PER_TICK: u64 = 25;
 const HISTOGRAM_AXES: [&str; 4] = ["rot_angle", "y", "x", "time_of_flight"];
 
-/// Streaming writer for hit events in NXevent_data.
+/// Streaming writer for hit events in `NXevent_data`.
 pub struct Hdf5HitSink {
     _file: File,
     writer: HitEventWriter,
@@ -70,7 +70,7 @@ impl Hdf5HitSink {
     }
 }
 
-/// Streaming writer for neutron events in NXevent_data.
+/// Streaming writer for neutron events in `NXevent_data`.
 pub struct Hdf5NeutronSink {
     _file: File,
     writer: NeutronEventWriter,
