@@ -2,11 +2,11 @@
 
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Plot, PlotImage, PlotPoint};
-use rayon::prelude::*;
 use rfd::FileDialog;
+use std::collections::BinaryHeap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,9 @@ use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
 use rustpix_io::Tpx3FileReader;
-use rustpix_tpx::section::{process_section_into_batch, scan_section_tdc, Tpx3Section};
+use rustpix_tpx::ordering::{PulseBatch, PulseReader};
+use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
+use rustpix_tpx::ChipTransform;
 use rustpix_tpx::DetectorConfig;
 
 // We probably need to re-export MappedFileReader or use Tpx3FileReader internals?
@@ -674,8 +676,7 @@ fn load_file_worker(path: &Path, tx: &Sender<AppMessage>, tdc_frequency: f64) {
         "Processing hits...".to_string(),
     ));
 
-    let full_batch =
-        process_sections_to_batch(&mmap, &tpx_sections, &det_config, tdc_correction, tx);
+    let full_batch = process_sections_to_batch(&mmap, &tpx_sections, &det_config, tx);
 
     let _ = tx.send(AppMessage::LoadProgress(
         0.95,
@@ -797,38 +798,94 @@ fn process_sections_to_batch(
     mmap: &memmap2::Mmap,
     sections: &[Tpx3Section],
     det_config: &DetectorConfig,
-    tdc_correction: u32,
     tx: &Sender<AppMessage>,
 ) -> HitBatch {
     let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
     let mut full_batch = HitBatch::with_capacity(num_packets);
+    let tdc_correction = det_config.tdc_correction_25ns();
 
-    let chunk_size = 100;
-    let chunks: Vec<_> = sections.chunks(chunk_size).collect();
-    let total_chunks = chunks.len().max(1);
+    let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0) as usize;
+    let mut sections_by_chip = vec![Vec::new(); max_chip + 1];
+    for section in sections {
+        sections_by_chip[section.chip_id as usize].push(section.clone());
+    }
 
-    for (i, chunk) in chunks.iter().enumerate() {
-        let batches: Vec<HitBatch> = chunk
-            .par_iter()
-            .map(|sec| {
-                let mut b = HitBatch::with_capacity(sec.packet_count());
-                let dc = det_config.clone();
-                let transform = move |cid, x, y| dc.map_chip_to_global(cid, x, y);
-                process_section_into_batch(mmap, sec, tdc_correction, transform, &mut b);
-                b
-            })
-            .collect();
+    let total_hits = num_packets.max(1);
+    let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
+        Vec::with_capacity(max_chip + 1);
+    receivers.resize_with(max_chip + 1, || None);
+    let mut heap = BinaryHeap::new();
 
-        for b in batches {
-            full_batch.append(&b);
+    std::thread::scope(|scope| {
+        for (chip_id, chip_sections) in sections_by_chip.iter().enumerate() {
+            if chip_sections.is_empty() {
+                continue;
+            }
+
+            let (tx_batch, rx_batch) = sync_channel::<PulseBatch>(2);
+            receivers[chip_id] = Some(rx_batch);
+
+            let chip_sections = chip_sections.clone();
+            let transform = det_config
+                .chip_transforms
+                .get(chip_id)
+                .cloned()
+                .unwrap_or_else(ChipTransform::identity);
+
+            scope.spawn(move || {
+                let transform_closure = move |_cid, x, y| transform.apply(x, y);
+                let mut reader =
+                    PulseReader::new(mmap, &chip_sections, tdc_correction, transform_closure);
+                while let Some(batch) = reader.next_pulse() {
+                    if tx_batch.send(batch).is_err() {
+                        break;
+                    }
+                }
+            });
         }
 
-        let progress = 0.25 + 0.75 * (usize_to_f32(i) / usize_to_f32(total_chunks));
-        let _ = tx.send(AppMessage::LoadProgress(
-            progress,
-            format!("Processed {}/{} hits...", full_batch.len(), num_packets),
-        ));
-    }
+        for rx_opt in receivers.iter().flatten() {
+            if let Ok(batch) = rx_opt.recv() {
+                heap.push(batch);
+            }
+        }
+
+        while let Some(head) = heap.peek() {
+            let min_tdc = head.extended_tdc();
+            let mut merged = HitBatch::default();
+
+            while let Some(batch) = heap.peek() {
+                if batch.extended_tdc() != min_tdc {
+                    break;
+                }
+                let batch = heap.pop().expect("heap not empty");
+
+                if let Some(rx) = receivers
+                    .get(batch.chip_id as usize)
+                    .and_then(|opt| opt.as_ref())
+                {
+                    if let Ok(next) = rx.recv() {
+                        heap.push(next);
+                    }
+                }
+
+                merged.append(&batch.hits);
+            }
+
+            if merged.is_empty() {
+                continue;
+            }
+            merged.sort_by_tof();
+            full_batch.append(&merged);
+
+            let progress =
+                0.25 + 0.75 * (usize_to_f32(full_batch.len()) / usize_to_f32(total_hits));
+            let _ = tx.send(AppMessage::LoadProgress(
+                progress,
+                format!("Processed {}/{} hits...", full_batch.len(), num_packets),
+            ));
+        }
+    });
 
     full_batch
 }

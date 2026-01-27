@@ -3,10 +3,9 @@
 
 use crate::{Error, Result};
 use memmap2::Mmap;
-use rayon::prelude::*;
 use rustpix_core::soa::HitBatch;
 use rustpix_tpx::ordering::TimeOrderedStream;
-use rustpix_tpx::section::{discover_sections, process_section_into_batch};
+use rustpix_tpx::section::discover_sections;
 use rustpix_tpx::{DetectorConfig, Tpx3Packet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -146,57 +145,22 @@ impl Tpx3FileReader {
 
     /// Reads and parses all hits from the file into a `HitBatch` (`SoA`).
     ///
+    /// This uses the pulse-based time-ordered stream to ensure correct
+    /// temporal ordering across pulses and chips.
+    ///
     /// # Errors
     /// Returns an error if the file size is invalid or the data cannot be parsed.
     pub fn read_batch(&self) -> Result<HitBatch> {
-        if !self.reader.len().is_multiple_of(8) {
-            return Err(Error::InvalidFormat(format!(
-                "file size {} is not a multiple of 8 (file: {})",
-                self.reader.len(),
-                self.reader.path.display()
-            )));
-        }
-
-        let data = self.reader.as_bytes();
-
-        // Phase 1: Discover sections
-        let sections = discover_sections(data);
-
-        // Phase 2: Process sections
-        let tdc_correction = self.config.tdc_correction_25ns();
-        let config = &self.config;
-
-        let mut section_batches: Vec<HitBatch> = sections
-            .par_iter()
-            .map(|section| {
-                let mut batch = HitBatch::with_capacity((section.packet_count() * 6) / 10);
-                let _ = process_section_into_batch(
-                    data,
-                    section,
-                    tdc_correction,
-                    |chip_id, x, y| config.map_chip_to_global(chip_id, x, y),
-                    &mut batch,
-                );
-                batch
-            })
-            .collect();
-
-        let total_hits = section_batches.iter().map(HitBatch::len).sum();
-        let mut all_batch = HitBatch::with_capacity(total_hits);
-        for batch in section_batches.drain(..) {
-            all_batch.append(&batch);
-        }
-
-        // Sort by TOF for deterministic ordering
-        all_batch.sort_by_tof();
-
-        Ok(all_batch)
+        self.read_batch_time_ordered()
     }
 
     /// Reads hits using the efficient time-ordered stream.
     ///
     /// This uses a pulse-based K-way merge to produce time-ordered hits
     /// without loading the entire file or performing a global sort.
+    ///
+    /// This is functionally equivalent to `read_batch()` and is retained
+    /// for clarity.
     ///
     /// # Errors
     /// Returns an error if the file size is invalid.
