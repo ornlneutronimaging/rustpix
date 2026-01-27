@@ -17,5 +17,7 @@ pub use out_of_core::{pulse_batches, OutOfCoreConfig, PulseBatchGroup, PulseBatc
 pub use reader::{
     EventBatch, MappedFileReader, TimeOrderedEventStream, TimeOrderedHitStream, Tpx3FileReader,
 };
+#[cfg(feature = "hdf5")]
+pub use hdf5::{Hdf5HitSink, Hdf5NeutronSink};
 pub use scanner::PacketScanner;
 pub use writer::DataFileWriter;

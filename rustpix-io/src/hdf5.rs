@@ -13,6 +13,122 @@ use std::str::FromStr;
 const NS_PER_TICK: u64 = 25;
 const HISTOGRAM_AXES: [&str; 4] = ["rot_angle", "y", "x", "time_of_flight"];
 
+/// Streaming writer for hit events in NXevent_data.
+pub struct Hdf5HitSink {
+    _file: File,
+    writer: HitEventWriter,
+    options: HitWriteOptions,
+}
+
+impl Hdf5HitSink {
+    /// Create a new streaming hit sink.
+    ///
+    /// # Errors
+    /// Returns an error if the HDF5 file or datasets cannot be created.
+    pub fn create<P: AsRef<Path>>(path: P, options: HitWriteOptions) -> Result<Self> {
+        let file = File::create(path)?;
+        set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
+
+        let entry = file.create_group("entry")?;
+        set_attr_str_group(&entry, "NX_class", "NXentry")?;
+        set_conversion_attrs(
+            &entry,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+
+        let hits = entry.create_group("hits")?;
+        set_attr_str_group(&hits, "NX_class", "NXevent_data")?;
+        hits.new_attr::<u32>()
+            .create("x_size")?
+            .write_scalar(&options.x_size)?;
+        hits.new_attr::<u32>()
+            .create("y_size")?
+            .write_scalar(&options.y_size)?;
+        set_conversion_attrs(
+            &hits,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+
+        let writer = HitEventWriter::new(&hits, &options)?;
+        Ok(Self {
+            _file: file,
+            writer,
+            options,
+        })
+    }
+
+    /// Append a hit batch.
+    ///
+    /// # Errors
+    /// Returns an error if HDF5 I/O fails.
+    pub fn write_hits(&mut self, batch: &EventBatch) -> Result<()> {
+        self.writer.append_batch(batch, &self.options)
+    }
+}
+
+/// Streaming writer for neutron events in NXevent_data.
+pub struct Hdf5NeutronSink {
+    _file: File,
+    writer: NeutronEventWriter,
+    options: NeutronWriteOptions,
+}
+
+impl Hdf5NeutronSink {
+    /// Create a new streaming neutron sink.
+    ///
+    /// # Errors
+    /// Returns an error if the HDF5 file or datasets cannot be created.
+    pub fn create<P: AsRef<Path>>(path: P, options: NeutronWriteOptions) -> Result<Self> {
+        let file = File::create(path)?;
+        set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
+
+        let entry = file.create_group("entry")?;
+        set_attr_str_group(&entry, "NX_class", "NXentry")?;
+        set_conversion_attrs(
+            &entry,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+
+        let neutrons = entry.create_group("neutrons")?;
+        set_attr_str_group(&neutrons, "NX_class", "NXevent_data")?;
+        neutrons
+            .new_attr::<u32>()
+            .create("x_size")?
+            .write_scalar(&options.x_size)?;
+        neutrons
+            .new_attr::<u32>()
+            .create("y_size")?
+            .write_scalar(&options.y_size)?;
+        set_conversion_attrs(
+            &neutrons,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+
+        let writer = NeutronEventWriter::new(&neutrons, &options)?;
+        Ok(Self {
+            _file: file,
+            writer,
+            options,
+        })
+    }
+
+    /// Append a neutron batch.
+    ///
+    /// # Errors
+    /// Returns an error if HDF5 I/O fails.
+    pub fn write_neutrons(&mut self, batch: &NeutronEventBatch) -> Result<()> {
+        self.writer.append_batch(batch, &self.options)
+    }
+}
+
 /// Event write configuration for hits.
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -1390,6 +1506,124 @@ mod tests {
         );
         assert_eq!(data.n_hits.as_ref().unwrap(), &vec![2, 3]);
         assert_eq!(data.chip_id.as_ref().unwrap(), &vec![1, 2]);
+    }
+
+    #[test]
+    fn test_hdf5_hit_sink_multi_batch() {
+        let mut first = HitBatch::with_capacity(2);
+        first.x.extend_from_slice(&[1, 2]);
+        first.y.extend_from_slice(&[3, 4]);
+        first.tof.extend_from_slice(&[10, 20]);
+        first.tot.extend_from_slice(&[5, 6]);
+        first.timestamp.extend_from_slice(&[100, 200]);
+        first.chip_id.extend_from_slice(&[0, 1]);
+        first.cluster_id.extend_from_slice(&[-1, 2]);
+
+        let mut second = HitBatch::with_capacity(1);
+        second.x.extend_from_slice(&[5]);
+        second.y.extend_from_slice(&[6]);
+        second.tof.extend_from_slice(&[30]);
+        second.tot.extend_from_slice(&[7]);
+        second.timestamp.extend_from_slice(&[300]);
+        second.chip_id.extend_from_slice(&[2]);
+        second.cluster_id.extend_from_slice(&[3]);
+
+        let batches = [
+            EventBatch {
+                tdc_timestamp_25ns: 7,
+                hits: first,
+            },
+            EventBatch {
+                tdc_timestamp_25ns: 9,
+                hits: second,
+            },
+        ];
+
+        let file = NamedTempFile::new().unwrap();
+        let options = HitWriteOptions {
+            x_size: 512,
+            y_size: 512,
+            chunk_events: 2,
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_cluster_id: true,
+        };
+
+        let mut sink = Hdf5HitSink::create(file.path(), options).unwrap();
+        sink.write_hits(&batches[0]).unwrap();
+        sink.write_hits(&batches[1]).unwrap();
+
+        let data = read_hits_hdf5(file.path()).unwrap();
+        assert_eq!(data.event_id.len(), 3);
+        assert_eq!(
+            data.event_time_zero_ns,
+            vec![7 * NS_PER_TICK, 9 * NS_PER_TICK]
+        );
+        assert_eq!(data.event_index, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_hdf5_neutron_sink_multi_batch() {
+        let mut first = NeutronBatch::with_capacity(1);
+        first.x.extend_from_slice(&[10.2]);
+        first.y.extend_from_slice(&[20.4]);
+        first.tof.extend_from_slice(&[30]);
+        first.tot.extend_from_slice(&[7]);
+        first.n_hits.extend_from_slice(&[2]);
+        first.chip_id.extend_from_slice(&[1]);
+
+        let mut second = NeutronBatch::with_capacity(2);
+        second.x.extend_from_slice(&[11.8, 12.4]);
+        second.y.extend_from_slice(&[21.6, 22.0]);
+        second.tof.extend_from_slice(&[40, 50]);
+        second.tot.extend_from_slice(&[9, 11]);
+        second.n_hits.extend_from_slice(&[3, 4]);
+        second.chip_id.extend_from_slice(&[2, 3]);
+
+        let batches = [
+            NeutronEventBatch {
+                tdc_timestamp_25ns: 12,
+                neutrons: first,
+            },
+            NeutronEventBatch {
+                tdc_timestamp_25ns: 13,
+                neutrons: second,
+            },
+        ];
+
+        let file = NamedTempFile::new().unwrap();
+        let options = NeutronWriteOptions {
+            x_size: 512,
+            y_size: 512,
+            chunk_events: 2,
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_n_hits: true,
+        };
+
+        let mut sink = Hdf5NeutronSink::create(file.path(), options).unwrap();
+        sink.write_neutrons(&batches[0]).unwrap();
+        sink.write_neutrons(&batches[1]).unwrap();
+
+        let data = read_neutrons_hdf5(file.path()).unwrap();
+        assert_eq!(data.event_id.len(), 3);
+        assert_eq!(
+            data.event_time_zero_ns,
+            vec![12 * NS_PER_TICK, 13 * NS_PER_TICK]
+        );
+        assert_eq!(data.event_index, vec![0, 1]);
     }
 
     #[test]
