@@ -40,6 +40,11 @@ impl OutOfCoreConfig {
         self
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
     fn resolve_budget_bytes(&self) -> Result<usize> {
         if let Some(bytes) = self.memory_budget_bytes {
             return Ok(bytes);
@@ -127,6 +132,9 @@ where
     ///
     /// `overlap_tof` is in 25ns ticks and is used only when a single pulse must
     /// be split to respect the memory budget.
+    ///
+    /// # Errors
+    /// Returns an error if the memory budget cannot be resolved.
     pub fn new(source: I, config: &OutOfCoreConfig, overlap_tof: u32) -> Result<Self> {
         let bytes_per_hit = bytes_per_hit();
         let budget = config.resolve_budget_bytes()?;
@@ -182,6 +190,9 @@ where
 }
 
 /// Convenience constructor for a reader-backed batcher.
+///
+/// # Errors
+/// Returns an error if the underlying reader or memory budget fails.
 pub fn pulse_batches(
     reader: &Tpx3FileReader,
     config: &OutOfCoreConfig,
@@ -199,12 +210,22 @@ fn bytes_per_hit() -> usize {
         + size_of::<i32>()
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 fn max_hits_for_budget(budget_bytes: usize, bytes_per_hit: usize) -> usize {
     let per_hit = (bytes_per_hit as f64 * MEMORY_OVERHEAD_FACTOR).ceil() as usize;
     let per_hit = per_hit.max(1);
     (budget_bytes / per_hit).max(1)
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 fn estimate_batch_bytes(hit_count: usize, bytes_per_hit: usize) -> usize {
     let per_hit = bytes_per_hit as f64 * MEMORY_OVERHEAD_FACTOR;
     (hit_count as f64 * per_hit).ceil() as usize
