@@ -2,7 +2,6 @@
 
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Plot, PlotImage, PlotPoint};
-use rayon::prelude::*;
 use rfd::FileDialog;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -19,7 +18,8 @@ use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
 use rustpix_io::Tpx3FileReader;
-use rustpix_tpx::section::{process_section_into_batch, scan_section_tdc, Tpx3Section};
+use rustpix_tpx::ordering::TimeOrderedStream;
+use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
 use rustpix_tpx::DetectorConfig;
 
 // We probably need to re-export MappedFileReader or use Tpx3FileReader internals?
@@ -674,8 +674,7 @@ fn load_file_worker(path: &Path, tx: &Sender<AppMessage>, tdc_frequency: f64) {
         "Processing hits...".to_string(),
     ));
 
-    let full_batch =
-        process_sections_to_batch(&mmap, &tpx_sections, &det_config, tdc_correction, tx);
+    let full_batch = process_sections_to_batch(&mmap, &tpx_sections, &det_config, tx);
 
     let _ = tx.send(AppMessage::LoadProgress(
         0.95,
@@ -797,33 +796,16 @@ fn process_sections_to_batch(
     mmap: &memmap2::Mmap,
     sections: &[Tpx3Section],
     det_config: &DetectorConfig,
-    tdc_correction: u32,
     tx: &Sender<AppMessage>,
 ) -> HitBatch {
     let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
     let mut full_batch = HitBatch::with_capacity(num_packets);
 
-    let chunk_size = 100;
-    let chunks: Vec<_> = sections.chunks(chunk_size).collect();
-    let total_chunks = chunks.len().max(1);
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let batches: Vec<HitBatch> = chunk
-            .par_iter()
-            .map(|sec| {
-                let mut b = HitBatch::with_capacity(sec.packet_count());
-                let dc = det_config.clone();
-                let transform = move |cid, x, y| dc.map_chip_to_global(cid, x, y);
-                process_section_into_batch(mmap, sec, tdc_correction, transform, &mut b);
-                b
-            })
-            .collect();
-
-        for b in batches {
-            full_batch.append(&b);
-        }
-
-        let progress = 0.25 + 0.75 * (usize_to_f32(i) / usize_to_f32(total_chunks));
+    let total_hits = num_packets.max(1);
+    let mut stream = TimeOrderedStream::new(mmap.clone(), sections, det_config);
+    while let Some(batch) = stream.next() {
+        full_batch.append(&batch);
+        let progress = 0.25 + 0.75 * (usize_to_f32(full_batch.len()) / usize_to_f32(total_hits));
         let _ = tx.send(AppMessage::LoadProgress(
             progress,
             format!("Processed {}/{} hits...", full_batch.len(), num_packets),

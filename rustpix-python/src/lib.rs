@@ -421,11 +421,11 @@ impl PyNeutronBatchStream {
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, detector_config=None, time_ordered=true, output_path=None))]
+#[pyo3(signature = (path, detector_config=None, output_path=None))]
+/// Read TPX3 hits as a single batch (always time-ordered).
 fn read_tpx3_hits(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
-    time_ordered: bool,
     output_path: Option<&str>,
 ) -> PyResult<PyHitBatch> {
     ensure_hdf5_disabled(output_path)?;
@@ -438,15 +438,9 @@ fn read_tpx3_hits(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(config.clone());
 
-    let batch = if time_ordered {
-        reader
-            .read_batch_time_ordered()
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-    } else {
-        reader
-            .read_batch()
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
-    };
+    let batch = reader
+        .read_batch()
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     Ok(PyHitBatch {
         batch: Some(batch),
@@ -456,7 +450,7 @@ fn read_tpx3_hits(
             extraction: None,
             algorithm: None,
             source_path: Some(path.to_string()),
-            time_ordered,
+            time_ordered: true,
         },
     })
 }

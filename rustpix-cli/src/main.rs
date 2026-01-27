@@ -106,11 +106,8 @@ enum Commands {
         iterations: usize,
     },
 
-    /// Benchmark sorting strategies (Standard vs Streaming)
-    OrderingBenchmark {
-        /// Input TPX3 file
-        input: PathBuf,
-    },
+    /// Ordering benchmark (deprecated; no-op)
+    OrderingBenchmark,
 }
 
 fn main() -> Result<()> {
@@ -139,7 +136,7 @@ fn main() -> Result<()> {
 
         Commands::Benchmark { input, iterations } => run_benchmark(&input, iterations),
 
-        Commands::OrderingBenchmark { input } => run_ordering_benchmark(&input),
+        Commands::OrderingBenchmark => run_ordering_benchmark(),
     }
 }
 
@@ -404,36 +401,8 @@ fn run_cluster_once(algo_enum: Algorithm, batch: &mut HitBatch) -> Result<()> {
     Ok(())
 }
 
-fn run_ordering_benchmark(input: &PathBuf) -> Result<()> {
-    println!("Benchmarking ordering strategies on: {}", input.display());
-    let reader = Tpx3FileReader::open(input)?;
-
-    let start = Instant::now();
-    let hits_std = reader.read_batch()?;
-    let time_std = start.elapsed();
-    println!(
-        "Standard (Load + Sort): {:.2?} ({} hits)",
-        time_std,
-        hits_std.len()
-    );
-
-    let start = Instant::now();
-    let hits_stream = reader.read_batch_time_ordered()?;
-    let time_stream = start.elapsed();
-    println!(
-        "Streaming (K-Way Merge): {:.2?} ({} hits)",
-        time_stream,
-        hits_stream.len()
-    );
-
-    let diff = (time_stream.as_secs_f64() / time_std.as_secs_f64() - 1.0) * 100.0;
-    println!("Performance Delta: {diff:+.2}%");
-
-    if !hits_std.is_empty() {
-        assert_eq!(hits_std.len(), hits_stream.len(), "Hit counts must match");
-        println!("Hit counts match: {}", hits_std.len());
-    }
-
+fn run_ordering_benchmark() -> Result<()> {
+    println!("Ordering benchmark removed: read_batch now uses the time-ordered stream.");
     Ok(())
 }
 
