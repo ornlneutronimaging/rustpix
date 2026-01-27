@@ -3,9 +3,10 @@
 use eframe::egui;
 use egui_plot::{Bar, BarChart, Plot, PlotImage, PlotPoint};
 use rfd::FileDialog;
+use std::collections::BinaryHeap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,8 @@ use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
 use rustpix_io::Tpx3FileReader;
-use rustpix_tpx::ordering::TimeOrderedStream;
+use rustpix_tpx::ordering::{PulseBatch, PulseReader};
+use rustpix_tpx::ChipTransform;
 use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
 use rustpix_tpx::DetectorConfig;
 
@@ -800,17 +802,93 @@ fn process_sections_to_batch(
 ) -> HitBatch {
     let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
     let mut full_batch = HitBatch::with_capacity(num_packets);
+    let tdc_correction = det_config.tdc_correction_25ns();
+
+    let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0) as usize;
+    let mut sections_by_chip = vec![Vec::new(); max_chip + 1];
+    for section in sections {
+        sections_by_chip[section.chip_id as usize].push(section.clone());
+    }
 
     let total_hits = num_packets.max(1);
-    let mut stream = TimeOrderedStream::new(mmap.clone(), sections, det_config);
-    while let Some(batch) = stream.next() {
-        full_batch.append(&batch);
-        let progress = 0.25 + 0.75 * (usize_to_f32(full_batch.len()) / usize_to_f32(total_hits));
-        let _ = tx.send(AppMessage::LoadProgress(
-            progress,
-            format!("Processed {}/{} hits...", full_batch.len(), num_packets),
-        ));
-    }
+    let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
+        vec![None; max_chip + 1];
+    let mut heap = BinaryHeap::new();
+
+    std::thread::scope(|scope| {
+        for (chip_id, chip_sections) in sections_by_chip.iter().enumerate() {
+            if chip_sections.is_empty() {
+                continue;
+            }
+
+            let (tx_batch, rx_batch) = sync_channel::<PulseBatch>(2);
+            receivers[chip_id] = Some(rx_batch);
+
+            let chip_sections = chip_sections.clone();
+            let transform = det_config
+                .chip_transforms
+                .get(chip_id)
+                .cloned()
+                .unwrap_or_else(ChipTransform::identity);
+
+            scope.spawn(move || {
+                let transform_closure = move |_cid, x, y| transform.apply(x, y);
+                let mut reader = PulseReader::new(
+                    mmap,
+                    &chip_sections,
+                    tdc_correction,
+                    transform_closure,
+                );
+                while let Some(batch) = reader.next_pulse() {
+                    if tx_batch.send(batch).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        for rx_opt in receivers.iter().flatten() {
+            if let Ok(batch) = rx_opt.recv() {
+                heap.push(batch);
+            }
+        }
+
+        while let Some(head) = heap.peek() {
+            let min_tdc = head.extended_tdc();
+            let mut merged = HitBatch::default();
+
+            while let Some(batch) = heap.peek() {
+                if batch.extended_tdc() != min_tdc {
+                    break;
+                }
+                let batch = heap.pop().expect("heap not empty");
+
+                if let Some(rx) = receivers
+                    .get(batch.chip_id as usize)
+                    .and_then(|opt| opt.as_ref())
+                {
+                    if let Ok(next) = rx.recv() {
+                        heap.push(next);
+                    }
+                }
+
+                merged.append(&batch.hits);
+            }
+
+            if merged.is_empty() {
+                continue;
+            }
+            merged.sort_by_tof();
+            full_batch.append(&merged);
+
+            let progress =
+                0.25 + 0.75 * (usize_to_f32(full_batch.len()) / usize_to_f32(total_hits));
+            let _ = tx.send(AppMessage::LoadProgress(
+                progress,
+                format!("Processed {}/{} hits...", full_batch.len(), num_packets),
+            ));
+        }
+    });
 
     full_batch
 }
