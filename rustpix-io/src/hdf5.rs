@@ -1413,6 +1413,10 @@ fn write_histogram_axes(
         let energy_ds =
             create_fixed_dataset::<f64, _>(group, "energy_eV", (energy.len(),), None, None, false)?;
         set_dataset_units(&energy_ds, "eV")?;
+        set_axis_mode(
+            &energy_ds,
+            axis_mode_for_len(shape.time_of_flight, time_of_flight_ns.len())?,
+        )?;
         energy_ds.write(ArrayView1::from(energy.as_slice()))?;
     }
 
