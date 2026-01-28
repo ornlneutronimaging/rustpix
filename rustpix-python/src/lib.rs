@@ -545,49 +545,14 @@ fn process_tpx3_neutrons(
         };
         Ok(Py::new(py, batch)?.into_any())
     } else {
-        let use_out_of_core = processing.out_of_core.enabled.unwrap_or(true);
-        if !use_out_of_core && processing.out_of_core.has_overrides() {
-            return Err(PyValueError::new_err(
-                "memory_fraction/memory_budget_bytes require out_of_core=True",
-            ));
-        }
-
-        let stream: NeutronStream = if use_out_of_core {
-            let mut memory = OutOfCoreConfig::default();
-            if let Some(fraction) = processing.out_of_core.memory_fraction {
-                memory = memory.with_memory_fraction(fraction);
-            }
-            if let Some(bytes) = processing.out_of_core.memory_budget_bytes {
-                memory = memory.with_memory_budget_bytes(bytes);
-            }
-
-            let stream = out_of_core_neutron_stream(
-                &reader,
-                algo,
-                &clustering,
-                &extraction,
-                &params,
-                &memory,
-            )
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            Box::new(stream.map(|result| {
-                result
-                    .map(|batch| batch.neutrons)
-                    .map_err(|err| err.to_string())
-            }))
-        } else {
-            let stream = reader
-                .stream_time_ordered()
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            let stream = cluster_and_extract_stream_iter(
-                stream,
-                algo,
-                clustering.clone(),
-                extraction.clone(),
-                params,
-            );
-            Box::new(stream.map(|result| result.map_err(|err| err.to_string())))
-        };
+        let stream = build_neutron_stream(
+            &reader,
+            algo,
+            &clustering,
+            &extraction,
+            &params,
+            &processing.out_of_core,
+        )?;
 
         let stream = PyNeutronBatchStream {
             stream,
@@ -651,6 +616,12 @@ fn cluster_hits(
 
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, **kwargs))]
+/// Stream TPX3 neutrons in pulse-bounded batches.
+///
+/// Additional kwargs:
+/// - out_of_core (bool): enable the out-of-core pipeline (default: True)
+/// - memory_fraction (float): fraction of available RAM to target (default: 0.5)
+/// - memory_budget_bytes (int): explicit memory budget override
 fn stream_tpx3_neutrons(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
@@ -683,43 +654,14 @@ fn stream_tpx3_neutrons(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(detector.clone());
 
-    let use_out_of_core = out_of_core.enabled.unwrap_or(true);
-    if !use_out_of_core && out_of_core.has_overrides() {
-        return Err(PyValueError::new_err(
-            "memory_fraction/memory_budget_bytes require out_of_core=True",
-        ));
-    }
-
-    let stream: NeutronStream = if use_out_of_core {
-        let mut memory = OutOfCoreConfig::default();
-        if let Some(fraction) = out_of_core.memory_fraction {
-            memory = memory.with_memory_fraction(fraction);
-        }
-        if let Some(bytes) = out_of_core.memory_budget_bytes {
-            memory = memory.with_memory_budget_bytes(bytes);
-        }
-
-        let stream =
-            out_of_core_neutron_stream(&reader, algo, &clustering, &extraction, &params, &memory)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        Box::new(stream.map(|result| {
-            result
-                .map(|batch| batch.neutrons)
-                .map_err(|err| err.to_string())
-        }))
-    } else {
-        let stream = reader
-            .stream_time_ordered()
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        let stream = cluster_and_extract_stream_iter(
-            stream,
-            algo,
-            clustering.clone(),
-            extraction.clone(),
-            params,
-        );
-        Box::new(stream.map(|result| result.map_err(|err| err.to_string())))
-    };
+    let stream = build_neutron_stream(
+        &reader,
+        algo,
+        &clustering,
+        &extraction,
+        &params,
+        &out_of_core,
+    )?;
 
     Ok(PyNeutronBatchStream {
         stream,
@@ -816,6 +758,30 @@ impl OutOfCoreKwargs {
     fn has_overrides(&self) -> bool {
         self.memory_fraction.is_some() || self.memory_budget_bytes.is_some()
     }
+
+    fn resolve_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    fn validate(&self) -> PyResult<()> {
+        if self.enabled == Some(false) && self.has_overrides() {
+            return Err(PyValueError::new_err(
+                "memory_fraction/memory_budget_bytes require out_of_core=True",
+            ));
+        }
+        Ok(())
+    }
+
+    fn to_config(&self) -> OutOfCoreConfig {
+        let mut memory = OutOfCoreConfig::default();
+        if let Some(fraction) = self.memory_fraction {
+            memory = memory.with_memory_fraction(fraction);
+        }
+        if let Some(bytes) = self.memory_budget_bytes {
+            memory = memory.with_memory_budget_bytes(bytes);
+        }
+        memory
+    }
 }
 
 fn extract_kwarg<'py, T: FromPyObject<'py>>(
@@ -907,6 +873,44 @@ fn parse_processing_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Proce
         output_path,
         out_of_core,
     })
+}
+
+fn build_neutron_stream(
+    reader: &Tpx3FileReader,
+    algo: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    extraction: &ExtractionConfig,
+    params: &AlgorithmParams,
+    out_of_core: &OutOfCoreKwargs,
+) -> PyResult<NeutronStream> {
+    out_of_core.validate()?;
+    let use_out_of_core = out_of_core.resolve_enabled();
+
+    if use_out_of_core {
+        let memory = out_of_core.to_config();
+        let stream =
+            out_of_core_neutron_stream(reader, algo, clustering, extraction, params, &memory)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        Ok(Box::new(stream.map(|result| {
+            result
+                .map(|batch| batch.neutrons)
+                .map_err(|err| err.to_string())
+        })))
+    } else {
+        let stream = reader
+            .stream_time_ordered()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        let stream = cluster_and_extract_stream_iter(
+            stream,
+            algo,
+            clustering.clone(),
+            extraction.clone(),
+            params.clone(),
+        );
+        Ok(Box::new(
+            stream.map(|result| result.map_err(|err| err.to_string())),
+        ))
+    }
 }
 
 fn parse_algorithm(name: &str) -> PyResult<ClusteringAlgorithm> {
