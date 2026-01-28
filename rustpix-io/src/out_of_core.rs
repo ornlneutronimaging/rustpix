@@ -40,12 +40,16 @@ impl OutOfCoreConfig {
         self
     }
 
+    /// Resolve the target memory budget in bytes.
+    ///
+    /// # Errors
+    /// Returns an error if the memory fraction is invalid or system memory cannot be queried.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
         clippy::cast_sign_loss
     )]
-    fn resolve_budget_bytes(&self) -> Result<usize> {
+    pub fn resolve_budget_bytes(&self) -> Result<usize> {
         if let Some(bytes) = self.memory_budget_bytes {
             return Ok(bytes);
         }

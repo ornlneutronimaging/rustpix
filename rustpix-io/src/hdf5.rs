@@ -1,12 +1,15 @@
 //! HDF5/NeXus event I/O (`NXevent_data`).
 
+use crate::out_of_core::OutOfCoreConfig;
 use crate::reader::EventBatch;
 use crate::{Error, Result};
 use hdf5::types::{H5Type, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
-use ndarray::{s, ArrayView, ArrayView1};
+use ndarray::{s, Array4, ArrayView, ArrayView1, ArrayView4, Zip};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_tpx::DetectorConfig;
+use std::collections::{HashMap, HashSet};
+use std::mem::size_of;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -298,6 +301,24 @@ fn create_event_group(
         .write_scalar(&y_size)?;
     set_conversion_attrs(&group, flight_path_m, tof_offset_ns, energy_axis_kind)?;
     Ok(group)
+}
+
+fn create_histogram_group(entry: &Group, options: &HistogramWriteOptions) -> Result<Group> {
+    let histogram = entry.create_group("histogram")?;
+    set_attr_str_group(&histogram, "NX_class", "NXdata")?;
+    set_attr_str_group(&histogram, "signal", "counts")?;
+    set_axes_attr(&histogram, &HISTOGRAM_AXES)?;
+    set_axis_indices(&histogram, "rot_angle", 0)?;
+    set_axis_indices(&histogram, "y", 1)?;
+    set_axis_indices(&histogram, "x", 2)?;
+    set_axis_indices(&histogram, "time_of_flight", 3)?;
+    set_conversion_attrs(
+        &histogram,
+        options.flight_path_m,
+        options.tof_offset_ns,
+        options.energy_axis_kind.as_deref(),
+    )?;
+    Ok(histogram)
 }
 
 /// Writes hit events to an HDF5/NeXus file.
@@ -974,6 +995,15 @@ impl HistogramShape {
     }
 }
 
+/// Histogram axis data for streaming writes.
+#[derive(Clone, Debug)]
+pub struct HistogramAxisData {
+    pub rot_angle: Vec<f64>,
+    pub y: Vec<f64>,
+    pub x: Vec<f64>,
+    pub time_of_flight_ns: Vec<f64>,
+}
+
 /// Histogram data for writing.
 #[derive(Clone, Debug)]
 pub struct HistogramWriteData {
@@ -1006,6 +1036,240 @@ pub struct HistogramAttributes {
     pub energy_axis_kind: Option<String>,
 }
 
+/// A histogram bin update.
+#[derive(Clone, Copy, Debug)]
+pub struct HistogramBin {
+    pub rot_angle: usize,
+    pub y: usize,
+    pub x: usize,
+    pub time_of_flight: usize,
+    pub count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct HistogramChunkKey {
+    rot_angle: usize,
+    y: usize,
+    x: usize,
+    time_of_flight: usize,
+}
+
+/// Streaming writer for histogram/hyperspectra counts in `NXdata`.
+///
+/// Call `flush()` before dropping to ensure buffered chunks are written.
+pub struct Hdf5HistogramSink {
+    _file: File,
+    counts: Dataset,
+    shape: HistogramShape,
+    chunk: [usize; 4],
+    cache: HashMap<HistogramChunkKey, Vec<u64>>,
+    cache_bytes: usize,
+    max_cache_bytes: usize,
+    written_chunks: HashSet<HistogramChunkKey>,
+}
+
+impl Hdf5HistogramSink {
+    /// Create a new histogram sink with bounded in-memory caching.
+    ///
+    /// # Errors
+    /// Returns an error if the file or datasets cannot be created or axes are invalid.
+    pub fn create<P: AsRef<Path>>(
+        path: P,
+        shape: HistogramShape,
+        axes: &HistogramAxisData,
+        options: &HistogramWriteOptions,
+        memory: &OutOfCoreConfig,
+    ) -> Result<Self> {
+        if shape.is_empty() {
+            return Err(Error::InvalidFormat(
+                "histogram shape must be non-empty".to_string(),
+            ));
+        }
+        validate_histogram_axes(
+            shape,
+            axes.rot_angle.len(),
+            axes.y.len(),
+            axes.x.len(),
+            axes.time_of_flight_ns.len(),
+        )?;
+
+        let file = File::create(path)?;
+        set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
+
+        let entry = create_entry(
+            &file,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+        let histogram = create_histogram_group(&entry, options)?;
+        write_histogram_axes(
+            &histogram,
+            shape,
+            &axes.rot_angle,
+            &axes.y,
+            &axes.x,
+            &axes.time_of_flight_ns,
+            options,
+        )?;
+
+        let chunk = resolve_histogram_chunk(shape, options.chunk_counts)?;
+        let counts = create_histogram_counts_dataset(&histogram, shape, Some(chunk), options)?;
+
+        let budget = memory.resolve_budget_bytes()?;
+        let chunk_bytes = chunk_len_bytes(chunk);
+        let max_cache_bytes = budget.max(chunk_bytes.max(1));
+
+        Ok(Self {
+            _file: file,
+            counts,
+            shape,
+            chunk,
+            cache: HashMap::new(),
+            cache_bytes: 0,
+            max_cache_bytes,
+            written_chunks: HashSet::new(),
+        })
+    }
+
+    /// Increment histogram bins.
+    ///
+    /// # Errors
+    /// Returns an error if indices are out of bounds or HDF5 writes fail.
+    pub fn add_bins<I>(&mut self, bins: I) -> Result<()>
+    where
+        I: IntoIterator<Item = HistogramBin>,
+    {
+        for bin in bins {
+            if bin.count == 0 {
+                continue;
+            }
+            self.add_bin(bin)?;
+        }
+        Ok(())
+    }
+
+    /// Flush any cached chunks to disk.
+    ///
+    /// # Errors
+    /// Returns an error if HDF5 I/O fails.
+    pub fn flush(&mut self) -> Result<()> {
+        self.flush_all()
+    }
+
+    fn add_bin(&mut self, bin: HistogramBin) -> Result<()> {
+        self.ensure_in_bounds(&bin)?;
+        let key = HistogramChunkKey {
+            rot_angle: bin.rot_angle / self.chunk[0],
+            y: bin.y / self.chunk[1],
+            x: bin.x / self.chunk[2],
+            time_of_flight: bin.time_of_flight / self.chunk[3],
+        };
+
+        let (start, dims) = self.chunk_bounds(key);
+        let buffer = self.cache_entry(key, dims);
+        let offset = chunk_offset(
+            [bin.rot_angle, bin.y, bin.x, bin.time_of_flight],
+            start,
+            dims,
+        );
+        buffer[offset] = buffer[offset].saturating_add(bin.count);
+        self.flush_if_needed()
+    }
+
+    fn ensure_in_bounds(&self, bin: &HistogramBin) -> Result<()> {
+        if bin.rot_angle >= self.shape.rot_angle
+            || bin.y >= self.shape.y
+            || bin.x >= self.shape.x
+            || bin.time_of_flight >= self.shape.time_of_flight
+        {
+            return Err(Error::InvalidFormat(format!(
+                "histogram bin index out of bounds: bin=({}, {}, {}, {}), shape=({}, {}, {}, {})",
+                bin.rot_angle,
+                bin.y,
+                bin.x,
+                bin.time_of_flight,
+                self.shape.rot_angle,
+                self.shape.y,
+                self.shape.x,
+                self.shape.time_of_flight,
+            )));
+        }
+        Ok(())
+    }
+
+    fn cache_entry(&mut self, key: HistogramChunkKey, dims: [usize; 4]) -> &mut Vec<u64> {
+        if !self.cache.contains_key(&key) {
+            let len = dims.iter().product::<usize>();
+            let bytes = len.saturating_mul(size_of::<u64>());
+            self.cache_bytes = self.cache_bytes.saturating_add(bytes);
+            self.cache.insert(key, vec![0; len]);
+        }
+        self.cache.get_mut(&key).expect("chunk buffer must exist")
+    }
+
+    fn flush_if_needed(&mut self) -> Result<()> {
+        if self.cache_bytes > self.max_cache_bytes {
+            self.flush_all()?;
+        }
+        Ok(())
+    }
+
+    fn flush_all(&mut self) -> Result<()> {
+        let cache = std::mem::take(&mut self.cache);
+        for (key, buffer) in cache {
+            self.flush_chunk(key, &buffer)?;
+        }
+        self.cache_bytes = 0;
+        Ok(())
+    }
+
+    fn flush_chunk(&mut self, key: HistogramChunkKey, buffer: &[u64]) -> Result<()> {
+        let (start, dims) = self.chunk_bounds(key);
+        let view = chunk_view(buffer, dims)?;
+        let selection = s![
+            start[0]..start[0] + dims[0],
+            start[1]..start[1] + dims[1],
+            start[2]..start[2] + dims[2],
+            start[3]..start[3] + dims[3]
+        ];
+
+        if self.written_chunks.contains(&key) {
+            let mut existing: Array4<u64> = self.counts.read_slice(selection)?;
+            Zip::from(&mut existing).and(view).for_each(|a, b| {
+                *a = a.saturating_add(*b);
+            });
+            self.counts.write_slice(existing.view(), selection)?;
+        } else {
+            self.counts.write_slice(view, selection)?;
+            self.written_chunks.insert(key);
+        }
+
+        Ok(())
+    }
+
+    fn chunk_bounds(&self, key: HistogramChunkKey) -> ([usize; 4], [usize; 4]) {
+        let start0 = key.rot_angle.saturating_mul(self.chunk[0]);
+        let start1 = key.y.saturating_mul(self.chunk[1]);
+        let start2 = key.x.saturating_mul(self.chunk[2]);
+        let start3 = key.time_of_flight.saturating_mul(self.chunk[3]);
+
+        let end0 = start0.saturating_add(self.chunk[0]);
+        let end1 = start1.saturating_add(self.chunk[1]);
+        let end2 = start2.saturating_add(self.chunk[2]);
+        let end3 = start3.saturating_add(self.chunk[3]);
+
+        let len0 = end0.min(self.shape.rot_angle).saturating_sub(start0);
+        let len1 = end1.min(self.shape.y).saturating_sub(start1);
+        let len2 = end2.min(self.shape.x).saturating_sub(start2);
+        let len3 = end3.min(self.shape.time_of_flight).saturating_sub(start3);
+
+        let start = [start0, start1, start2, start3];
+        let lengths = [len0, len1, len2, len3];
+        (start, lengths)
+    }
+}
+
 /// Writes histogram/hyperspectra data to an HDF5/NeXus file.
 ///
 /// # Errors
@@ -1029,21 +1293,7 @@ pub fn write_histogram_hdf5<P: AsRef<Path>>(
         options.energy_axis_kind.as_deref(),
     )?;
 
-    let histogram = entry.create_group("histogram")?;
-    set_attr_str_group(&histogram, "NX_class", "NXdata")?;
-    set_attr_str_group(&histogram, "signal", "counts")?;
-    set_axes_attr(&histogram, &HISTOGRAM_AXES)?;
-    set_axis_indices(&histogram, "rot_angle", 0)?;
-    set_axis_indices(&histogram, "y", 1)?;
-    set_axis_indices(&histogram, "x", 2)?;
-    set_axis_indices(&histogram, "time_of_flight", 3)?;
-
-    set_conversion_attrs(
-        &histogram,
-        options.flight_path_m,
-        options.tof_offset_ns,
-        options.energy_axis_kind.as_deref(),
-    )?;
+    let histogram = create_histogram_group(&entry, options)?;
 
     write_histogram_datasets(&histogram, data, options)?;
     Ok(())
@@ -1106,16 +1356,7 @@ fn write_histogram_datasets(
     options: &HistogramWriteOptions,
 ) -> Result<()> {
     let shape = data.shape;
-
-    let counts_ds = create_fixed_dataset::<u64, _>(
-        group,
-        "counts",
-        (shape.rot_angle, shape.y, shape.x, shape.time_of_flight),
-        options.chunk_counts,
-        options.compression,
-        options.shuffle,
-    )?;
-    set_dataset_units(&counts_ds, "count")?;
+    let counts_ds = create_histogram_counts_dataset(group, shape, options.chunk_counts, options)?;
 
     let counts_view = ArrayView::from_shape(
         (shape.rot_angle, shape.y, shape.x, shape.time_of_flight),
@@ -1124,47 +1365,141 @@ fn write_histogram_datasets(
     .map_err(|e| Error::InvalidFormat(format!("counts shape mismatch: {e}")))?;
     counts_ds.write(counts_view)?;
 
-    let rot_ds = create_fixed_dataset::<f64, _>(
+    write_histogram_axes(
         group,
-        "rot_angle",
-        (data.rot_angle.len(),),
-        None,
-        None,
-        false,
+        shape,
+        &data.rot_angle,
+        &data.y,
+        &data.x,
+        &data.time_of_flight_ns,
+        options,
     )?;
+
+    Ok(())
+}
+
+fn write_histogram_axes(
+    group: &Group,
+    shape: HistogramShape,
+    rot_angle: &[f64],
+    y: &[f64],
+    x: &[f64],
+    time_of_flight_ns: &[f64],
+    options: &HistogramWriteOptions,
+) -> Result<()> {
+    let rot_ds =
+        create_fixed_dataset::<f64, _>(group, "rot_angle", (rot_angle.len(),), None, None, false)?;
     set_dataset_units(&rot_ds, "deg")?;
-    rot_ds.write(ArrayView1::from(data.rot_angle.as_slice()))?;
+    set_axis_mode(
+        &rot_ds,
+        axis_mode_for_len(shape.rot_angle, rot_angle.len())?,
+    )?;
+    rot_ds.write(ArrayView1::from(rot_angle))?;
 
-    let y_ds = create_fixed_dataset::<f64, _>(group, "y", (data.y.len(),), None, None, false)?;
+    let y_ds = create_fixed_dataset::<f64, _>(group, "y", (y.len(),), None, None, false)?;
     set_dataset_units(&y_ds, "pixel")?;
-    y_ds.write(ArrayView1::from(data.y.as_slice()))?;
+    set_axis_mode(&y_ds, axis_mode_for_len(shape.y, y.len())?)?;
+    y_ds.write(ArrayView1::from(y))?;
 
-    let x_ds = create_fixed_dataset::<f64, _>(group, "x", (data.x.len(),), None, None, false)?;
+    let x_ds = create_fixed_dataset::<f64, _>(group, "x", (x.len(),), None, None, false)?;
     set_dataset_units(&x_ds, "pixel")?;
-    x_ds.write(ArrayView1::from(data.x.as_slice()))?;
+    set_axis_mode(&x_ds, axis_mode_for_len(shape.x, x.len())?)?;
+    x_ds.write(ArrayView1::from(x))?;
 
     let tof_ds = create_fixed_dataset::<f64, _>(
         group,
         "time_of_flight",
-        (data.time_of_flight_ns.len(),),
+        (time_of_flight_ns.len(),),
         None,
         None,
         false,
     )?;
     set_dataset_units(&tof_ds, "ns")?;
-    tof_ds.write(ArrayView1::from(data.time_of_flight_ns.as_slice()))?;
+    set_axis_mode(
+        &tof_ds,
+        axis_mode_for_len(shape.time_of_flight, time_of_flight_ns.len())?,
+    )?;
+    tof_ds.write(ArrayView1::from(time_of_flight_ns))?;
 
     if let (Some(flight_path_m), Some(tof_offset_ns)) =
         (options.flight_path_m, options.tof_offset_ns)
     {
-        let energy = derive_energy_axis_ev(&data.time_of_flight_ns, flight_path_m, tof_offset_ns);
+        let energy = derive_energy_axis_ev(time_of_flight_ns, flight_path_m, tof_offset_ns);
         let energy_ds =
             create_fixed_dataset::<f64, _>(group, "energy_eV", (energy.len(),), None, None, false)?;
         set_dataset_units(&energy_ds, "eV")?;
+        set_axis_mode(
+            &energy_ds,
+            axis_mode_for_len(shape.time_of_flight, time_of_flight_ns.len())?,
+        )?;
         energy_ds.write(ArrayView1::from(energy.as_slice()))?;
     }
 
     Ok(())
+}
+
+fn create_histogram_counts_dataset(
+    group: &Group,
+    shape: HistogramShape,
+    chunk: Option<[usize; 4]>,
+    options: &HistogramWriteOptions,
+) -> Result<Dataset> {
+    let counts_ds = create_fixed_dataset::<u64, _>(
+        group,
+        "counts",
+        (shape.rot_angle, shape.y, shape.x, shape.time_of_flight),
+        chunk,
+        options.compression,
+        options.shuffle,
+    )?;
+    set_dataset_units(&counts_ds, "count")?;
+    Ok(counts_ds)
+}
+
+fn resolve_histogram_chunk(shape: HistogramShape, chunk: Option<[usize; 4]>) -> Result<[usize; 4]> {
+    let mut chunk = chunk.unwrap_or_else(|| default_histogram_chunk(shape));
+    if chunk.contains(&0) {
+        return Err(Error::InvalidFormat(
+            "histogram chunk dimensions must be > 0".to_string(),
+        ));
+    }
+
+    chunk[0] = chunk[0].min(shape.rot_angle.max(1));
+    chunk[1] = chunk[1].min(shape.y.max(1));
+    chunk[2] = chunk[2].min(shape.x.max(1));
+    chunk[3] = chunk[3].min(shape.time_of_flight.max(1));
+    Ok(chunk)
+}
+
+fn default_histogram_chunk(shape: HistogramShape) -> [usize; 4] {
+    [
+        1,
+        shape.y.clamp(1, 64),
+        shape.x.clamp(1, 64),
+        shape.time_of_flight.clamp(1, 256),
+    ]
+}
+
+fn chunk_len_bytes(chunk: [usize; 4]) -> usize {
+    chunk
+        .iter()
+        .product::<usize>()
+        .saturating_mul(size_of::<u64>())
+}
+
+fn chunk_offset(index: [usize; 4], start: [usize; 4], dims: [usize; 4]) -> usize {
+    let local = [
+        index[0].saturating_sub(start[0]),
+        index[1].saturating_sub(start[1]),
+        index[2].saturating_sub(start[2]),
+        index[3].saturating_sub(start[3]),
+    ];
+    (((local[0] * dims[1] + local[1]) * dims[2] + local[2]) * dims[3]) + local[3]
+}
+
+fn chunk_view(buffer: &[u64], dims: [usize; 4]) -> Result<ArrayView4<'_, u64>> {
+    ArrayView::from_shape((dims[0], dims[1], dims[2], dims[3]), buffer)
+        .map_err(|e| Error::InvalidFormat(format!("chunk shape mismatch: {e}")))
 }
 
 fn validate_histogram_data(data: &HistogramWriteData) -> Result<()> {
@@ -1174,15 +1509,27 @@ fn validate_histogram_data(data: &HistogramWriteData) -> Result<()> {
             "counts length does not match shape".to_string(),
         ));
     }
-
-    validate_axis_len("rot_angle", shape.rot_angle, data.rot_angle.len())?;
-    validate_axis_len("y", shape.y, data.y.len())?;
-    validate_axis_len("x", shape.x, data.x.len())?;
-    validate_axis_len(
-        "time_of_flight",
-        shape.time_of_flight,
+    validate_histogram_axes(
+        shape,
+        data.rot_angle.len(),
+        data.y.len(),
+        data.x.len(),
         data.time_of_flight_ns.len(),
     )?;
+    Ok(())
+}
+
+fn validate_histogram_axes(
+    shape: HistogramShape,
+    rot_len: usize,
+    y_len: usize,
+    x_len: usize,
+    tof_len: usize,
+) -> Result<()> {
+    validate_axis_len("rot_angle", shape.rot_angle, rot_len)?;
+    validate_axis_len("y", shape.y, y_len)?;
+    validate_axis_len("x", shape.x, x_len)?;
+    validate_axis_len("time_of_flight", shape.time_of_flight, tof_len)?;
     Ok(())
 }
 
@@ -1317,11 +1664,33 @@ fn append_slice<T: H5Type>(dataset: &Dataset, offset: usize, data: &[T]) -> Resu
     Ok(())
 }
 
+fn axis_mode_for_len(dim: usize, axis_len: usize) -> Result<&'static str> {
+    if axis_len == dim {
+        Ok("centers")
+    } else if axis_len == dim + 1 {
+        Ok("edges")
+    } else {
+        Err(Error::InvalidFormat(format!(
+            "axis length {axis_len} must be {dim} or {}",
+            dim + 1
+        )))
+    }
+}
+
 fn set_dataset_units(dataset: &Dataset, units: &str) -> Result<()> {
     let value = to_var_len_unicode(units)?;
     dataset
         .new_attr::<VarLenUnicode>()
         .create("units")?
+        .write_scalar(&value)?;
+    Ok(())
+}
+
+fn set_axis_mode(dataset: &Dataset, mode: &str) -> Result<()> {
+    let value = to_var_len_unicode(mode)?;
+    dataset
+        .new_attr::<VarLenUnicode>()
+        .create("axis_mode")?
         .write_scalar(&value)?;
     Ok(())
 }
@@ -1937,5 +2306,135 @@ mod tests {
 
         let energy = loaded.energy_ev.expect("energy axis missing");
         assert_eq!(energy.len(), data.time_of_flight_ns.len());
+    }
+
+    #[test]
+    fn test_hdf5_histogram_sink_roundtrip() {
+        let shape = HistogramShape {
+            rot_angle: 1,
+            y: 2,
+            x: 2,
+            time_of_flight: 3,
+        };
+        let axes = HistogramAxisData {
+            rot_angle: vec![0.0],
+            y: vec![0.0, 1.0],
+            x: vec![0.0, 1.0],
+            time_of_flight_ns: vec![10.0, 20.0, 30.0],
+        };
+        let options = HistogramWriteOptions {
+            chunk_counts: Some([1, 1, 2, 2]),
+            compression: None,
+            shuffle: false,
+            flight_path_m: Some(4.0),
+            tof_offset_ns: Some(1.0),
+            energy_axis_kind: Some("tof".to_string()),
+        };
+        let memory = OutOfCoreConfig::default().with_memory_budget_bytes(32);
+
+        let file = NamedTempFile::new().unwrap();
+        let mut sink =
+            Hdf5HistogramSink::create(file.path(), shape, &axes, &options, &memory).unwrap();
+        sink.add_bins([
+            HistogramBin {
+                rot_angle: 0,
+                y: 0,
+                x: 0,
+                time_of_flight: 0,
+                count: 1,
+            },
+            HistogramBin {
+                rot_angle: 0,
+                y: 0,
+                x: 1,
+                time_of_flight: 1,
+                count: 2,
+            },
+            HistogramBin {
+                rot_angle: 0,
+                y: 1,
+                x: 0,
+                time_of_flight: 2,
+                count: 3,
+            },
+            HistogramBin {
+                rot_angle: 0,
+                y: 1,
+                x: 1,
+                time_of_flight: 0,
+                count: 4,
+            },
+        ])
+        .unwrap();
+        sink.flush().unwrap();
+        drop(sink);
+
+        let loaded = read_histogram_hdf5(file.path()).unwrap();
+        assert_eq!(loaded.shape, shape);
+        assert_eq!(loaded.rot_angle, axes.rot_angle);
+        assert_eq!(loaded.y, axes.y);
+        assert_eq!(loaded.x, axes.x);
+        assert_eq!(loaded.time_of_flight_ns, axes.time_of_flight_ns);
+        assert!(loaded.energy_ev.is_some());
+
+        let mut expected = vec![0u64; shape.len()];
+        let idx = |r, y, x, t| (((r * shape.y + y) * shape.x + x) * shape.time_of_flight) + t;
+        expected[idx(0, 0, 0, 0)] = 1;
+        expected[idx(0, 0, 1, 1)] = 2;
+        expected[idx(0, 1, 0, 2)] = 3;
+        expected[idx(0, 1, 1, 0)] = 4;
+        assert_eq!(loaded.counts, expected);
+    }
+
+    #[test]
+    fn test_hdf5_histogram_sink_accumulates_after_flush() {
+        let shape = HistogramShape {
+            rot_angle: 1,
+            y: 2,
+            x: 2,
+            time_of_flight: 3,
+        };
+        let axes = HistogramAxisData {
+            rot_angle: vec![0.0],
+            y: vec![0.0, 1.0],
+            x: vec![0.0, 1.0],
+            time_of_flight_ns: vec![10.0, 20.0, 30.0],
+        };
+        let options = HistogramWriteOptions {
+            chunk_counts: Some([1, 2, 2, 3]),
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: Some("tof".to_string()),
+        };
+        let memory = OutOfCoreConfig::default().with_memory_budget_bytes(8);
+
+        let file = NamedTempFile::new().unwrap();
+        let mut sink =
+            Hdf5HistogramSink::create(file.path(), shape, &axes, &options, &memory).unwrap();
+        sink.add_bins([HistogramBin {
+            rot_angle: 0,
+            y: 0,
+            x: 0,
+            time_of_flight: 0,
+            count: 2,
+        }])
+        .unwrap();
+        sink.flush().unwrap();
+        sink.add_bins([HistogramBin {
+            rot_angle: 0,
+            y: 0,
+            x: 0,
+            time_of_flight: 0,
+            count: 3,
+        }])
+        .unwrap();
+        sink.flush().unwrap();
+        drop(sink);
+
+        let loaded = read_histogram_hdf5(file.path()).unwrap();
+        let idx = |r, y, x, t| (((r * shape.y + y) * shape.x + x) * shape.time_of_flight) + t;
+        assert_eq!(loaded.counts[idx(0, 0, 0, 0)], 5);
     }
 }
