@@ -3,6 +3,7 @@
 //! This crate provides the foundational abstractions for hit detection,
 //! neutron processing, clustering, and centroid extraction.
 //!
+#![warn(missing_docs)]
 
 pub mod clustering;
 pub mod error;

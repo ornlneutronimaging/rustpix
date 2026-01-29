@@ -84,11 +84,17 @@ impl ClusteringConfig {
 /// Statistics from a clustering operation.
 #[derive(Clone, Debug, Default)]
 pub struct ClusteringStatistics {
+    /// Total number of hits processed.
     pub hits_processed: usize,
+    /// Number of clusters found.
     pub clusters_found: usize,
+    /// Number of hits classified as noise.
     pub noise_hits: usize,
+    /// Size of the largest cluster encountered.
     pub largest_cluster_size: usize,
+    /// Mean size of clusters.
     pub mean_cluster_size: f64,
+    /// Processing time in microseconds.
     pub processing_time_us: u64,
 }
 
