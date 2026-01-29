@@ -75,38 +75,58 @@ impl Neutron {
 /// Cluster size categories for analysis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClusterSize {
+    /// Single-hit cluster.
     Single,
+    /// Small cluster (2-4 hits).
     Small,
+    /// Medium cluster (5-10 hits).
     Medium,
+    /// Large cluster (>10 hits).
     Large,
 }
 
 /// Statistics for a collection of neutrons.
 #[derive(Clone, Debug, Default)]
 pub struct NeutronStatistics {
+    /// Number of neutrons in the sample.
     pub count: usize,
+    /// Mean time-of-flight (25ns units).
     pub mean_tof: f64,
+    /// Standard deviation of time-of-flight (25ns units).
     pub std_tof: f64,
+    /// Mean time-over-threshold.
     pub mean_tot: f64,
+    /// Mean cluster size (hits per neutron).
     pub mean_cluster_size: f64,
+    /// Fraction of single-hit neutrons.
     pub single_hit_fraction: f64,
+    /// Min/max X coordinate.
     pub x_range: (f64, f64),
+    /// Min/max Y coordinate.
     pub y_range: (f64, f64),
+    /// Min/max time-of-flight (25ns units).
     pub tof_range: (u32, u32),
 }
 
 /// Structure-of-arrays neutron output.
 #[derive(Clone, Debug, Default)]
 pub struct NeutronBatch {
+    /// X coordinates (super-resolution space).
     pub x: Vec<f64>,
+    /// Y coordinates (super-resolution space).
     pub y: Vec<f64>,
+    /// Time-of-flight values (25ns units).
     pub tof: Vec<u32>,
+    /// Time-over-threshold values.
     pub tot: Vec<u16>,
+    /// Number of hits per neutron.
     pub n_hits: Vec<u16>,
+    /// Chip ID per neutron.
     pub chip_id: Vec<u8>,
 }
 
 impl NeutronBatch {
+    /// Create a batch with pre-allocated capacity.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -119,16 +139,19 @@ impl NeutronBatch {
         }
     }
 
+    /// Number of neutrons in the batch.
     #[must_use]
     pub fn len(&self) -> usize {
         self.x.len()
     }
 
+    /// Returns true when the batch is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.x.is_empty()
     }
 
+    /// Append a single neutron to the batch.
     pub fn push(&mut self, neutron: Neutron) {
         self.x.push(neutron.x);
         self.y.push(neutron.y);
@@ -138,6 +161,7 @@ impl NeutronBatch {
         self.chip_id.push(neutron.chip_id);
     }
 
+    /// Append all neutrons from another batch.
     pub fn append(&mut self, other: &NeutronBatch) {
         self.x.extend_from_slice(&other.x);
         self.y.extend_from_slice(&other.y);
@@ -147,6 +171,7 @@ impl NeutronBatch {
         self.chip_id.extend_from_slice(&other.chip_id);
     }
 
+    /// Clear all neutron data from the batch.
     pub fn clear(&mut self) {
         self.x.clear();
         self.y.clear();
