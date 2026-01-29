@@ -28,13 +28,18 @@ use std::sync::Arc;
 /// A batch of hits belonging to a single pulse (TDC period) from one chip.
 #[derive(Debug, Clone)]
 pub struct PulseBatch {
+    /// Chip identifier for this pulse batch.
     pub chip_id: u8,
+    /// Raw TDC timestamp for the pulse (25ns ticks).
     pub tdc_timestamp: u32,
+    /// TDC rollover epoch for the pulse.
     pub tdc_epoch: u64,
+    /// Hit batch belonging to this pulse.
     pub hits: HitBatch,
 }
 
 impl PulseBatch {
+    /// Extended TDC timestamp that includes the rollover epoch.
     #[inline]
     #[must_use]
     pub fn extended_tdc(&self) -> u64 {
@@ -45,7 +50,9 @@ impl PulseBatch {
 /// A merged pulse batch across chips with the same TDC timestamp.
 #[derive(Debug, Clone)]
 pub struct MergedPulseBatch {
+    /// Extended TDC timestamp shared by merged chips.
     pub tdc_timestamp: u64,
+    /// Merged hits from all chips for this pulse.
     pub hits: HitBatch,
 }
 
@@ -104,6 +111,7 @@ impl<D> PulseReader<D>
 where
     D: AsRef<[u8]> + Clone,
 {
+    /// Create a pulse reader for a single chip's section stream.
     pub fn new(
         data: D,
         sections: &[Tpx3Section],
@@ -131,6 +139,7 @@ where
         }
     }
 
+    /// Return the next pulse batch from this chip, if available.
     pub fn next_pulse(&mut self) -> Option<PulseBatch> {
         const PACKET_SIZE: usize = 8;
 
@@ -322,6 +331,7 @@ impl<D> TimeOrderedStream<D>
 where
     D: AsRef<[u8]> + Clone,
 {
+    /// Construct a time-ordered stream from per-chip sections.
     pub fn new(data: D, sections: &[Tpx3Section], config: &DetectorConfig) -> Self {
         // Group sections by chip
         let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0);
