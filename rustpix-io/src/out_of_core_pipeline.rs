@@ -20,8 +20,11 @@ use std::time::Duration;
 /// Neutron output for a single pulse.
 #[derive(Clone, Debug)]
 pub struct PulseNeutronBatch {
+    /// Pulse TDC timestamp (25ns ticks).
     pub tdc_timestamp_25ns: u64,
+    /// Number of hits processed for this pulse.
     pub hits_processed: usize,
+    /// Neutrons extracted from this pulse.
     pub neutrons: NeutronBatch,
 }
 
@@ -33,7 +36,9 @@ struct SliceOutput {
 
 /// Stream handle that can be single-threaded or threaded.
 pub enum OutOfCoreNeutronStreamHandle {
+    /// Single-threaded out-of-core stream.
     Single(Box<OutOfCoreNeutronStream<PulseBatcher<TimeOrderedEventStream>>>),
+    /// Threaded out-of-core stream.
     Threaded(ThreadedOutOfCoreNeutronStream),
 }
 
@@ -53,8 +58,11 @@ impl Iterator for OutOfCoreNeutronStreamHandle {
 /// Dropping the stream signals cancellation and joins worker threads; if a
 /// batch is already being processed, shutdown waits for that batch to finish.
 pub struct ThreadedOutOfCoreNeutronStream {
+    /// Receives pulse outputs from the worker thread.
     receiver: mpsc::Receiver<Result<PulseNeutronBatch>>,
+    /// Join handles for reader/worker threads.
     handles: Vec<thread::JoinHandle<()>>,
+    /// Cancellation flag used to stop worker threads.
     cancel: Arc<AtomicBool>,
 }
 
@@ -80,16 +88,27 @@ pub struct OutOfCoreNeutronStream<I>
 where
     I: Iterator<Item = PulseBatchGroup>,
 {
+    /// Pulse batch source.
     batches: I,
+    /// Pending slices from the current batch group.
     slices: VecDeque<PulseSlice>,
+    /// Selected clustering algorithm.
     algorithm: ClusteringAlgorithm,
+    /// Clustering configuration.
     clustering: ClusteringConfig,
+    /// Extraction configuration.
     extraction: ExtractionConfig,
+    /// Algorithm tuning parameters.
     params: AlgorithmParams,
+    /// Current pulse TDC timestamp.
     current_tdc: Option<u64>,
+    /// Accumulated neutrons for the current pulse.
     current_neutrons: NeutronBatch,
+    /// Count of emitted hits for the current pulse.
     current_hits: usize,
+    /// Completed pulse outputs waiting to be returned.
     pending: VecDeque<PulseNeutronBatch>,
+    /// Whether the stream has been fully drained.
     finished: bool,
 }
 
@@ -97,6 +116,7 @@ impl<I> OutOfCoreNeutronStream<I>
 where
     I: Iterator<Item = PulseBatchGroup>,
 {
+    /// Create a new out-of-core stream from pulse batch groups.
     #[must_use]
     pub fn new(
         batches: I,

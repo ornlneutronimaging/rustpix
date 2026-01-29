@@ -3,9 +3,11 @@
 //! This crate provides efficient file reading and writing using
 //! memory-mapped files via memmap2.
 //!
+#![warn(missing_docs)]
 
 mod error;
 #[cfg(feature = "hdf5")]
+#[allow(missing_docs)]
 pub mod hdf5;
 pub mod out_of_core;
 mod out_of_core_pipeline;

@@ -16,7 +16,9 @@ use std::sync::Arc;
 /// Uses memmap2 to efficiently access file contents without
 /// loading the entire file into memory.
 pub struct MappedFileReader {
+    /// Memory-mapped file contents.
     mmap: Arc<Mmap>,
+    /// Path to the underlying file.
     path: PathBuf,
 }
 
@@ -56,6 +58,8 @@ impl MappedFileReader {
     }
 
     /// Returns an iterator over 8-byte chunks.
+    ///
+    /// Each chunk corresponds to a raw TPX3 packet.
     pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
         self.mmap.chunks(8)
     }
@@ -72,6 +76,7 @@ impl AsRef<[u8]> for SharedMmap {
 
 /// Time-ordered stream of hit batches that owns the underlying file mapping.
 pub struct TimeOrderedHitStream {
+    /// Underlying pulse-ordered stream.
     inner: TimeOrderedStream<SharedMmap>,
 }
 
@@ -85,12 +90,15 @@ impl Iterator for TimeOrderedHitStream {
 
 /// A pulse-ordered event batch with its TDC timestamp (25ns ticks).
 pub struct EventBatch {
+    /// Pulse TDC timestamp in 25ns ticks.
     pub tdc_timestamp_25ns: u64,
+    /// Hit batch for the pulse.
     pub hits: HitBatch,
 }
 
 /// Time-ordered stream of event batches that owns the underlying file mapping.
 pub struct TimeOrderedEventStream {
+    /// Underlying pulse-ordered stream.
     inner: TimeOrderedStream<SharedMmap>,
 }
 
@@ -107,7 +115,9 @@ impl Iterator for TimeOrderedEventStream {
 
 /// A TPX3 file reader with memory-mapped I/O.
 pub struct Tpx3FileReader {
+    /// Memory-mapped reader.
     reader: MappedFileReader,
+    /// Detector configuration used for parsing.
     config: DetectorConfig,
 }
 
