@@ -3,6 +3,7 @@
 //! This crate provides TPX3-specific data structures and parsing logic
 //! for Timepix3 pixel detector data.
 //!
+#![warn(missing_docs)]
 //!
 //! # Key Components
 //!
@@ -35,11 +36,17 @@ use std::path::Path;
 /// `global_y` = c * `local_x` + d * `local_y` + ty
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChipTransform {
+    /// Local X coefficient for affine transform.
     pub a: i32,
+    /// Local Y coefficient for affine transform in X output.
     pub b: i32,
+    /// Local X coefficient for affine transform in Y output.
     pub c: i32,
+    /// Local Y coefficient for affine transform.
     pub d: i32,
+    /// Translation in X direction.
     pub tx: i32,
+    /// Translation in Y direction.
     pub ty: i32,
 }
 
