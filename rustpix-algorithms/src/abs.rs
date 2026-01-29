@@ -3,11 +3,16 @@
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;
 
+/// Configuration for ABS (Age-Based Spatial) clustering.
 #[derive(Clone, Debug)]
 pub struct AbsConfig {
+    /// Spatial radius for neighbor detection (pixels).
     pub radius: f64,
+    /// Temporal correlation window (nanoseconds).
     pub neutron_correlation_window_ns: f64,
+    /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
+    /// Number of hits between aging scans.
     pub scan_interval: usize,
 }
 
@@ -69,6 +74,7 @@ impl Bucket {
     }
 }
 
+/// ABS clustering implementation.
 pub struct AbsClustering {
     config: AbsConfig,
 }
@@ -80,6 +86,7 @@ struct AbsSearchContext {
     radius_i32: i32,
 }
 
+/// Reusable ABS clustering state for streaming or repeated runs.
 pub struct AbsState {
     buckets: Vec<Bucket>,
     active_indices: Vec<usize>,
@@ -105,6 +112,7 @@ impl Default for AbsState {
 }
 
 impl AbsClustering {
+    /// Create an ABS clustering instance with the provided configuration.
     #[must_use]
     pub fn new(config: AbsConfig) -> Self {
         Self { config }
