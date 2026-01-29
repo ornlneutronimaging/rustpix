@@ -37,38 +37,41 @@ impl Default for OutOfCoreConfig {
 }
 
 impl OutOfCoreConfig {
+    /// Set the fraction of available system memory to target.
     #[must_use]
     pub fn with_memory_fraction(mut self, fraction: f64) -> Self {
         self.memory_fraction = fraction;
         self
     }
 
+    /// Set an explicit memory budget in bytes.
     #[must_use]
     pub fn with_memory_budget_bytes(mut self, bytes: usize) -> Self {
         self.memory_budget_bytes = Some(bytes);
         self
     }
 
-    #[must_use]
     /// Set the number of worker threads for slice processing.
     ///
     /// Values less than 1 are clamped to 1. Use [`Self::try_with_parallelism`]
     /// to surface invalid values as an error instead.
+    #[must_use]
     pub fn with_parallelism(mut self, threads: usize) -> Self {
         self.parallelism = Some(threads.max(1));
         self
     }
 
-    #[must_use]
     /// Set the bounded queue depth for pipeline stages.
     ///
     /// Values less than 1 are clamped to 1. Use [`Self::try_with_queue_depth`]
     /// to surface invalid values as an error instead.
+    #[must_use]
     pub fn with_queue_depth(mut self, depth: usize) -> Self {
         self.queue_depth = depth.max(1);
         self
     }
 
+    /// Enable or disable async pipeline stage execution.
     #[must_use]
     pub fn with_async_io(mut self, enabled: bool) -> Self {
         self.async_io = enabled;
@@ -103,16 +106,19 @@ impl OutOfCoreConfig {
         Ok(self)
     }
 
+    /// Return the configured worker thread count, clamped to at least 1.
     #[must_use]
     pub fn effective_parallelism(&self) -> usize {
         self.parallelism.unwrap_or(1).max(1)
     }
 
+    /// Return the configured queue depth, clamped to at least 1.
     #[must_use]
     pub fn effective_queue_depth(&self) -> usize {
         self.queue_depth.max(1)
     }
 
+    /// Returns true when the threaded pipeline should be used.
     #[must_use]
     pub fn use_threaded_pipeline(&self) -> bool {
         self.async_io || self.parallelism.unwrap_or(1) > 1
@@ -152,18 +158,22 @@ impl OutOfCoreConfig {
 /// A pulse slice with an emission cutoff for overlap handling.
 #[derive(Clone, Debug)]
 pub struct PulseSlice {
+    /// Pulse TDC timestamp (25ns ticks).
     pub tdc_timestamp_25ns: u64,
+    /// Hits belonging to this slice.
     pub hits: HitBatch,
     /// Emit only clusters/neutrons with representative TOF <= cutoff.
     pub emit_cutoff_tof: u32,
 }
 
 impl PulseSlice {
+    /// Number of hits in the slice.
     #[must_use]
     pub fn len(&self) -> usize {
         self.hits.len()
     }
 
+    /// Returns true when the slice has no hits.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.hits.is_empty()
@@ -173,21 +183,26 @@ impl PulseSlice {
 /// A bounded batch of pulse slices.
 #[derive(Clone, Debug, Default)]
 pub struct PulseBatchGroup {
+    /// Pulse slices in this batch.
     pub slices: Vec<PulseSlice>,
+    /// Estimated memory footprint (bytes).
     pub estimated_bytes: usize,
 }
 
 impl PulseBatchGroup {
+    /// Number of slices in the group.
     #[must_use]
     pub fn len(&self) -> usize {
         self.slices.len()
     }
 
+    /// Returns true when the group has no slices.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slices.is_empty()
     }
 
+    /// Total number of hits across all slices.
     #[must_use]
     pub fn total_hits(&self) -> usize {
         self.slices.iter().map(PulseSlice::len).sum()
