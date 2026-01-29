@@ -97,6 +97,18 @@ enum Commands {
         #[arg(long)]
         memory_budget_bytes: Option<usize>,
 
+        /// Worker threads for out-of-core slice processing
+        #[arg(long)]
+        parallelism: Option<usize>,
+
+        /// Bounded queue depth for out-of-core pipeline stages
+        #[arg(long, default_value = "2")]
+        queue_depth: usize,
+
+        /// Enable async reader/worker pipeline
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        async_io: bool,
+
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -118,6 +130,52 @@ enum Commands {
         iterations: usize,
     },
 
+    /// Benchmark out-of-core single vs multi-threaded processing
+    OutOfCoreBenchmark {
+        /// Input TPX3 file
+        input: PathBuf,
+
+        /// Clustering algorithm to use
+        #[arg(short, long, value_enum, default_value = "abs")]
+        algorithm: Algorithm,
+
+        /// Spatial radius for clustering (pixels)
+        #[arg(long, default_value = "5.0")]
+        radius: f64,
+
+        /// Temporal window for clustering (nanoseconds)
+        #[arg(long, default_value = "75.0")]
+        temporal_window_ns: f64,
+
+        /// Minimum cluster size
+        #[arg(long, default_value = "1")]
+        min_cluster_size: u16,
+
+        /// Number of benchmark iterations
+        #[arg(short, long, default_value = "3")]
+        iterations: usize,
+
+        /// Fraction of available memory to target for out-of-core processing
+        #[arg(long, default_value = "0.5")]
+        memory_fraction: f64,
+
+        /// Explicit memory budget in bytes (overrides `memory_fraction`)
+        #[arg(long)]
+        memory_budget_bytes: Option<usize>,
+
+        /// Worker threads for out-of-core slice processing
+        #[arg(long)]
+        parallelism: Option<usize>,
+
+        /// Bounded queue depth for out-of-core pipeline stages
+        #[arg(long, default_value = "2")]
+        queue_depth: usize,
+
+        /// Enable async reader/worker pipeline
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        async_io: bool,
+    },
+
     /// Ordering benchmark (deprecated; no-op)
     OrderingBenchmark,
 }
@@ -136,6 +194,9 @@ fn main() -> Result<()> {
             out_of_core,
             memory_fraction,
             memory_budget_bytes,
+            parallelism,
+            queue_depth,
+            async_io,
             verbose,
         } => run_process(
             &input,
@@ -147,12 +208,41 @@ fn main() -> Result<()> {
             out_of_core,
             memory_fraction,
             memory_budget_bytes,
+            parallelism,
+            queue_depth,
+            async_io,
             verbose,
         ),
 
         Commands::Info { input } => run_info(&input),
 
         Commands::Benchmark { input, iterations } => run_benchmark(&input, iterations),
+
+        Commands::OutOfCoreBenchmark {
+            input,
+            algorithm,
+            radius,
+            temporal_window_ns,
+            min_cluster_size,
+            iterations,
+            memory_fraction,
+            memory_budget_bytes,
+            parallelism,
+            queue_depth,
+            async_io,
+        } => run_out_of_core_benchmark(
+            &input,
+            algorithm,
+            radius,
+            temporal_window_ns,
+            min_cluster_size,
+            iterations,
+            memory_fraction,
+            memory_budget_bytes,
+            parallelism,
+            queue_depth,
+            async_io,
+        ),
 
         Commands::OrderingBenchmark => run_ordering_benchmark(),
     }
@@ -169,6 +259,9 @@ fn run_process(
     out_of_core: bool,
     memory_fraction: f64,
     memory_budget_bytes: Option<usize>,
+    parallelism: Option<usize>,
+    queue_depth: usize,
+    async_io: bool,
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -183,6 +276,11 @@ fn run_process(
             if let Some(bytes) = memory_budget_bytes {
                 eprintln!("Memory budget override: {bytes} bytes");
             }
+            if let Some(threads) = parallelism {
+                eprintln!("Parallelism: {threads} threads");
+            }
+            eprintln!("Queue depth: {queue_depth}");
+            eprintln!("Async IO: {async_io}");
         }
     }
 
@@ -228,6 +326,9 @@ fn run_process(
             out_of_core,
             memory_fraction,
             memory_budget_bytes,
+            parallelism,
+            queue_depth,
+            async_io,
             verbose,
         )?;
 
@@ -265,6 +366,9 @@ fn process_input_file(
     out_of_core: bool,
     memory_fraction: f64,
     memory_budget_bytes: Option<usize>,
+    parallelism: Option<usize>,
+    queue_depth: usize,
+    async_io: bool,
     verbose: bool,
 ) -> Result<(usize, usize)> {
     let reader = Tpx3FileReader::open(path)?;
@@ -276,6 +380,10 @@ fn process_input_file(
         if let Some(bytes) = memory_budget_bytes {
             memory = memory.with_memory_budget_bytes(bytes);
         }
+        if let Some(threads) = parallelism {
+            memory = memory.with_parallelism(threads);
+        }
+        memory = memory.with_queue_depth(queue_depth).with_async_io(async_io);
 
         let stream =
             out_of_core_neutron_stream(&reader, algo, clustering, extraction, params, &memory)?;
@@ -416,6 +524,112 @@ fn run_benchmark(input: &PathBuf, iterations: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_out_of_core_benchmark(
+    input: &PathBuf,
+    algorithm: Algorithm,
+    radius: f64,
+    temporal_window_ns: f64,
+    min_cluster_size: u16,
+    iterations: usize,
+    memory_fraction: f64,
+    memory_budget_bytes: Option<usize>,
+    parallelism: Option<usize>,
+    queue_depth: usize,
+    async_io: bool,
+) -> Result<()> {
+    let algo = resolve_algorithm(algorithm);
+    let clustering = ClusteringConfig {
+        radius,
+        temporal_window_ns,
+        min_cluster_size,
+        max_cluster_size: None,
+    };
+    let extraction = ExtractionConfig::default();
+    let params = AlgorithmParams::default();
+
+    let mut single_config = OutOfCoreConfig::default().with_memory_fraction(memory_fraction);
+    if let Some(bytes) = memory_budget_bytes {
+        single_config = single_config.with_memory_budget_bytes(bytes);
+    }
+
+    let mut multi_config = single_config.clone().with_queue_depth(queue_depth);
+    let threads = parallelism.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+    });
+    multi_config = multi_config.with_parallelism(threads);
+    multi_config = multi_config.with_async_io(async_io);
+
+    let mut single_total = std::time::Duration::ZERO;
+    let mut multi_total = std::time::Duration::ZERO;
+    for _ in 0..iterations {
+        let (hits, neutrons, duration) = bench_out_of_core(
+            input,
+            algo,
+            &clustering,
+            &extraction,
+            &params,
+            &single_config,
+        )?;
+        single_total += duration;
+
+        let (hits_mt, neutrons_mt, duration) = bench_out_of_core(
+            input,
+            algo,
+            &clustering,
+            &extraction,
+            &params,
+            &multi_config,
+        )?;
+        multi_total += duration;
+
+        if hits != hits_mt || neutrons != neutrons_mt {
+            eprintln!(
+                "Warning: counts differ between single ({hits}, {neutrons}) and multi-thread ({hits_mt}, {neutrons_mt})"
+            );
+        }
+    }
+
+    let iterations_f64 = usize_to_f64(iterations);
+    let single_avg = single_total.as_secs_f64() / iterations_f64;
+    let multi_avg = multi_total.as_secs_f64() / iterations_f64;
+    let speedup = single_avg / multi_avg.max(f64::EPSILON);
+
+    println!("Out-of-core benchmark ({iterations} iterations)");
+    println!("Single-thread avg: {single_avg:.3}s");
+    println!(
+        "Multi-thread avg: {:.3}s (threads: {}, async: {})",
+        multi_avg,
+        multi_config.effective_parallelism(),
+        async_io
+    );
+    println!("Speedup: {speedup:.2}x");
+    Ok(())
+}
+
+fn bench_out_of_core(
+    input: &PathBuf,
+    algo: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    extraction: &ExtractionConfig,
+    params: &AlgorithmParams,
+    config: &OutOfCoreConfig,
+) -> Result<(usize, usize, std::time::Duration)> {
+    let reader = Tpx3FileReader::open(input)?;
+    let start = Instant::now();
+    let stream = out_of_core_neutron_stream(&reader, algo, clustering, extraction, params, config)?;
+    let mut total_hits = 0usize;
+    let mut total_neutrons = 0usize;
+    for batch in stream {
+        let batch = batch?;
+        total_hits = total_hits.saturating_add(batch.hits_processed);
+        total_neutrons = total_neutrons.saturating_add(batch.neutrons.len());
+    }
+    Ok((total_hits, total_neutrons, start.elapsed()))
 }
 
 fn warmup_algorithm(algo_enum: Algorithm, base_batch: &HitBatch) {

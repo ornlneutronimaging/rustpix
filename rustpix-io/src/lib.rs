@@ -18,7 +18,8 @@ pub use error::{Error, Result};
 pub use hdf5::{Hdf5HistogramSink, Hdf5HitSink, Hdf5NeutronSink, HistogramAxisData, HistogramBin};
 pub use out_of_core::{pulse_batches, OutOfCoreConfig, PulseBatchGroup, PulseBatcher, PulseSlice};
 pub use out_of_core_pipeline::{
-    out_of_core_neutron_stream, OutOfCoreNeutronStream, PulseNeutronBatch,
+    out_of_core_neutron_stream, out_of_core_neutron_stream_handle, OutOfCoreNeutronStream,
+    OutOfCoreNeutronStreamHandle, PulseNeutronBatch, ThreadedOutOfCoreNeutronStream,
 };
 pub use reader::{
     EventBatch, MappedFileReader, TimeOrderedEventStream, TimeOrderedHitStream, Tpx3FileReader,

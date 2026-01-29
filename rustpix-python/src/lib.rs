@@ -469,6 +469,9 @@ fn read_tpx3_hits(
 /// - out_of_core (bool): enable the out-of-core pipeline (default: True for streaming).
 /// - memory_fraction (float): fraction of available RAM to target (default: 0.5).
 /// - memory_budget_bytes (int): explicit memory budget override.
+/// - parallelism (int): worker threads for slice processing.
+/// - queue_depth (int): bounded queue depth for pipeline stages.
+/// - async_io (bool): enable async reader/worker pipeline.
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, collect=false, **kwargs))]
 fn process_tpx3_neutrons(
@@ -622,6 +625,9 @@ fn cluster_hits(
 /// - out_of_core (bool): enable the out-of-core pipeline (default: True)
 /// - memory_fraction (float): fraction of available RAM to target (default: 0.5)
 /// - memory_budget_bytes (int): explicit memory budget override
+/// - parallelism (int): worker threads for slice processing
+/// - queue_depth (int): bounded queue depth for pipeline stages
+/// - async_io (bool): enable async reader/worker pipeline
 fn stream_tpx3_neutrons(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
@@ -752,11 +758,18 @@ struct OutOfCoreKwargs {
     enabled: Option<bool>,
     memory_fraction: Option<f64>,
     memory_budget_bytes: Option<usize>,
+    parallelism: Option<usize>,
+    queue_depth: Option<usize>,
+    async_io: Option<bool>,
 }
 
 impl OutOfCoreKwargs {
     fn has_overrides(&self) -> bool {
-        self.memory_fraction.is_some() || self.memory_budget_bytes.is_some()
+        self.memory_fraction.is_some()
+            || self.memory_budget_bytes.is_some()
+            || self.parallelism.is_some()
+            || self.queue_depth.is_some()
+            || self.async_io.is_some()
     }
 
     fn resolve_enabled(&self) -> bool {
@@ -766,8 +779,18 @@ impl OutOfCoreKwargs {
     fn validate(&self) -> PyResult<()> {
         if self.enabled == Some(false) && self.has_overrides() {
             return Err(PyValueError::new_err(
-                "memory_fraction/memory_budget_bytes require out_of_core=True",
+                "out_of_core must be enabled to use out-of-core options",
             ));
+        }
+        if let Some(threads) = self.parallelism {
+            if threads == 0 {
+                return Err(PyValueError::new_err("parallelism must be >= 1"));
+            }
+        }
+        if let Some(depth) = self.queue_depth {
+            if depth == 0 {
+                return Err(PyValueError::new_err("queue_depth must be >= 1"));
+            }
         }
         Ok(())
     }
@@ -779,6 +802,15 @@ impl OutOfCoreKwargs {
         }
         if let Some(bytes) = self.memory_budget_bytes {
             memory = memory.with_memory_budget_bytes(bytes);
+        }
+        if let Some(threads) = self.parallelism {
+            memory = memory.with_parallelism(threads);
+        }
+        if let Some(depth) = self.queue_depth {
+            memory = memory.with_queue_depth(depth);
+        }
+        if let Some(async_io) = self.async_io {
+            memory = memory.with_async_io(async_io);
         }
         memory
     }
@@ -835,6 +867,9 @@ fn parse_out_of_core_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<OutO
     let mut enabled = None;
     let mut memory_fraction = None;
     let mut memory_budget_bytes = None;
+    let mut parallelism = None;
+    let mut queue_depth = None;
+    let mut async_io = None;
 
     if let Some(kwargs) = kwargs {
         if let Some(value) = extract_kwarg::<bool>(kwargs, "out_of_core")? {
@@ -846,12 +881,24 @@ fn parse_out_of_core_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<OutO
         if let Some(value) = extract_kwarg::<usize>(kwargs, "memory_budget_bytes")? {
             memory_budget_bytes = Some(value);
         }
+        if let Some(value) = extract_kwarg::<usize>(kwargs, "parallelism")? {
+            parallelism = Some(value);
+        }
+        if let Some(value) = extract_kwarg::<usize>(kwargs, "queue_depth")? {
+            queue_depth = Some(value);
+        }
+        if let Some(value) = extract_kwarg::<bool>(kwargs, "async_io")? {
+            async_io = Some(value);
+        }
     }
 
     Ok(OutOfCoreKwargs {
         enabled,
         memory_fraction,
         memory_budget_bytes,
+        parallelism,
+        queue_depth,
+        async_io,
     })
 }
 
