@@ -10,7 +10,7 @@ use rustpix_algorithms::{
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;
 use rustpix_core::soa::HitBatch;
-use rustpix_io::Tpx3FileReader;
+use rustpix_io::{out_of_core_neutron_stream, OutOfCoreConfig, Tpx3FileReader};
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
@@ -85,6 +85,18 @@ enum Commands {
         #[arg(long, default_value = "1")]
         min_cluster_size: u16,
 
+        /// Enable out-of-core processing (pulse-bounded)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        out_of_core: bool,
+
+        /// Fraction of available memory to target for out-of-core processing
+        #[arg(long, default_value = "0.5")]
+        memory_fraction: f64,
+
+        /// Explicit memory budget in bytes (overrides `memory_fraction`)
+        #[arg(long)]
+        memory_budget_bytes: Option<usize>,
+
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -121,6 +133,9 @@ fn main() -> Result<()> {
             radius,
             temporal_window_ns,
             min_cluster_size,
+            out_of_core,
+            memory_fraction,
+            memory_budget_bytes,
             verbose,
         } => run_process(
             &input,
@@ -129,6 +144,9 @@ fn main() -> Result<()> {
             radius,
             temporal_window_ns,
             min_cluster_size,
+            out_of_core,
+            memory_fraction,
+            memory_budget_bytes,
             verbose,
         ),
 
@@ -140,6 +158,7 @@ fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_process(
     input: &[PathBuf],
     output: &PathBuf,
@@ -147,6 +166,9 @@ fn run_process(
     radius: f64,
     temporal_window_ns: f64,
     min_cluster_size: u16,
+    out_of_core: bool,
+    memory_fraction: f64,
+    memory_budget_bytes: Option<usize>,
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -155,6 +177,13 @@ fn run_process(
         eprintln!("Radius: {radius} pixels");
         eprintln!("Temporal window: {temporal_window_ns} ns");
         eprintln!("Min cluster size: {min_cluster_size}");
+        eprintln!("Out-of-core: {out_of_core}");
+        if out_of_core {
+            eprintln!("Memory fraction: {memory_fraction}");
+            if let Some(bytes) = memory_budget_bytes {
+                eprintln!("Memory budget override: {bytes} bytes");
+            }
+        }
     }
 
     let start = Instant::now();
@@ -196,6 +225,9 @@ fn run_process(
             &output_format,
             &mut wrote_header,
             &mut warned_unknown,
+            out_of_core,
+            memory_fraction,
+            memory_budget_bytes,
             verbose,
         )?;
 
@@ -230,37 +262,84 @@ fn process_input_file(
     output_format: &str,
     wrote_header: &mut bool,
     warned_unknown: &mut bool,
+    out_of_core: bool,
+    memory_fraction: f64,
+    memory_budget_bytes: Option<usize>,
     verbose: bool,
 ) -> Result<(usize, usize)> {
     let reader = Tpx3FileReader::open(path)?;
-    let stream = reader.stream_time_ordered()?;
     let mut file_hits = 0usize;
     let mut file_neutrons = 0usize;
 
-    for mut batch in stream {
-        file_hits = file_hits.saturating_add(batch.len());
-        let neutrons = cluster_and_extract_batch(&mut batch, algo, clustering, extraction, params)?;
-        file_neutrons = file_neutrons.saturating_add(neutrons.len());
+    if out_of_core {
+        let mut memory = OutOfCoreConfig::default().with_memory_fraction(memory_fraction);
+        if let Some(bytes) = memory_budget_bytes {
+            memory = memory.with_memory_budget_bytes(bytes);
+        }
 
-        match output_format {
-            "csv" => {
-                writer.write_neutron_batch_csv(&neutrons, !*wrote_header)?;
-                *wrote_header = true;
-            }
-            "bin" | "dat" => {
-                writer.write_neutron_batch_binary(&neutrons)?;
-            }
-            _ => {
-                if verbose && !*warned_unknown {
-                    eprintln!("Unknown extension '{output_format}', defaulting to binary");
-                }
-                *warned_unknown = true;
-                writer.write_neutron_batch_binary(&neutrons)?;
-            }
+        let stream =
+            out_of_core_neutron_stream(&reader, algo, clustering, extraction, params, &memory)?;
+
+        for batch in stream {
+            let batch = batch?;
+            file_hits = file_hits.saturating_add(batch.hits_processed);
+            file_neutrons = file_neutrons.saturating_add(batch.neutrons.len());
+            write_neutrons(
+                writer,
+                output_format,
+                &batch.neutrons,
+                wrote_header,
+                warned_unknown,
+                verbose,
+            )?;
+        }
+    } else {
+        let stream = reader.stream_time_ordered()?;
+        for mut batch in stream {
+            file_hits = file_hits.saturating_add(batch.len());
+            let neutrons =
+                cluster_and_extract_batch(&mut batch, algo, clustering, extraction, params)?;
+            file_neutrons = file_neutrons.saturating_add(neutrons.len());
+            write_neutrons(
+                writer,
+                output_format,
+                &neutrons,
+                wrote_header,
+                warned_unknown,
+                verbose,
+            )?;
         }
     }
 
     Ok((file_hits, file_neutrons))
+}
+
+fn write_neutrons(
+    writer: &mut rustpix_io::DataFileWriter,
+    output_format: &str,
+    neutrons: &rustpix_core::neutron::NeutronBatch,
+    wrote_header: &mut bool,
+    warned_unknown: &mut bool,
+    verbose: bool,
+) -> Result<()> {
+    match output_format {
+        "csv" => {
+            writer.write_neutron_batch_csv(neutrons, !*wrote_header)?;
+            *wrote_header = true;
+        }
+        "bin" | "dat" => {
+            writer.write_neutron_batch_binary(neutrons)?;
+        }
+        _ => {
+            if verbose && !*warned_unknown {
+                eprintln!("Unknown extension '{output_format}', defaulting to binary");
+            }
+            *warned_unknown = true;
+            writer.write_neutron_batch_binary(neutrons)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_algorithm(algorithm: Algorithm) -> ClusteringAlgorithm {

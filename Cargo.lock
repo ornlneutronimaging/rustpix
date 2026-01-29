@@ -3215,6 +3215,7 @@ dependencies = [
  "memmap2",
  "ndarray",
  "rayon",
+ "rustpix-algorithms",
  "rustpix-core",
  "rustpix-tpx",
  "serde",

@@ -7,16 +7,20 @@ use pyo3::types::{PyDict, PyList};
 
 use rustpix_algorithms::{
     cluster_and_extract_batch, cluster_and_extract_stream, cluster_and_extract_stream_iter,
-    AlgorithmParams, ClusterAndExtractStream, ClusteringAlgorithm,
+    AlgorithmParams, ClusteringAlgorithm,
 };
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
-use rustpix_io::{TimeOrderedHitStream, Tpx3FileReader};
+use rustpix_io::{
+    out_of_core_neutron_stream, OutOfCoreConfig, TimeOrderedHitStream, Tpx3FileReader,
+};
 use rustpix_tpx::{ChipTransform, DetectorConfig};
 
 type ChipTransformTuple = (i32, i32, i32, i32, i32, i32);
+type NeutronStreamItem = std::result::Result<NeutronBatch, String>;
+type NeutronStream = Box<dyn Iterator<Item = NeutronStreamItem>>;
 
 #[derive(Clone)]
 struct BatchMetadata {
@@ -398,7 +402,7 @@ impl PyHitBatchStream {
 
 #[pyclass(name = "NeutronBatchStream", unsendable)]
 struct PyNeutronBatchStream {
-    stream: ClusterAndExtractStream<TimeOrderedHitStream>,
+    stream: NeutronStream,
     metadata: BatchMetadata,
 }
 
@@ -415,7 +419,7 @@ impl PyNeutronBatchStream {
                 batch: Some(batch),
                 metadata: self.metadata.clone(),
             })),
-            Some(Err(err)) => Err(PyRuntimeError::new_err(err.to_string())),
+            Some(Err(err)) => Err(PyRuntimeError::new_err(err)),
         }
     }
 }
@@ -460,6 +464,11 @@ fn read_tpx3_hits(
 /// By default this returns a streaming iterator (`NeutronBatchStream`) that yields
 /// pulse-bounded batches to keep memory usage bounded. Use `collect=True` to return
 /// a single `NeutronBatch` for small files.
+///
+/// Additional kwargs:
+/// - out_of_core (bool): enable the out-of-core pipeline (default: True for streaming).
+/// - memory_fraction (float): fraction of available RAM to target (default: 0.5).
+/// - memory_budget_bytes (int): explicit memory budget override.
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, collect=false, **kwargs))]
 fn process_tpx3_neutrons(
@@ -500,6 +509,14 @@ fn process_tpx3_neutrons(
         ));
     }
 
+    if collect
+        && (processing.out_of_core.enabled == Some(true) || processing.out_of_core.has_overrides())
+    {
+        return Err(PyValueError::new_err(
+            "out_of_core is only supported when collect=False",
+        ));
+    }
+
     if collect {
         let neutrons = if processing.time_ordered {
             let stream = reader
@@ -528,16 +545,14 @@ fn process_tpx3_neutrons(
         };
         Ok(Py::new(py, batch)?.into_any())
     } else {
-        let stream = reader
-            .stream_time_ordered()
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        let stream = cluster_and_extract_stream_iter(
-            stream,
+        let stream = build_neutron_stream(
+            &reader,
             algo,
-            clustering.clone(),
-            extraction.clone(),
-            params,
-        );
+            &clustering,
+            &extraction,
+            &params,
+            &processing.out_of_core,
+        )?;
 
         let stream = PyNeutronBatchStream {
             stream,
@@ -601,6 +616,12 @@ fn cluster_hits(
 
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, **kwargs))]
+/// Stream TPX3 neutrons in pulse-bounded batches.
+///
+/// Additional kwargs:
+/// - out_of_core (bool): enable the out-of-core pipeline (default: True)
+/// - memory_fraction (float): fraction of available RAM to target (default: 0.5)
+/// - memory_budget_bytes (int): explicit memory budget override
 fn stream_tpx3_neutrons(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
@@ -610,6 +631,7 @@ fn stream_tpx3_neutrons(
 ) -> PyResult<PyNeutronBatchStream> {
     let selection = parse_algorithm_kwargs(kwargs)?;
     let output_path = parse_output_path(kwargs)?;
+    let out_of_core = parse_out_of_core_kwargs(kwargs)?;
     ensure_hdf5_disabled(output_path.as_deref())?;
 
     let detector = detector_config
@@ -632,16 +654,14 @@ fn stream_tpx3_neutrons(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(detector.clone());
 
-    let stream = reader
-        .stream_time_ordered()
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-    let stream = cluster_and_extract_stream_iter(
-        stream,
+    let stream = build_neutron_stream(
+        &reader,
         algo,
-        clustering.clone(),
-        extraction.clone(),
-        params,
-    );
+        &clustering,
+        &extraction,
+        &params,
+        &out_of_core,
+    )?;
 
     Ok(PyNeutronBatchStream {
         stream,
@@ -725,6 +745,43 @@ struct ProcessingKwargs {
     selection: AlgorithmSelection,
     time_ordered: bool,
     output_path: Option<String>,
+    out_of_core: OutOfCoreKwargs,
+}
+
+struct OutOfCoreKwargs {
+    enabled: Option<bool>,
+    memory_fraction: Option<f64>,
+    memory_budget_bytes: Option<usize>,
+}
+
+impl OutOfCoreKwargs {
+    fn has_overrides(&self) -> bool {
+        self.memory_fraction.is_some() || self.memory_budget_bytes.is_some()
+    }
+
+    fn resolve_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    fn validate(&self) -> PyResult<()> {
+        if self.enabled == Some(false) && self.has_overrides() {
+            return Err(PyValueError::new_err(
+                "memory_fraction/memory_budget_bytes require out_of_core=True",
+            ));
+        }
+        Ok(())
+    }
+
+    fn to_config(&self) -> OutOfCoreConfig {
+        let mut memory = OutOfCoreConfig::default();
+        if let Some(fraction) = self.memory_fraction {
+            memory = memory.with_memory_fraction(fraction);
+        }
+        if let Some(bytes) = self.memory_budget_bytes {
+            memory = memory.with_memory_budget_bytes(bytes);
+        }
+        memory
+    }
 }
 
 fn extract_kwarg<'py, T: FromPyObject<'py>>(
@@ -774,9 +831,34 @@ fn parse_output_path(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Option<Stri
     }
 }
 
+fn parse_out_of_core_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<OutOfCoreKwargs> {
+    let mut enabled = None;
+    let mut memory_fraction = None;
+    let mut memory_budget_bytes = None;
+
+    if let Some(kwargs) = kwargs {
+        if let Some(value) = extract_kwarg::<bool>(kwargs, "out_of_core")? {
+            enabled = Some(value);
+        }
+        if let Some(value) = extract_kwarg::<f64>(kwargs, "memory_fraction")? {
+            memory_fraction = Some(value);
+        }
+        if let Some(value) = extract_kwarg::<usize>(kwargs, "memory_budget_bytes")? {
+            memory_budget_bytes = Some(value);
+        }
+    }
+
+    Ok(OutOfCoreKwargs {
+        enabled,
+        memory_fraction,
+        memory_budget_bytes,
+    })
+}
+
 fn parse_processing_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<ProcessingKwargs> {
     let selection = parse_algorithm_kwargs(kwargs)?;
     let output_path = parse_output_path(kwargs)?;
+    let out_of_core = parse_out_of_core_kwargs(kwargs)?;
 
     let mut time_ordered = true;
     if let Some(kwargs) = kwargs {
@@ -789,7 +871,46 @@ fn parse_processing_kwargs(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Proce
         selection,
         time_ordered,
         output_path,
+        out_of_core,
     })
+}
+
+fn build_neutron_stream(
+    reader: &Tpx3FileReader,
+    algo: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    extraction: &ExtractionConfig,
+    params: &AlgorithmParams,
+    out_of_core: &OutOfCoreKwargs,
+) -> PyResult<NeutronStream> {
+    out_of_core.validate()?;
+    let use_out_of_core = out_of_core.resolve_enabled();
+
+    if use_out_of_core {
+        let memory = out_of_core.to_config();
+        let stream =
+            out_of_core_neutron_stream(reader, algo, clustering, extraction, params, &memory)
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        Ok(Box::new(stream.map(|result| {
+            result
+                .map(|batch| batch.neutrons)
+                .map_err(|err| err.to_string())
+        })))
+    } else {
+        let stream = reader
+            .stream_time_ordered()
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        let stream = cluster_and_extract_stream_iter(
+            stream,
+            algo,
+            clustering.clone(),
+            extraction.clone(),
+            params.clone(),
+        );
+        Ok(Box::new(
+            stream.map(|result| result.map_err(|err| err.to_string())),
+        ))
+    }
 }
 
 fn parse_algorithm(name: &str) -> PyResult<ClusteringAlgorithm> {
