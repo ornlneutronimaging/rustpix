@@ -118,17 +118,29 @@ impl Hdf5NeutronSink {
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct HitWriteOptions {
+    /// Detector X size in pixels.
     pub x_size: u32,
+    /// Detector Y size in pixels.
     pub y_size: u32,
+    /// Chunk size along the event dimension.
     pub chunk_events: usize,
+    /// Optional gzip compression level (0-9).
     pub compression: Option<u8>,
+    /// Enable shuffle filter before compression.
     pub shuffle: bool,
+    /// Flight path length in meters (optional).
     pub flight_path_m: Option<f64>,
+    /// Time-of-flight offset in nanoseconds (optional).
     pub tof_offset_ns: Option<f64>,
+    /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
+    /// Whether to write X coordinates.
     pub include_xy: bool,
+    /// Whether to write time-over-threshold.
     pub include_tot: bool,
+    /// Whether to write chip ID per event.
     pub include_chip_id: bool,
+    /// Whether to write cluster ID per event.
     pub include_cluster_id: bool,
 }
 
@@ -158,17 +170,29 @@ impl HitWriteOptions {
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct NeutronWriteOptions {
+    /// Detector X size in pixels.
     pub x_size: u32,
+    /// Detector Y size in pixels.
     pub y_size: u32,
+    /// Chunk size along the event dimension.
     pub chunk_events: usize,
+    /// Optional gzip compression level (0-9).
     pub compression: Option<u8>,
+    /// Enable shuffle filter before compression.
     pub shuffle: bool,
+    /// Flight path length in meters (optional).
     pub flight_path_m: Option<f64>,
+    /// Time-of-flight offset in nanoseconds (optional).
     pub tof_offset_ns: Option<f64>,
+    /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
+    /// Whether to write X coordinates.
     pub include_xy: bool,
+    /// Whether to write time-over-threshold.
     pub include_tot: bool,
+    /// Whether to write chip ID per event.
     pub include_chip_id: bool,
+    /// Whether to write number of hits per neutron.
     pub include_n_hits: bool,
 }
 
@@ -197,47 +221,74 @@ impl NeutronWriteOptions {
 /// Event data loaded from an `NXevent_data` group (hits).
 #[derive(Clone, Debug)]
 pub struct HitEventData {
+    /// Event IDs derived from pixel coordinates.
     pub event_id: Vec<i32>,
+    /// Time-of-flight values in nanoseconds.
     pub event_time_offset_ns: Vec<u64>,
+    /// Pulse timestamps in nanoseconds.
     pub event_time_zero_ns: Vec<u64>,
+    /// Event indices marking pulse boundaries.
     pub event_index: Vec<i32>,
+    /// Time-over-threshold values in nanoseconds.
     pub time_over_threshold_ns: Option<Vec<u64>>,
+    /// Chip IDs per event.
     pub chip_id: Option<Vec<u8>>,
+    /// Cluster IDs per event.
     pub cluster_id: Option<Vec<i32>>,
+    /// X coordinates (pixels).
     pub x: Option<Vec<u16>>,
+    /// Y coordinates (pixels).
     pub y: Option<Vec<u16>>,
+    /// Event group attributes.
     pub attrs: EventAttributes,
 }
 
 /// Event data loaded from an `NXevent_data` group (neutrons).
 #[derive(Clone, Debug)]
 pub struct NeutronEventData {
+    /// Event IDs derived from pixel coordinates.
     pub event_id: Vec<i32>,
+    /// Time-of-flight values in nanoseconds.
     pub event_time_offset_ns: Vec<u64>,
+    /// Pulse timestamps in nanoseconds.
     pub event_time_zero_ns: Vec<u64>,
+    /// Event indices marking pulse boundaries.
     pub event_index: Vec<i32>,
+    /// Time-over-threshold values in nanoseconds.
     pub time_over_threshold_ns: Option<Vec<u64>>,
+    /// Chip IDs per event.
     pub chip_id: Option<Vec<u8>>,
+    /// Number of hits per neutron.
     pub n_hits: Option<Vec<u16>>,
+    /// X coordinates (pixels).
     pub x: Option<Vec<u16>>,
+    /// Y coordinates (pixels).
     pub y: Option<Vec<u16>>,
+    /// Event group attributes.
     pub attrs: EventAttributes,
 }
 
 /// Event group attributes.
 #[derive(Clone, Debug, Default)]
 pub struct EventAttributes {
+    /// Detector X size in pixels.
     pub x_size: Option<u32>,
+    /// Detector Y size in pixels.
     pub y_size: Option<u32>,
+    /// Flight path length in meters.
     pub flight_path_m: Option<f64>,
+    /// Time-of-flight offset in nanoseconds.
     pub tof_offset_ns: Option<f64>,
+    /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
 }
 
 /// Neutron event batch with pulse timestamp.
 #[derive(Clone, Debug)]
 pub struct NeutronEventBatch {
+    /// Pulse TDC timestamp (25ns ticks).
     pub tdc_timestamp_25ns: u64,
+    /// Neutron batch for this pulse.
     pub neutrons: NeutronBatch,
 }
 
@@ -953,11 +1004,17 @@ impl NeutronEventWriter {
 /// Histogram write configuration.
 #[derive(Clone, Debug)]
 pub struct HistogramWriteOptions {
+    /// Chunk shape for counts (optional override).
     pub chunk_counts: Option<[usize; 4]>,
+    /// Optional gzip compression level (0-9).
     pub compression: Option<u8>,
+    /// Enable shuffle filter before compression.
     pub shuffle: bool,
+    /// Flight path length in meters (optional).
     pub flight_path_m: Option<f64>,
+    /// Time-of-flight offset in nanoseconds (optional).
     pub tof_offset_ns: Option<f64>,
+    /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
 }
 
@@ -977,18 +1034,24 @@ impl Default for HistogramWriteOptions {
 /// Histogram shape (`rot_angle`, y, x, `time_of_flight`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistogramShape {
+    /// Rotation angle dimension.
     pub rot_angle: usize,
+    /// Y dimension.
     pub y: usize,
+    /// X dimension.
     pub x: usize,
+    /// Time-of-flight dimension.
     pub time_of_flight: usize,
 }
 
 impl HistogramShape {
+    /// Total number of bins.
     #[must_use]
     pub fn len(&self) -> usize {
         self.rot_angle * self.y * self.x * self.time_of_flight
     }
 
+    /// Returns true when any dimension is zero.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -998,51 +1061,77 @@ impl HistogramShape {
 /// Histogram axis data for streaming writes.
 #[derive(Clone, Debug)]
 pub struct HistogramAxisData {
+    /// Rotation angle axis values.
     pub rot_angle: Vec<f64>,
+    /// Y axis values.
     pub y: Vec<f64>,
+    /// X axis values.
     pub x: Vec<f64>,
+    /// Time-of-flight axis values in nanoseconds.
     pub time_of_flight_ns: Vec<f64>,
 }
 
 /// Histogram data for writing.
 #[derive(Clone, Debug)]
 pub struct HistogramWriteData {
+    /// Flattened counts array.
     pub counts: Vec<u64>,
+    /// Histogram shape.
     pub shape: HistogramShape,
+    /// Rotation angle axis values.
     pub rot_angle: Vec<f64>,
+    /// Y axis values.
     pub y: Vec<f64>,
+    /// X axis values.
     pub x: Vec<f64>,
+    /// Time-of-flight axis values in nanoseconds.
     pub time_of_flight_ns: Vec<f64>,
 }
 
 /// Histogram data loaded from `NXdata`.
 #[derive(Clone, Debug)]
 pub struct HistogramData {
+    /// Flattened counts array.
     pub counts: Vec<u64>,
+    /// Histogram shape.
     pub shape: HistogramShape,
+    /// Rotation angle axis values.
     pub rot_angle: Vec<f64>,
+    /// Y axis values.
     pub y: Vec<f64>,
+    /// X axis values.
     pub x: Vec<f64>,
+    /// Time-of-flight axis values in nanoseconds.
     pub time_of_flight_ns: Vec<f64>,
+    /// Optional energy axis values in eV.
     pub energy_ev: Option<Vec<f64>>,
+    /// Histogram attributes.
     pub attrs: HistogramAttributes,
 }
 
 /// Histogram attributes.
 #[derive(Clone, Debug, Default)]
 pub struct HistogramAttributes {
+    /// Flight path length in meters.
     pub flight_path_m: Option<f64>,
+    /// Time-of-flight offset in nanoseconds.
     pub tof_offset_ns: Option<f64>,
+    /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
 }
 
 /// A histogram bin update.
 #[derive(Clone, Copy, Debug)]
 pub struct HistogramBin {
+    /// Rotation angle index.
     pub rot_angle: usize,
+    /// Y index.
     pub y: usize,
+    /// X index.
     pub x: usize,
+    /// Time-of-flight index.
     pub time_of_flight: usize,
+    /// Count increment.
     pub count: u64,
 }
 
