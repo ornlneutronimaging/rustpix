@@ -12,8 +12,10 @@ use rustpix_core::extraction::ExtractionConfig;
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use std::collections::VecDeque;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Duration;
 
 /// Neutron output for a single pulse.
 #[derive(Clone, Debug)]
@@ -47,9 +49,13 @@ impl Iterator for OutOfCoreNeutronStreamHandle {
 }
 
 /// Threaded out-of-core stream with bounded queues.
+///
+/// Dropping the stream signals cancellation and joins worker threads; if a
+/// batch is already being processed, shutdown waits for that batch to finish.
 pub struct ThreadedOutOfCoreNeutronStream {
     receiver: mpsc::Receiver<Result<PulseNeutronBatch>>,
     handles: Vec<thread::JoinHandle<()>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Iterator for ThreadedOutOfCoreNeutronStream {
@@ -62,6 +68,7 @@ impl Iterator for ThreadedOutOfCoreNeutronStream {
 
 impl Drop for ThreadedOutOfCoreNeutronStream {
     fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
@@ -225,6 +232,28 @@ pub fn out_of_core_neutron_stream(
     extraction: &ExtractionConfig,
     params: &AlgorithmParams,
     memory: &OutOfCoreConfig,
+) -> Result<Box<dyn Iterator<Item = Result<PulseNeutronBatch>>>> {
+    let handle = out_of_core_neutron_stream_handle(
+        reader, algorithm, clustering, extraction, params, memory,
+    )?;
+
+    Ok(Box::new(handle))
+}
+
+/// Build an out-of-core neutron stream handle from a TPX3 reader.
+///
+/// This exposes the underlying handle type, while [`out_of_core_neutron_stream`]
+/// returns a boxed iterator for compatibility.
+///
+/// # Errors
+/// Returns an error if the reader fails or the memory budget is invalid.
+pub fn out_of_core_neutron_stream_handle(
+    reader: &Tpx3FileReader,
+    algorithm: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    extraction: &ExtractionConfig,
+    params: &AlgorithmParams,
+    memory: &OutOfCoreConfig,
 ) -> Result<OutOfCoreNeutronStreamHandle> {
     let overlap_tof = clustering.window_tof();
     let batcher = pulse_batches(reader, memory, overlap_tof)?;
@@ -267,11 +296,28 @@ where
 {
     let (group_tx, group_rx) = mpsc::sync_channel::<PulseBatchGroup>(queue_depth);
     let (out_tx, out_rx) = mpsc::sync_channel::<Result<PulseNeutronBatch>>(queue_depth);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_reader = Arc::clone(&cancel);
+    let cancel_worker = Arc::clone(&cancel);
 
     let reader_handle = thread::spawn(move || {
         for group in batcher {
-            if group_tx.send(group).is_err() {
+            if cancel_reader.load(Ordering::Relaxed) {
                 break;
+            }
+            let mut pending = group;
+            loop {
+                if cancel_reader.load(Ordering::Relaxed) {
+                    return;
+                }
+                match group_tx.try_send(pending) {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Disconnected(_)) => return,
+                    Err(mpsc::TrySendError::Full(group)) => {
+                        pending = group;
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
             }
         }
     });
@@ -286,7 +332,20 @@ where
             None
         };
 
-        for group in group_rx {
+        loop {
+            if cancel_worker.load(Ordering::Relaxed) {
+                break;
+            }
+            let group = match group_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(group) => group,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
+            if cancel_worker.load(Ordering::Relaxed) {
+                break;
+            }
+
             let result = if let Some(pool) = &pool {
                 pool.install(|| {
                     process_group(group, algorithm, &clustering, &extraction, &params, true)
@@ -298,6 +357,9 @@ where
             match result {
                 Ok(group_batches) => {
                     for batch in group_batches {
+                        if cancel_worker.load(Ordering::Relaxed) {
+                            return;
+                        }
                         if out_tx.send(Ok(batch)).is_err() {
                             return;
                         }
@@ -314,6 +376,7 @@ where
     ThreadedOutOfCoreNeutronStream {
         receiver: out_rx,
         handles: vec![reader_handle, worker_handle],
+        cancel,
     }
 }
 

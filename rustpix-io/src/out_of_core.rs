@@ -50,12 +50,20 @@ impl OutOfCoreConfig {
     }
 
     #[must_use]
+    /// Set the number of worker threads for slice processing.
+    ///
+    /// Values less than 1 are clamped to 1. Use [`Self::try_with_parallelism`]
+    /// to surface invalid values as an error instead.
     pub fn with_parallelism(mut self, threads: usize) -> Self {
         self.parallelism = Some(threads.max(1));
         self
     }
 
     #[must_use]
+    /// Set the bounded queue depth for pipeline stages.
+    ///
+    /// Values less than 1 are clamped to 1. Use [`Self::try_with_queue_depth`]
+    /// to surface invalid values as an error instead.
     pub fn with_queue_depth(mut self, depth: usize) -> Self {
         self.queue_depth = depth.max(1);
         self
@@ -65,6 +73,34 @@ impl OutOfCoreConfig {
     pub fn with_async_io(mut self, enabled: bool) -> Self {
         self.async_io = enabled;
         self
+    }
+
+    /// Fallible variant of [`Self::with_parallelism`].
+    ///
+    /// # Errors
+    /// Returns an error if `threads` is 0.
+    pub fn try_with_parallelism(mut self, threads: usize) -> Result<Self> {
+        if threads == 0 {
+            return Err(Error::InvalidFormat(
+                "parallelism must be at least 1".to_string(),
+            ));
+        }
+        self.parallelism = Some(threads);
+        Ok(self)
+    }
+
+    /// Fallible variant of [`Self::with_queue_depth`].
+    ///
+    /// # Errors
+    /// Returns an error if `depth` is 0.
+    pub fn try_with_queue_depth(mut self, depth: usize) -> Result<Self> {
+        if depth == 0 {
+            return Err(Error::InvalidFormat(
+                "queue_depth must be at least 1".to_string(),
+            ));
+        }
+        self.queue_depth = depth;
+        Ok(self)
     }
 
     #[must_use]
