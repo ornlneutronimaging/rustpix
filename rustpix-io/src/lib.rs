@@ -7,7 +7,6 @@
 
 mod error;
 #[cfg(feature = "hdf5")]
-#[allow(missing_docs)]
 pub mod hdf5;
 pub mod out_of_core;
 mod out_of_core_pipeline;
