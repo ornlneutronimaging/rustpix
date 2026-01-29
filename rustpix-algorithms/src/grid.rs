@@ -6,12 +6,18 @@ use crate::SpatialGrid;
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;
 
+/// Configuration for grid-based clustering.
 #[derive(Clone, Debug)]
 pub struct GridConfig {
+    /// Spatial radius for neighbor detection (pixels).
     pub radius: f64,
+    /// Temporal correlation window (nanoseconds).
     pub temporal_window_ns: f64,
+    /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
+    /// Maximum cluster size (None = unlimited).
     pub max_cluster_size: Option<usize>,
+    /// Grid cell size (pixels).
     pub cell_size: usize,
 }
 
@@ -28,8 +34,11 @@ impl Default for GridConfig {
 }
 
 #[derive(Default)]
+/// Reusable grid clustering state.
 pub struct GridState {
+    /// Number of hits processed.
     pub hits_processed: usize,
+    /// Number of clusters found.
     pub clusters_found: usize,
     grid: Option<SpatialGrid<usize>>,
     parent: Vec<usize>,
@@ -39,7 +48,7 @@ pub struct GridState {
     root_to_label: Vec<i32>,
 }
 
-/// SoA-optimized Grid Clustering.
+/// SoA-optimized grid clustering implementation.
 pub struct GridClustering {
     config: GridConfig,
 }

@@ -8,17 +8,25 @@ use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentro
 use rustpix_core::neutron::{Neutron, NeutronBatch};
 use rustpix_core::soa::HitBatch;
 
+/// Supported clustering algorithms.
 #[derive(Clone, Copy, Debug)]
 pub enum ClusteringAlgorithm {
+    /// Age-Based Spatial clustering.
     Abs,
+    /// DBSCAN clustering.
     Dbscan,
+    /// Grid-based clustering.
     Grid,
 }
 
+/// Algorithm-specific tuning parameters.
 #[derive(Clone, Debug)]
 pub struct AlgorithmParams {
+    /// ABS scan interval (hits between aging scans).
     pub abs_scan_interval: usize,
+    /// DBSCAN minimum points for a seed cluster.
     pub dbscan_min_points: usize,
+    /// Grid cell size (pixels).
     pub grid_cell_size: usize,
 }
 
@@ -32,6 +40,7 @@ impl Default for AlgorithmParams {
     }
 }
 
+/// Iterator that clusters and extracts each incoming batch.
 pub struct ClusterAndExtractStream<I>
 where
     I: Iterator<Item = HitBatch>,
@@ -62,6 +71,7 @@ where
     }
 }
 
+/// Create a streaming cluster-and-extract iterator.
 pub fn cluster_and_extract_stream_iter<I>(
     batches: I,
     algorithm: ClusteringAlgorithm,

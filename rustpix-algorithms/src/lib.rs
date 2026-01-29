@@ -6,6 +6,7 @@
 //! - **Graph** - Union-Find connected components
 //! - **Grid** - Detector geometry optimized
 //!
+#![warn(missing_docs)]
 
 mod abs;
 mod dbscan;

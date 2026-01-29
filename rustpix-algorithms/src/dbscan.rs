@@ -4,11 +4,16 @@ use rayon::prelude::*;
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;
 
+/// Configuration for DBSCAN clustering.
 #[derive(Clone, Debug)]
 pub struct DbscanConfig {
+    /// Spatial neighborhood radius (pixels).
     pub epsilon: f64,
+    /// Temporal correlation window (nanoseconds).
     pub temporal_window_ns: f64,
+    /// Minimum number of points to seed a cluster.
     pub min_points: usize,
+    /// Minimum cluster size to keep after pruning.
     pub min_cluster_size: u16,
 }
 
@@ -23,11 +28,13 @@ impl Default for DbscanConfig {
     }
 }
 
+/// DBSCAN clustering implementation.
 pub struct DbscanClustering {
     config: DbscanConfig,
 }
 
 #[derive(Default)]
+/// Reusable DBSCAN clustering state buffers.
 pub struct DbscanState {
     grid: Vec<Vec<usize>>,
     visited: Vec<bool>,
@@ -53,11 +60,13 @@ struct TrackingState<'a> {
 }
 
 impl DbscanClustering {
+    /// Create a DBSCAN clustering instance with the provided configuration.
     #[must_use]
     pub fn new(config: DbscanConfig) -> Self {
         Self { config }
     }
 
+    /// Create a fresh DBSCAN state container.
     #[must_use]
     pub fn create_state(&self) -> DbscanState {
         DbscanState::default()
