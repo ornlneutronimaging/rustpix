@@ -23,6 +23,7 @@ use rustpix_core::soa::HitBatch;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// A batch of hits belonging to a single pulse (TDC period) from one chip.
 #[derive(Debug, Clone)]
@@ -96,7 +97,7 @@ where
     ready_queue: VecDeque<PulseBatch>,
 
     tdc_correction: u32,
-    chip_transform: Box<dyn Fn(u8, u16, u16) -> (u16, u16) + 'static>,
+    chip_transform: Arc<dyn Fn(u8, u16, u16) -> (u16, u16) + Send + Sync + 'static>,
 }
 
 impl<D> PulseReader<D>
@@ -107,7 +108,7 @@ where
         data: D,
         sections: &[Tpx3Section],
         tdc_correction: u32,
-        chip_transform: impl Fn(u8, u16, u16) -> (u16, u16) + 'static,
+        chip_transform: impl Fn(u8, u16, u16) -> (u16, u16) + Send + Sync + 'static,
     ) -> Self {
         let owned_sections = sections.to_vec();
 
@@ -126,7 +127,7 @@ where
             tdc_epoch: 0,
             last_tdc: initial_tdc,
             tdc_correction,
-            chip_transform: Box::new(chip_transform),
+            chip_transform: Arc::new(chip_transform),
         }
     }
 

@@ -16,6 +16,12 @@ pub struct OutOfCoreConfig {
     pub memory_fraction: f64,
     /// Explicit memory budget override (bytes). If set, `memory_fraction` is ignored.
     pub memory_budget_bytes: Option<usize>,
+    /// Optional number of worker threads for parallel slice processing.
+    pub parallelism: Option<usize>,
+    /// Bounded queue depth for pipeline stages.
+    pub queue_depth: usize,
+    /// Enable async pipeline stage execution.
+    pub async_io: bool,
 }
 
 impl Default for OutOfCoreConfig {
@@ -23,6 +29,9 @@ impl Default for OutOfCoreConfig {
         Self {
             memory_fraction: 0.5,
             memory_budget_bytes: None,
+            parallelism: None,
+            queue_depth: 2,
+            async_io: false,
         }
     }
 }
@@ -38,6 +47,39 @@ impl OutOfCoreConfig {
     pub fn with_memory_budget_bytes(mut self, bytes: usize) -> Self {
         self.memory_budget_bytes = Some(bytes);
         self
+    }
+
+    #[must_use]
+    pub fn with_parallelism(mut self, threads: usize) -> Self {
+        self.parallelism = Some(threads.max(1));
+        self
+    }
+
+    #[must_use]
+    pub fn with_queue_depth(mut self, depth: usize) -> Self {
+        self.queue_depth = depth.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_async_io(mut self, enabled: bool) -> Self {
+        self.async_io = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn effective_parallelism(&self) -> usize {
+        self.parallelism.unwrap_or(1).max(1)
+    }
+
+    #[must_use]
+    pub fn effective_queue_depth(&self) -> usize {
+        self.queue_depth.max(1)
+    }
+
+    #[must_use]
+    pub fn use_threaded_pipeline(&self) -> bool {
+        self.async_io || self.parallelism.unwrap_or(1) > 1
     }
 
     /// Resolve the target memory budget in bytes.
