@@ -9,6 +9,7 @@ use std::thread;
 
 use eframe::egui;
 
+use crate::histogram::Hyperstack3D;
 use crate::message::AppMessage;
 use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
@@ -36,14 +37,16 @@ pub struct RustpixApp {
 
     /// Loaded hit batch data.
     pub(crate) hit_batch: Option<HitBatch>,
-    /// 512x512 hit count grid for visualization.
-    pub(crate) hit_counts: Option<Vec<u32>>,
+    /// 3D hyperstack histogram (TOF × Y × X).
+    pub(crate) hyperstack: Option<Hyperstack3D>,
+    /// Cached 2D projection for visualization (sum over TOF).
+    pub(crate) hit_counts: Option<Vec<u64>>,
+    /// Cached TOF spectrum (sum over all pixels).
+    pub(crate) tof_spectrum: Option<Vec<u64>>,
     /// Extracted neutron events.
     pub(crate) neutrons: NeutronBatch,
-    /// Full TOF histogram data.
-    pub(crate) tof_hist_full: Option<Vec<u64>>,
     /// Current cursor info (x, y, hit count).
-    pub(crate) cursor_info: Option<(usize, usize, u32)>,
+    pub(crate) cursor_info: Option<(usize, usize, u64)>,
 
     /// TDC frequency in Hz.
     pub(crate) tdc_frequency: f64,
@@ -76,9 +79,10 @@ impl Default for RustpixApp {
             dbscan_min_points: 2,
 
             hit_batch: None,
+            hyperstack: None,
             hit_counts: None,
+            tof_spectrum: None,
             neutrons: NeutronBatch::default(),
-            tof_hist_full: None,
             cursor_info: None,
 
             tdc_frequency: 60.0,
@@ -112,10 +116,11 @@ impl RustpixApp {
         self.processing.status_text.clear();
         self.processing.status_text.push_str("Loading file...");
         self.hit_batch = None;
+        self.hyperstack = None;
         self.hit_counts = None;
+        self.tof_spectrum = None;
         self.neutrons.clear();
         self.texture = None;
-        self.tof_hist_full = None;
     }
 
     /// Start clustering processing asynchronously.
@@ -141,12 +146,17 @@ impl RustpixApp {
         }
     }
 
-    /// Generate histogram image from hit counts.
+    /// Generate histogram image from hit counts (2D projection).
     pub fn generate_histogram(&self) -> egui::ColorImage {
         let Some(counts) = &self.hit_counts else {
             return egui::ColorImage::new([512, 512], egui::Color32::BLACK);
         };
         generate_histogram_image(counts, self.colormap)
+    }
+
+    /// Get the cached TOF spectrum (full detector integration).
+    pub fn tof_spectrum(&self) -> Option<&[u64]> {
+        self.tof_spectrum.as_deref()
     }
 
     /// Handle pending messages from async workers.
@@ -157,14 +167,16 @@ impl RustpixApp {
                     self.processing.progress = p;
                     self.processing.status_text = s;
                 }
-                AppMessage::LoadComplete(batch, counts, hist, dur, _dbg) => {
+                AppMessage::LoadComplete(batch, hyperstack, dur, _dbg) => {
                     self.processing.is_loading = false;
                     self.processing.progress = 1.0;
                     self.processing.status_text =
                         format!("Loaded {} hits in {:.2}s", batch.len(), dur.as_secs_f64());
 
-                    self.hit_counts = Some(counts);
-                    self.tof_hist_full = Some(hist);
+                    // Cache projections for visualization
+                    self.hit_counts = Some(hyperstack.project_xy());
+                    self.tof_spectrum = Some(hyperstack.full_spectrum());
+                    self.hyperstack = Some(*hyperstack);
                     self.hit_batch = Some(*batch);
 
                     let img = self.generate_histogram();

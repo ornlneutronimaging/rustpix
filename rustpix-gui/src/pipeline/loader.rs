@@ -15,8 +15,16 @@ use rustpix_tpx::ordering::{PulseBatch, PulseReader};
 use rustpix_tpx::section::{scan_section_tdc, Tpx3Section};
 use rustpix_tpx::{ChipTransform, DetectorConfig};
 
+use crate::histogram::Hyperstack3D;
 use crate::message::AppMessage;
-use crate::util::{f64_to_usize_bounded, u32_to_f64, usize_to_f32, usize_to_f64};
+use crate::util::usize_to_f32;
+
+/// Number of TOF bins for hyperstack.
+const N_TOF_BINS: usize = 200;
+/// Detector width in pixels.
+const DETECTOR_WIDTH: usize = 512;
+/// Detector height in pixels.
+const DETECTOR_HEIGHT: usize = 512;
 
 /// Main entry point for file loading in a background thread.
 ///
@@ -72,14 +80,21 @@ pub fn load_file_worker(path: &Path, tx: &Sender<AppMessage>, tdc_frequency: f64
 
     let _ = tx.send(AppMessage::LoadProgress(
         0.95,
-        "Generating visualization data...".to_string(),
+        "Building hyperstack...".to_string(),
     ));
-    let (counts, hist) = compute_counts_and_hist(&full_batch, tdc_correction);
+
+    // Build 3D hyperstack
+    let hyperstack = Hyperstack3D::from_hits(
+        &full_batch,
+        N_TOF_BINS,
+        tdc_correction,
+        DETECTOR_WIDTH,
+        DETECTOR_HEIGHT,
+    );
 
     let _ = tx.send(AppMessage::LoadComplete(
         Box::new(full_batch),
-        counts,
-        hist,
+        Box::new(hyperstack),
         start.elapsed(),
         debug_str,
     ));
@@ -119,7 +134,9 @@ fn scan_sections_with_progress(
         ));
 
         if consumed == 0 && !is_eof {
-            offset = offset.saturating_add(chunk_size);
+            // Section may span chunk boundary - advance minimally to find next header
+            // rather than skipping the entire chunk which could drop sections
+            offset = offset.saturating_add(8); // One TPX3 packet size
         }
     }
 
@@ -296,38 +313,4 @@ fn process_sections_to_batch(
     });
 
     full_batch
-}
-
-/// Compute hit counts grid and TOF histogram.
-///
-/// Returns a tuple of (counts, histogram) where:
-/// - counts: 512x512 grid of hit counts per pixel
-/// - histogram: TOF histogram with 200 bins
-fn compute_counts_and_hist(batch: &HitBatch, tdc_correction: u32) -> (Vec<u32>, Vec<u64>) {
-    let mut counts = vec![0u32; 512 * 512];
-    for i in 0..batch.len() {
-        let x = usize::from(batch.x[i]);
-        let y = usize::from(batch.y[i]);
-        if x < 512 && y < 512 {
-            counts[y * 512 + x] += 1;
-        }
-    }
-
-    let n_bins = 200;
-    let mut hist = vec![0u64; n_bins];
-    let hist_max = u32_to_f64(tdc_correction);
-    let bin_width = hist_max / usize_to_f64(n_bins);
-
-    if bin_width > 0.0 {
-        for &t in &batch.tof {
-            let val = u32_to_f64(t);
-            if val < hist_max {
-                if let Some(bin) = f64_to_usize_bounded(val / bin_width, n_bins) {
-                    hist[bin] += 1;
-                }
-            }
-        }
-    }
-
-    (counts, hist)
 }

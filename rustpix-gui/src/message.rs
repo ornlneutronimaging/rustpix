@@ -8,6 +8,8 @@ use std::time::Duration;
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 
+use crate::histogram::Hyperstack3D;
+
 /// Messages sent from background workers to the UI thread.
 pub enum AppMessage {
     /// File loading progress update.
@@ -17,11 +19,10 @@ pub enum AppMessage {
     ///
     /// Contains:
     /// - `HitBatch`: Parsed detector hits
-    /// - `Vec<u32>`: 512x512 pixel count grid for visualization
-    /// - `Vec<u64>`: TOF histogram bins
+    /// - `Hyperstack3D`: 3D histogram data (TOF × Y × X)
     /// - `Duration`: Time taken to load
     /// - `String`: Debug information
-    LoadComplete(Box<HitBatch>, Vec<u32>, Vec<u64>, Duration, String),
+    LoadComplete(Box<HitBatch>, Box<Hyperstack3D>, Duration, String),
 
     /// File loading failed.
     LoadError(String),

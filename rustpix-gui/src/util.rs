@@ -15,17 +15,6 @@ pub fn usize_to_f64(value: usize) -> f64 {
     value as f64
 }
 
-/// Convert u32 to f32 with allowed precision loss.
-#[allow(clippy::cast_precision_loss)]
-pub fn u32_to_f32(value: u32) -> f32 {
-    value as f32
-}
-
-/// Convert u32 to f64 (lossless).
-pub fn u32_to_f64(value: u32) -> f64 {
-    f64::from(value)
-}
-
 /// Convert u64 to f64 with allowed precision loss.
 #[allow(clippy::cast_precision_loss)]
 pub fn u64_to_f64(value: u64) -> f64 {

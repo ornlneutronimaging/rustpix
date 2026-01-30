@@ -2,8 +2,13 @@
 
 use egui::ColorImage;
 
-use crate::util::u32_to_f32;
 use crate::viewer::Colormap;
+
+/// Convert u64 to f32 with allowed precision loss.
+#[allow(clippy::cast_precision_loss)]
+fn u64_to_f32(value: u64) -> f32 {
+    value as f32
+}
 
 /// Generate a 512x512 color image from hit counts using the specified colormap.
 ///
@@ -16,16 +21,16 @@ use crate::viewer::Colormap;
 /// # Returns
 /// RGBA color image suitable for display
 #[must_use]
-pub fn generate_histogram_image(counts: &[u32], colormap: Colormap) -> ColorImage {
+pub fn generate_histogram_image(counts: &[u64], colormap: Colormap) -> ColorImage {
     // Find max for scaling
-    let max_count = u32_to_f32(counts.iter().max().copied().unwrap_or(1));
+    let max_count = u64_to_f32(counts.iter().max().copied().unwrap_or(1));
     let mut pixels = Vec::with_capacity(512 * 512 * 4);
 
     for &count in counts {
         if count == 0 {
             pixels.extend_from_slice(&[0, 0, 0, 255]);
         } else {
-            let val = (u32_to_f32(count) / max_count).sqrt(); // Sqrt scale
+            let val = (u64_to_f32(count) / max_count).sqrt(); // Sqrt scale
             let rgba = colormap.apply(val);
             pixels.extend_from_slice(&rgba);
         }

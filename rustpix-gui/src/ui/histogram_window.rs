@@ -13,8 +13,11 @@ impl RustpixApp {
             return;
         }
 
+        // Clone spectrum data to avoid borrow conflict with UI state
+        let spectrum = self.tof_spectrum().map(<[u64]>::to_vec);
+
         egui::Window::new("TOF Histogram").show(ctx, |ui| {
-            if let Some(full) = &self.tof_hist_full {
+            if let Some(full) = spectrum.as_ref() {
                 let tdc_period = 1.0 / self.tdc_frequency; // s
                 let max_us = tdc_period * 1e6; // microseconds
                 let n_bins = full.len();

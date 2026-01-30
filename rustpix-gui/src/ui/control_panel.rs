@@ -35,7 +35,12 @@ impl RustpixApp {
     }
 
     fn render_file_controls(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Open File").clicked() && !self.processing.is_loading {
+        // Disable file loading while loading or processing to prevent state corruption
+        let can_load = !self.processing.is_loading && !self.processing.is_processing;
+        if ui
+            .add_enabled(can_load, egui::Button::new("Open File"))
+            .clicked()
+        {
             if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
                 self.load_file(path);
             }
