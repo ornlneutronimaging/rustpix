@@ -8,6 +8,7 @@
 
 use std::ops::Range;
 
+use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 
 /// A 3D histogram storing counts indexed by (TOF bin, y, x).
@@ -92,6 +93,60 @@ impl Hyperstack3D {
 
             // Calculate TOF bin
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let tof_bin = if hyperstack.bin_width > 0.0 {
+                let bin = (f64::from(tof) / hyperstack.bin_width) as usize;
+                bin.min(n_tof_bins.saturating_sub(1))
+            } else {
+                0
+            };
+
+            // Bounds check and increment
+            if x < width && y < height && tof_bin < n_tof_bins {
+                let idx = tof_bin * height * width + y * width + x;
+                hyperstack.data[idx] += 1;
+            }
+        }
+
+        hyperstack
+    }
+
+    /// Build a hyperstack from a `NeutronBatch`.
+    ///
+    /// Neutron positions are floats (super-resolution), so they are rounded
+    /// to the nearest integer pixel coordinate.
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The neutron batch containing event data
+    /// * `n_tof_bins` - Number of TOF bins to create
+    /// * `tof_max` - Maximum TOF value in 25ns units
+    /// * `width` - Width in pixels (typically 512)
+    /// * `height` - Height in pixels (typically 512)
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn from_neutrons(
+        batch: &NeutronBatch,
+        n_tof_bins: usize,
+        tof_max: u32,
+        width: usize,
+        height: usize,
+    ) -> Self {
+        let mut hyperstack = Self::new(n_tof_bins, width, height, tof_max);
+
+        for i in 0..batch.len() {
+            // Round float coordinates to nearest integer
+            let x = batch.x[i].round();
+            let y = batch.y[i].round();
+            let tof = batch.tof[i];
+
+            // Skip out-of-bounds
+            if x < 0.0 || y < 0.0 {
+                continue;
+            }
+            let x = x as usize;
+            let y = y as usize;
+
+            // Calculate TOF bin
             let tof_bin = if hyperstack.bin_width > 0.0 {
                 let bin = (f64::from(tof) / hyperstack.bin_width) as usize;
                 bin.min(n_tof_bins.saturating_sub(1))

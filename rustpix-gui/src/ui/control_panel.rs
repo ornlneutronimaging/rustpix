@@ -5,6 +5,7 @@ use rfd::FileDialog;
 
 use crate::app::RustpixApp;
 use crate::pipeline::AlgorithmType;
+use crate::state::ViewMode;
 use crate::viewer::Colormap;
 
 impl RustpixApp {
@@ -69,7 +70,11 @@ impl RustpixApp {
     fn render_cursor_info(&self, ui: &mut egui::Ui) {
         if let Some((x, y, count)) = self.cursor_info {
             ui.label(egui::RichText::new("Pixel Info:").strong());
-            ui.label(format!("X: {x}\nY: {y}\nHits: {count}"));
+            let label = match self.ui_state.view_mode {
+                ViewMode::Hits => "Hits",
+                ViewMode::Neutrons => "Neutrons",
+            };
+            ui.label(format!("X: {x}\nY: {y}\n{label}: {count}"));
         } else {
             ui.label("Hover over image for details.");
         }
@@ -77,6 +82,30 @@ impl RustpixApp {
 
     fn render_visualization_controls(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.heading("Visualization");
+
+        // Data source toggle (Hits/Neutrons)
+        ui.horizontal(|ui| {
+            ui.label("Source:");
+            let old_mode = self.ui_state.view_mode;
+            egui::ComboBox::from_id_salt("view_mode")
+                .selected_text(self.ui_state.view_mode.to_string())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.ui_state.view_mode, ViewMode::Hits, "Hits");
+                    ui.add_enabled_ui(self.has_neutrons(), |ui| {
+                        ui.selectable_value(
+                            &mut self.ui_state.view_mode,
+                            ViewMode::Neutrons,
+                            "Neutrons",
+                        );
+                    });
+                });
+            if self.ui_state.view_mode != old_mode {
+                self.texture = None;
+                // Reset slicer bin if switching to mode with different bin count
+                self.ui_state.current_tof_bin = 0;
+            }
+        });
+
         egui::ComboBox::from_label("Color")
             .selected_text(self.colormap.to_string())
             .show_ui(ui, |ui| {
@@ -138,7 +167,11 @@ impl RustpixApp {
         }
 
         // Regenerate texture if needed
-        if self.texture.is_none() && self.hit_counts.is_some() {
+        let has_data = match self.ui_state.view_mode {
+            ViewMode::Hits => self.hit_counts.is_some(),
+            ViewMode::Neutrons => self.neutron_counts.is_some(),
+        };
+        if self.texture.is_none() && has_data {
             let img = self.generate_histogram();
             self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
         }

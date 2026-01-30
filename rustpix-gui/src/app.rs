@@ -14,7 +14,7 @@ use crate::message::AppMessage;
 use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
-use crate::state::{ProcessingState, Statistics, UiState};
+use crate::state::{ProcessingState, Statistics, UiState, ViewMode};
 use crate::viewer::{generate_histogram_image, Colormap};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
@@ -45,6 +45,12 @@ pub struct RustpixApp {
     pub(crate) tof_spectrum: Option<Vec<u64>>,
     /// Extracted neutron events.
     pub(crate) neutrons: NeutronBatch,
+    /// 3D hyperstack for neutron data.
+    pub(crate) neutron_hyperstack: Option<Hyperstack3D>,
+    /// Cached 2D projection for neutron visualization.
+    pub(crate) neutron_counts: Option<Vec<u64>>,
+    /// Cached TOF spectrum for neutrons.
+    pub(crate) neutron_spectrum: Option<Vec<u64>>,
     /// Current cursor info (x, y, hit count).
     pub(crate) cursor_info: Option<(usize, usize, u64)>,
 
@@ -85,6 +91,9 @@ impl Default for RustpixApp {
             hit_counts: None,
             tof_spectrum: None,
             neutrons: NeutronBatch::default(),
+            neutron_hyperstack: None,
+            neutron_counts: None,
+            neutron_spectrum: None,
             cursor_info: None,
 
             tdc_frequency: 60.0,
@@ -124,6 +133,10 @@ impl RustpixApp {
         self.hit_counts = None;
         self.tof_spectrum = None;
         self.neutrons.clear();
+        self.neutron_hyperstack = None;
+        self.neutron_counts = None;
+        self.neutron_spectrum = None;
+        self.ui_state.view_mode = ViewMode::Hits;
         self.texture = None;
         self.statistics.clear();
     }
@@ -164,16 +177,31 @@ impl RustpixApp {
         }
     }
 
-    /// Generate histogram image from hit counts (2D projection or TOF slice).
+    /// Get the active hyperstack based on view mode.
+    fn active_hyperstack(&self) -> Option<&Hyperstack3D> {
+        match self.ui_state.view_mode {
+            ViewMode::Hits => self.hyperstack.as_ref(),
+            ViewMode::Neutrons => self.neutron_hyperstack.as_ref(),
+        }
+    }
+
+    /// Get the active 2D projection based on view mode.
+    fn active_counts(&self) -> Option<&[u64]> {
+        match self.ui_state.view_mode {
+            ViewMode::Hits => self.hit_counts.as_deref(),
+            ViewMode::Neutrons => self.neutron_counts.as_deref(),
+        }
+    }
+
+    /// Generate histogram image from current view (hits or neutrons).
     pub fn generate_histogram(&self) -> egui::ColorImage {
         let counts = if self.ui_state.slicer_enabled {
-            // Get current TOF slice
-            self.hyperstack
-                .as_ref()
+            // Get current TOF slice from active hyperstack
+            self.active_hyperstack()
                 .and_then(|hs| hs.slice_tof(self.ui_state.current_tof_bin))
         } else {
             // Full projection
-            self.hit_counts.as_deref()
+            self.active_counts()
         };
 
         let Some(counts) = counts else {
@@ -184,25 +212,31 @@ impl RustpixApp {
 
     /// Get the cached TOF spectrum (full detector integration).
     pub fn tof_spectrum(&self) -> Option<&[u64]> {
-        self.tof_spectrum.as_deref()
+        match self.ui_state.view_mode {
+            ViewMode::Hits => self.tof_spectrum.as_deref(),
+            ViewMode::Neutrons => self.neutron_spectrum.as_deref(),
+        }
     }
 
-    /// Get the number of TOF bins in the hyperstack.
+    /// Get the number of TOF bins in the active hyperstack.
     pub fn n_tof_bins(&self) -> usize {
-        self.hyperstack
-            .as_ref()
+        self.active_hyperstack()
             .map_or(0, super::histogram::Hyperstack3D::n_tof_bins)
     }
 
     /// Get counts for current view (projection or slice).
     pub fn current_counts(&self) -> Option<&[u64]> {
         if self.ui_state.slicer_enabled {
-            self.hyperstack
-                .as_ref()
+            self.active_hyperstack()
                 .and_then(|hs| hs.slice_tof(self.ui_state.current_tof_bin))
         } else {
-            self.hit_counts.as_deref()
+            self.active_counts()
         }
+    }
+
+    /// Check if neutron data is available.
+    pub fn has_neutrons(&self) -> bool {
+        self.neutron_hyperstack.is_some()
     }
 
     /// Handle pending messages from async workers.
@@ -251,6 +285,20 @@ impl RustpixApp {
                             self.statistics.avg_cluster_size =
                                 self.statistics.hit_count as f64 / neutrons.len() as f64;
                         }
+                    }
+
+                    // Build neutron hyperstack using same TOF parameters as hits
+                    if let Some(hit_hs) = &self.hyperstack {
+                        let neutron_hs = Hyperstack3D::from_neutrons(
+                            &neutrons,
+                            hit_hs.n_tof_bins(),
+                            hit_hs.tof_max(),
+                            hit_hs.width(),
+                            hit_hs.height(),
+                        );
+                        self.neutron_counts = Some(neutron_hs.project_xy());
+                        self.neutron_spectrum = Some(neutron_hs.full_spectrum());
+                        self.neutron_hyperstack = Some(neutron_hs);
                     }
 
                     self.neutrons = neutrons;
