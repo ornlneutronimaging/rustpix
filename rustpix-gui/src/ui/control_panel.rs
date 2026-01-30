@@ -99,6 +99,39 @@ impl RustpixApp {
                     self.texture = None;
                 }
             });
+
+        // TOF Slicer controls
+        let n_bins = self.n_tof_bins();
+        if n_bins > 0 {
+            if ui
+                .toggle_value(&mut self.ui_state.slicer_enabled, "TOF Slicer")
+                .changed()
+            {
+                self.texture = None;
+            }
+
+            if self.ui_state.slicer_enabled {
+                // Clamp current bin to valid range
+                self.ui_state.current_tof_bin = self.ui_state.current_tof_bin.min(n_bins - 1);
+
+                let old_bin = self.ui_state.current_tof_bin;
+                let slider_response = ui.add(
+                    egui::Slider::new(&mut self.ui_state.current_tof_bin, 0..=(n_bins - 1))
+                        .text("TOF Bin"),
+                );
+                // Show current bin info
+                ui.label(format!(
+                    "Slice {}/{}",
+                    self.ui_state.current_tof_bin + 1,
+                    n_bins
+                ));
+                if slider_response.changed() || self.ui_state.current_tof_bin != old_bin {
+                    self.texture = None;
+                }
+            }
+        }
+
+        // Regenerate texture if needed
         if self.texture.is_none() && self.hit_counts.is_some() {
             let img = self.generate_histogram();
             self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));

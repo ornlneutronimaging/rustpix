@@ -1,7 +1,7 @@
 //! TOF histogram window rendering.
 
 use eframe::egui;
-use egui_plot::{Bar, BarChart, Plot};
+use egui_plot::{Bar, BarChart, Plot, VLine};
 
 use crate::app::RustpixApp;
 use crate::util::{u64_to_f64, usize_to_f64};
@@ -13,8 +13,10 @@ impl RustpixApp {
             return;
         }
 
-        // Clone spectrum data to avoid borrow conflict with UI state
+        // Clone spectrum data and slicer state to avoid borrow conflict with UI state
         let spectrum = self.tof_spectrum().map(<[u64]>::to_vec);
+        let slicer_enabled = self.ui_state.slicer_enabled;
+        let current_tof_bin = self.ui_state.current_tof_bin;
 
         egui::Window::new("TOF Histogram").show(ctx, |ui| {
             if let Some(full) = spectrum.as_ref() {
@@ -63,6 +65,17 @@ impl RustpixApp {
                             })
                             .collect();
                         plot_ui.bar_chart(BarChart::new(bars).name("Full"));
+
+                        // Draw slice marker when slicer is enabled
+                        if slicer_enabled && current_tof_bin < n_bins {
+                            let slice_x = usize_to_f64(current_tof_bin) * bin_width_us;
+                            plot_ui.vline(
+                                VLine::new(slice_x)
+                                    .color(egui::Color32::RED)
+                                    .width(2.0)
+                                    .name(format!("Slice {}", current_tof_bin + 1)),
+                            );
+                        }
                     });
             } else {
                 ui.label("No Data");

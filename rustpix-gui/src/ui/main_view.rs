@@ -9,6 +9,9 @@ use crate::util::f64_to_usize_bounded;
 impl RustpixApp {
     /// Render the central panel with the histogram image.
     pub(crate) fn render_central_panel(&mut self, ctx: &egui::Context) {
+        // Clone counts data to avoid borrow conflict in Plot closure
+        let counts_for_cursor = self.current_counts().map(<[u64]>::to_vec);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(tex) = &self.texture {
                 Plot::new("plot").data_aspect(1.0).show(ui, |plot_ui| {
@@ -28,11 +31,7 @@ impl RustpixApp {
                                 self.cursor_info = None;
                                 return;
                             };
-                            let count = if let Some(counts) = &self.hit_counts {
-                                counts[yi * 512 + xi]
-                            } else {
-                                0
-                            };
+                            let count = counts_for_cursor.as_ref().map_or(0, |c| c[yi * 512 + xi]);
                             self.cursor_info = Some((xi, yi, count));
                         } else {
                             self.cursor_info = None;

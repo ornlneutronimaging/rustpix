@@ -146,9 +146,19 @@ impl RustpixApp {
         }
     }
 
-    /// Generate histogram image from hit counts (2D projection).
+    /// Generate histogram image from hit counts (2D projection or TOF slice).
     pub fn generate_histogram(&self) -> egui::ColorImage {
-        let Some(counts) = &self.hit_counts else {
+        let counts = if self.ui_state.slicer_enabled {
+            // Get current TOF slice
+            self.hyperstack
+                .as_ref()
+                .and_then(|hs| hs.slice_tof(self.ui_state.current_tof_bin))
+        } else {
+            // Full projection
+            self.hit_counts.as_deref()
+        };
+
+        let Some(counts) = counts else {
             return egui::ColorImage::new([512, 512], egui::Color32::BLACK);
         };
         generate_histogram_image(counts, self.colormap)
@@ -157,6 +167,24 @@ impl RustpixApp {
     /// Get the cached TOF spectrum (full detector integration).
     pub fn tof_spectrum(&self) -> Option<&[u64]> {
         self.tof_spectrum.as_deref()
+    }
+
+    /// Get the number of TOF bins in the hyperstack.
+    pub fn n_tof_bins(&self) -> usize {
+        self.hyperstack
+            .as_ref()
+            .map_or(0, super::histogram::Hyperstack3D::n_tof_bins)
+    }
+
+    /// Get counts for current view (projection or slice).
+    pub fn current_counts(&self) -> Option<&[u64]> {
+        if self.ui_state.slicer_enabled {
+            self.hyperstack
+                .as_ref()
+                .and_then(|hs| hs.slice_tof(self.ui_state.current_tof_bin))
+        } else {
+            self.hit_counts.as_deref()
+        }
     }
 
     /// Handle pending messages from async workers.
