@@ -17,7 +17,10 @@ impl RustpixApp {
             self.render_file_controls(ui);
             ui.separator();
 
-            self.render_status(ui);
+            self.render_progress_status(ui);
+            ui.separator();
+
+            self.render_statistics(ui);
             ui.separator();
 
             self.render_cursor_info(ui);
@@ -27,10 +30,6 @@ impl RustpixApp {
             ui.separator();
 
             self.render_processing_controls(ui);
-            ui.separator();
-
-            let neutron_count = self.neutrons.len();
-            ui.label(format!("Neutrons: {neutron_count}"));
         });
     }
 
@@ -50,12 +49,19 @@ impl RustpixApp {
         }
     }
 
-    fn render_status(&self, ui: &mut egui::Ui) {
-        if self.processing.is_loading {
+    fn render_progress_status(&mut self, ui: &mut egui::Ui) {
+        let is_busy = self.processing.is_loading || self.processing.is_processing;
+
+        if is_busy {
             ui.add(
                 egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
             );
-        } else {
+            if ui.button("Cancel").clicked() {
+                self.cancel_operation();
+            }
+        } else if !self.processing.status_text.is_empty()
+            && self.processing.status_text != "Ready"
+        {
             ui.label(&self.processing.status_text);
         }
     }
@@ -167,20 +173,16 @@ impl RustpixApp {
             ui.add(egui::Slider::new(&mut self.dbscan_min_points, 1..=10).text("Min Points"));
         }
 
+        let can_cluster = !self.processing.is_loading
+            && !self.processing.is_processing
+            && self.hit_batch.is_some();
+
         if ui
-            .add_enabled(
-                !self.processing.is_processing && self.hit_batch.is_some(),
-                egui::Button::new("Run Clustering"),
-            )
+            .add_enabled(can_cluster, egui::Button::new("Run Clustering"))
             .clicked()
         {
+            self.processing.reset_cancel();
             self.run_processing();
-        }
-
-        if self.processing.is_processing {
-            ui.add(
-                egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
-            );
         }
     }
 }

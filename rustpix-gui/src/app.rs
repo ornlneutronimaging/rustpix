@@ -14,7 +14,7 @@ use crate::message::AppMessage;
 use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
-use crate::state::{ProcessingState, UiState};
+use crate::state::{ProcessingState, Statistics, UiState};
 use crate::viewer::{generate_histogram_image, Colormap};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
@@ -60,6 +60,8 @@ pub struct RustpixApp {
 
     /// Processing state (loading/clustering progress).
     pub(crate) processing: ProcessingState,
+    /// Session statistics.
+    pub(crate) statistics: Statistics,
 
     /// Cached histogram texture.
     pub(crate) texture: Option<egui::TextureHandle>,
@@ -91,6 +93,7 @@ impl Default for RustpixApp {
             tx,
 
             processing: ProcessingState::default(),
+            statistics: Statistics::default(),
 
             texture: None,
             colormap: Colormap::Green,
@@ -113,6 +116,7 @@ impl RustpixApp {
         self.selected_file = Some(path.to_path_buf());
         self.processing.is_loading = true;
         self.processing.progress = 0.0;
+        self.processing.reset_cancel();
         self.processing.status_text.clear();
         self.processing.status_text.push_str("Loading file...");
         self.hit_batch = None;
@@ -121,6 +125,20 @@ impl RustpixApp {
         self.tof_spectrum = None;
         self.neutrons.clear();
         self.texture = None;
+        self.statistics.clear();
+    }
+
+    /// Cancel the current loading or processing operation.
+    pub fn cancel_operation(&mut self) {
+        self.processing.request_cancel();
+        if self.processing.is_loading {
+            self.processing.is_loading = false;
+            self.processing.status_text = "Load cancelled".to_string();
+        }
+        if self.processing.is_processing {
+            self.processing.is_processing = false;
+            self.processing.status_text = "Processing cancelled".to_string();
+        }
     }
 
     /// Start clustering processing asynchronously.
@@ -198,8 +216,12 @@ impl RustpixApp {
                 AppMessage::LoadComplete(batch, hyperstack, dur, _dbg) => {
                     self.processing.is_loading = false;
                     self.processing.progress = 1.0;
-                    self.processing.status_text =
-                        format!("Loaded {} hits in {:.2}s", batch.len(), dur.as_secs_f64());
+                    self.processing.status_text = "Ready".to_string();
+
+                    // Update statistics
+                    self.statistics.hit_count = batch.len();
+                    self.statistics.load_duration = Some(dur);
+                    self.statistics.tof_max = hyperstack.tof_max();
 
                     // Cache projections for visualization
                     self.hit_counts = Some(hyperstack.project_xy());
@@ -218,11 +240,19 @@ impl RustpixApp {
                 AppMessage::ProcessingComplete(neutrons, dur) => {
                     self.processing.is_processing = false;
                     self.processing.progress = 1.0;
-                    self.processing.status_text = format!(
-                        "Found {} neutrons in {:.2}ms",
-                        neutrons.len(),
-                        dur.as_secs_f64() * 1000.0
-                    );
+                    self.processing.status_text = "Ready".to_string();
+
+                    // Update statistics
+                    self.statistics.neutron_count = neutrons.len();
+                    self.statistics.cluster_duration = Some(dur);
+                    if !neutrons.is_empty() && self.statistics.hit_count > 0 {
+                        #[allow(clippy::cast_precision_loss)]
+                        {
+                            self.statistics.avg_cluster_size =
+                                self.statistics.hit_count as f64 / neutrons.len() as f64;
+                        }
+                    }
+
                     self.neutrons = neutrons;
                 }
                 AppMessage::ProcessingError(e) => {
