@@ -1,0 +1,148 @@
+//! Control panel (left sidebar) rendering.
+
+use eframe::egui;
+use rfd::FileDialog;
+
+use crate::app::RustpixApp;
+use crate::pipeline::AlgorithmType;
+use crate::viewer::Colormap;
+
+impl RustpixApp {
+    /// Render the left control panel.
+    pub(crate) fn render_side_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("ctrl").show(ctx, |ui| {
+            ui.heading("Rustpix GUI");
+            ui.separator();
+
+            self.render_file_controls(ui);
+            ui.separator();
+
+            self.render_status(ui);
+            ui.separator();
+
+            self.render_cursor_info(ui);
+            ui.separator();
+
+            self.render_visualization_controls(ctx, ui);
+            ui.separator();
+
+            self.render_processing_controls(ui);
+            ui.separator();
+
+            let neutron_count = self.neutrons.len();
+            ui.label(format!("Neutrons: {neutron_count}"));
+        });
+    }
+
+    fn render_file_controls(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Open File").clicked() && !self.processing.is_loading {
+            if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
+                self.load_file(path);
+            }
+        }
+        if let Some(p) = &self.selected_file {
+            ui.label(p.file_name().unwrap_or_default().to_string_lossy());
+        }
+    }
+
+    fn render_status(&self, ui: &mut egui::Ui) {
+        if self.processing.is_loading {
+            ui.add(
+                egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
+            );
+        } else {
+            ui.label(&self.processing.status_text);
+        }
+    }
+
+    fn render_cursor_info(&self, ui: &mut egui::Ui) {
+        if let Some((x, y, count)) = self.cursor_info {
+            ui.label(egui::RichText::new("Pixel Info:").strong());
+            ui.label(format!("X: {x}\nY: {y}\nHits: {count}"));
+        } else {
+            ui.label("Hover over image for details.");
+        }
+    }
+
+    fn render_visualization_controls(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.heading("Visualization");
+        egui::ComboBox::from_label("Color")
+            .selected_text(self.colormap.to_string())
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Green, "Green")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Hot, "Hot")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Grayscale, "Gray")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+                if ui
+                    .selectable_value(&mut self.colormap, Colormap::Viridis, "Viridis")
+                    .clicked()
+                {
+                    self.texture = None;
+                }
+            });
+        if self.texture.is_none() && self.hit_counts.is_some() {
+            let img = self.generate_histogram();
+            self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
+        }
+
+        ui.toggle_value(&mut self.ui_state.show_histogram, "Show TOF Histogram");
+    }
+
+    fn render_processing_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Processing");
+        ui.add(
+            egui::DragValue::new(&mut self.tdc_frequency)
+                .speed(0.1)
+                .range(1.0..=120.0)
+                .prefix("TDC (Hz): "),
+        );
+
+        egui::ComboBox::from_label("Algo")
+            .selected_text(self.algo_type.to_string())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.algo_type, AlgorithmType::Grid, "Grid");
+                ui.selectable_value(&mut self.algo_type, AlgorithmType::Abs, "ABS");
+                ui.selectable_value(&mut self.algo_type, AlgorithmType::Dbscan, "DBSCAN");
+            });
+
+        ui.add(egui::Slider::new(&mut self.radius, 1.0..=50.0).text("Radius"));
+        ui.add(
+            egui::Slider::new(&mut self.temporal_window_ns, 10.0..=500.0).text("Time Window (ns)"),
+        );
+        ui.add(egui::Slider::new(&mut self.min_cluster_size, 1..=10).text("Min Cluster"));
+
+        if self.algo_type == AlgorithmType::Dbscan {
+            ui.add(egui::Slider::new(&mut self.dbscan_min_points, 1..=10).text("Min Points"));
+        }
+
+        if ui
+            .add_enabled(
+                !self.processing.is_processing && self.hit_batch.is_some(),
+                egui::Button::new("Run Clustering"),
+            )
+            .clicked()
+        {
+            self.run_processing();
+        }
+
+        if self.processing.is_processing {
+            ui.add(
+                egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
+            );
+        }
+    }
+}
