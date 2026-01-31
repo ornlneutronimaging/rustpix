@@ -1524,7 +1524,8 @@ impl RustpixApp {
             .y_axis_label(y_label)
             .include_x(x_min)
             .include_x(x_max)
-            .include_y(0.0);
+            .include_y(0.0)
+            .allow_drag(!zoom_active);
 
         // Apply reset if needed
         if spectrum_reset_clicked {
