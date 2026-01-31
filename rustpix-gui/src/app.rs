@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
+use std::time::Instant;
 
 use eframe::egui;
 
@@ -199,6 +200,7 @@ impl RustpixApp {
         self.ui_state.view_mode = ViewMode::Hits;
         self.ui_state.full_fov_visible = true;
         self.ui_state.show_roi_panel = false;
+        self.ui_state.roi_status = None;
         self.ui_state.show_spectrum_range = false;
         self.ui_state.spectrum_x_range = None;
         self.ui_state.spectrum_y_range = None;
@@ -389,7 +391,14 @@ impl RustpixApp {
             }
         }
 
+        let start = Instant::now();
         let spectra = self.compute_roi_spectra();
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed > 0.05 {
+            let expires_at = ctx.input(|i| i.time) + 1.5;
+            self.ui_state.roi_status = Some(("Computing spectrum...".to_string(), expires_at));
+            ctx.request_repaint();
+        }
         let cache = self.active_roi_cache_mut();
         cache.spectra = spectra;
         cache.roi_revision = roi_revision;

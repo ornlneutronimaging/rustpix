@@ -217,6 +217,15 @@ impl RustpixApp {
                         );
                     }
 
+                    if let Some((message, expires_at)) = &self.ui_state.roi_status {
+                        let now = ctx.input(|i| i.time);
+                        if now <= *expires_at {
+                            ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
+                            ui.label(egui::RichText::new(message).size(11.0).color(accent::BLUE));
+                            ctx.request_repaint();
+                        }
+                    }
+
                     if let Some((message, expires_at)) = &self.ui_state.roi_warning {
                         let now = ctx.input(|i| i.time);
                         if now <= *expires_at {
