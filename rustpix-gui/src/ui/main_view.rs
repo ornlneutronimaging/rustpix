@@ -37,6 +37,7 @@ enum ZoomToolbarIcon {
     Box,
 }
 
+#[allow(dead_code)]
 struct SpectrumExportConfig {
     axis: SpectrumXAxis,
     flight_path_m: f64,
@@ -61,6 +62,14 @@ fn round_to_i32_clamped(value: f64) -> i32 {
         .round()
         .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
     clamped as i32
+}
+
+fn usize_to_i32_saturating(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+fn text_width_px(text: &str) -> i32 {
+    usize_to_i32_saturating(text.len()).saturating_mul(6)
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -1512,6 +1521,8 @@ impl RustpixApp {
         } else {
             None
         };
+        let export_bounds =
+            manual_bounds.unwrap_or_else(|| PlotBounds::from_min_max([x_min, 0.0], [x_max, y_max]));
 
         let zoom_mode = self.ui_state.spectrum_zoom_mode;
         let zoom_active = zoom_mode != ZoomMode::None;
@@ -1746,18 +1757,18 @@ impl RustpixApp {
             }
         }
 
-        if export_png_clicked {
-            if let Some(full) = spectrum.as_ref() {
-                let export_config = SpectrumExportConfig {
-                    axis,
-                    flight_path_m,
-                    tof_offset_ns,
-                    log_x,
-                    log_y,
-                };
-                if let Err(err) = Self::export_spectrum_png(full, bin_width_ms, &export_config) {
-                    log::error!("Failed to export spectrum PNG: {err}");
-                }
+        if export_png_clicked && !lines.is_empty() {
+            let export_config = SpectrumExportConfig {
+                axis,
+                flight_path_m,
+                tof_offset_ns,
+                log_x,
+                log_y,
+            };
+            if let Err(err) =
+                Self::export_spectrum_png(&lines, export_bounds, colors, &export_config)
+            {
+                log::error!("Failed to export spectrum PNG: {err}");
             }
         }
 
@@ -2312,89 +2323,77 @@ impl RustpixApp {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn export_spectrum_png(
-        spectrum: &[u64],
-        bin_width_ms: f64,
+        lines: &[(String, Color32, Vec<[f64; 2]>)],
+        bounds: PlotBounds,
+        colors: ThemeColors,
         export: &SpectrumExportConfig,
     ) -> anyhow::Result<()> {
         let Some(path) = FileDialog::new().set_file_name("spectrum.png").save_file() else {
             return Ok(());
         };
 
-        let axis = export.axis;
-        let flight_path_m = export.flight_path_m;
-        let tof_offset_ns = export.tof_offset_ns;
-        let log_x = export.log_x;
-        let log_y = export.log_y;
-
         let width: u32 = 800;
         let height: u32 = 240;
-        let pad: i32 = 24;
+        let pad: i32 = 32;
         let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
         let height_i32 = i32::try_from(height).unwrap_or(i32::MAX);
         let pad_f64 = f64::from(pad);
-        let bg = Rgba([0x0d, 0x0d, 0x0d, 0xff]);
-        let line = Rgba([0xb8, 0xb8, 0xb8, 0xff]);
-        let axis_color = Rgba([0x33, 0x33, 0x33, 0xff]);
+        let bg = Self::color32_to_rgba(colors.bg_panel);
+        let axis_color = Self::color32_to_rgba(colors.border);
+        let grid_color = Self::color32_to_rgba(Color32::from_rgba_unmultiplied(
+            colors.border_light.r(),
+            colors.border_light.g(),
+            colors.border_light.b(),
+            80,
+        ));
 
         let mut img = RgbaImage::from_pixel(width, height, bg);
 
-        let spec_bins = spectrum.len();
-        let mut points = Vec::with_capacity(spec_bins);
-        let mut x_min = f64::INFINITY;
-        let mut x_max = f64::NEG_INFINITY;
-        let mut y_max = 0.0;
+        let min = bounds.min();
+        let max = bounds.max();
+        let mut x_min = min[0];
+        let mut x_max = max[0];
+        let mut y_min = min[1];
+        let mut y_max = max[1];
 
-        for (i, &count) in spectrum.iter().enumerate() {
-            let tof_ms = usize_to_f64(i) * bin_width_ms;
-            let mut x = match axis {
-                SpectrumXAxis::ToFMs => tof_ms,
-                SpectrumXAxis::EnergyEv => {
-                    let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns) else {
-                        continue;
-                    };
-                    e
-                }
-            };
-            if log_x {
-                if x <= 0.0 {
-                    continue;
-                }
-                x = x.log10();
-            }
-
-            let mut y = u64_to_f64(count);
-            if log_y {
-                y = u64_to_f64(count.max(1)).log10();
-            }
-
-            if y > y_max {
-                y_max = y;
-            }
-            if x < x_min {
-                x_min = x;
-            }
-            if x > x_max {
-                x_max = x;
-            }
-            points.push((x, y));
-        }
-
-        let x_span = x_max - x_min;
-        if !x_min.is_finite() || !x_max.is_finite() || x_span.abs() <= f64::EPSILON {
+        if !x_min.is_finite() || !x_max.is_finite() || x_min >= x_max {
             x_min = 0.0;
             x_max = 1.0;
         }
-        if y_max <= 0.0 {
+        if !y_min.is_finite() || !y_max.is_finite() || y_min >= y_max {
+            y_min = 0.0;
             y_max = 1.0;
-        } else {
-            y_max *= 1.05;
         }
 
         let plot_w = f64::from((width_i32 - pad * 2).max(1));
         let plot_h = f64::from((height_i32 - pad * 2).max(1));
         let x_scale = plot_w / (x_max - x_min).max(1e-9);
-        let y_scale = plot_h / y_max.max(1e-9);
+        let y_scale = plot_h / (y_max - y_min).max(1e-9);
+
+        // Grid (simple 5x5)
+        for i in 1..5 {
+            let t = f64::from(i) / 5.0;
+            let x = pad_f64 + t * plot_w;
+            let y = pad_f64 + t * plot_h;
+            Self::draw_line(
+                &mut img,
+                round_to_i32_clamped(x),
+                pad,
+                round_to_i32_clamped(x),
+                height_i32 - pad,
+                grid_color,
+            );
+            Self::draw_line(
+                &mut img,
+                pad,
+                round_to_i32_clamped(y),
+                width_i32 - pad,
+                round_to_i32_clamped(y),
+                grid_color,
+            );
+        }
 
         // Axes
         Self::draw_line(
@@ -2407,20 +2406,242 @@ impl RustpixApp {
         );
         Self::draw_line(&mut img, pad, pad, pad, height_i32 - pad, axis_color);
 
-        let mut prev: Option<(i32, i32)> = None;
-        for (x, y) in points {
-            let px = pad_f64 + (x - x_min) * x_scale;
-            let py = f64::from(height_i32) - pad_f64 - y * y_scale;
-            let pixel = (round_to_i32_clamped(px), round_to_i32_clamped(py));
+        let plot_left = pad;
+        let plot_right = width_i32 - pad;
+        let plot_top = pad;
+        let plot_bottom = height_i32 - pad;
 
-            if let Some((prev_x, prev_y)) = prev {
-                Self::draw_line(&mut img, prev_x, prev_y, pixel.0, pixel.1, line);
+        let axis_label = match export.axis {
+            SpectrumXAxis::ToFMs => "TOF (MS)",
+            SpectrumXAxis::EnergyEv => "ENERGY (EV)",
+        };
+        let x_label_text = if export.log_x {
+            format!("LOG10({axis_label})")
+        } else {
+            axis_label.to_string()
+        };
+        let y_label_text = if export.log_y {
+            "LOG10(COUNTS)".to_string()
+        } else {
+            "COUNTS".to_string()
+        };
+
+        // Axis ticks + labels
+        let tick_color = axis_color;
+        let label_color = Self::color32_to_rgba(colors.text_muted);
+        let tick_count: i32 = 5;
+        for i in 0..=tick_count {
+            let t = f64::from(i) / f64::from(tick_count);
+            let x_val = x_min + t * (x_max - x_min);
+            let y_val = y_min + t * (y_max - y_min);
+            let x_pos = pad_f64 + t * plot_w;
+            let y_pos = pad_f64 + (1.0 - t) * plot_h;
+
+            let x_i = round_to_i32_clamped(x_pos);
+            let y_i = round_to_i32_clamped(y_pos);
+
+            // X ticks
+            Self::draw_line(&mut img, x_i, plot_bottom, x_i, plot_bottom + 4, tick_color);
+            let x_label = Self::format_tick(x_val);
+            let x_label_width = text_width_px(&x_label);
+            Self::draw_text(
+                &mut img,
+                x_i - (x_label_width / 2),
+                plot_bottom + 8,
+                &x_label,
+                label_color,
+            );
+
+            // Y ticks
+            Self::draw_line(&mut img, plot_left - 4, y_i, plot_left, y_i, tick_color);
+            let y_label = Self::format_tick(y_val);
+            let y_label_width = text_width_px(&y_label);
+            Self::draw_text(
+                &mut img,
+                plot_left - 6 - y_label_width,
+                y_i - 4,
+                &y_label,
+                label_color,
+            );
+        }
+
+        // Axis labels
+        let x_label = x_label_text.to_ascii_uppercase();
+        let y_label = y_label_text.to_ascii_uppercase();
+        let x_label_width = text_width_px(&x_label);
+        Self::draw_text(
+            &mut img,
+            i32::midpoint(plot_left, plot_right) - (x_label_width / 2),
+            plot_bottom + 20,
+            &x_label,
+            label_color,
+        );
+        Self::draw_text_vertical(
+            &mut img,
+            plot_left - 24,
+            i32::midpoint(plot_top, plot_bottom) - 18,
+            &y_label,
+            label_color,
+        );
+
+        for (_, color, points) in lines {
+            let line_color = Self::color32_to_rgba(*color);
+            let mut prev: Option<(i32, i32)> = None;
+            for point in points {
+                let px = pad_f64 + (point[0] - x_min) * x_scale;
+                let py = f64::from(height_i32) - pad_f64 - (point[1] - y_min) * y_scale;
+                let pixel = (round_to_i32_clamped(px), round_to_i32_clamped(py));
+                if pixel.0 < plot_left
+                    || pixel.0 > plot_right
+                    || pixel.1 < plot_top
+                    || pixel.1 > plot_bottom
+                {
+                    prev = None;
+                    continue;
+                }
+                if let Some((prev_x, prev_y)) = prev {
+                    Self::draw_line(&mut img, prev_x, prev_y, pixel.0, pixel.1, line_color);
+                }
+                prev = Some(pixel);
             }
-            prev = Some(pixel);
+        }
+
+        // Legend
+        let legend_x = plot_left + 6;
+        let legend_y = plot_top + 6;
+        let cursor_x = legend_x;
+        let mut cursor_y = legend_y;
+        Self::draw_text(&mut img, cursor_x, cursor_y, "LEGEND", label_color);
+        cursor_y += 10;
+        for (name, color, _) in lines {
+            let name = name.to_ascii_uppercase();
+            let box_color = Self::color32_to_rgba(*color);
+            Self::draw_rect_filled(
+                &mut img,
+                cursor_x,
+                cursor_y + 2,
+                cursor_x + 8,
+                cursor_y + 10,
+                box_color,
+            );
+            Self::draw_text(&mut img, cursor_x + 12, cursor_y, &name, label_color);
+            cursor_y += 10;
         }
 
         img.save(path)?;
         Ok(())
+    }
+
+    fn format_tick(value: f64) -> String {
+        let abs = value.abs();
+        if abs >= 100.0 {
+            format!("{value:.0}")
+        } else if abs >= 10.0 {
+            format!("{value:.1}")
+        } else if abs >= 1.0 {
+            format!("{value:.2}")
+        } else {
+            format!("{value:.3}")
+        }
+    }
+
+    fn draw_text(img: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u8>) {
+        let mut cursor_x = x;
+        for ch in text.chars() {
+            if ch == '\n' {
+                continue;
+            }
+            Self::draw_char(img, cursor_x, y, ch, color);
+            cursor_x += 6;
+        }
+    }
+
+    fn draw_text_vertical(img: &mut RgbaImage, x: i32, y: i32, text: &str, color: Rgba<u8>) {
+        let mut cursor_y = y;
+        for ch in text.chars() {
+            if ch == '\n' {
+                continue;
+            }
+            Self::draw_char(img, x, cursor_y, ch, color);
+            cursor_y += 8;
+        }
+    }
+
+    fn draw_char(img: &mut RgbaImage, x: i32, y: i32, ch: char, color: Rgba<u8>) {
+        let glyph = match ch {
+            '0' => [0x1e, 0x33, 0x35, 0x39, 0x31, 0x33, 0x1e],
+            '1' => [0x0c, 0x1c, 0x0c, 0x0c, 0x0c, 0x0c, 0x1e],
+            '2' => [0x1e, 0x33, 0x03, 0x06, 0x0c, 0x18, 0x3f],
+            '3' => [0x1e, 0x33, 0x03, 0x0e, 0x03, 0x33, 0x1e],
+            '4' => [0x06, 0x0e, 0x1e, 0x36, 0x3f, 0x06, 0x06],
+            '5' => [0x3f, 0x30, 0x3e, 0x03, 0x03, 0x33, 0x1e],
+            '6' => [0x0e, 0x18, 0x30, 0x3e, 0x33, 0x33, 0x1e],
+            '7' => [0x3f, 0x03, 0x06, 0x0c, 0x18, 0x18, 0x18],
+            '8' => [0x1e, 0x33, 0x33, 0x1e, 0x33, 0x33, 0x1e],
+            '9' => [0x1e, 0x33, 0x33, 0x1f, 0x03, 0x06, 0x1c],
+            '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c],
+            '-' => [0x00, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00],
+            'E' => [0x3f, 0x30, 0x30, 0x3e, 0x30, 0x30, 0x3f],
+            'N' => [0x33, 0x3b, 0x3f, 0x37, 0x33, 0x33, 0x33],
+            'R' => [0x3e, 0x33, 0x33, 0x3e, 0x36, 0x33, 0x33],
+            'G' => [0x1e, 0x33, 0x30, 0x37, 0x33, 0x33, 0x1e],
+            'Y' => [0x33, 0x33, 0x1e, 0x0c, 0x0c, 0x0c, 0x0c],
+            'T' => [0x3f, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c],
+            'O' => [0x1e, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1e],
+            'F' => [0x3f, 0x30, 0x30, 0x3e, 0x30, 0x30, 0x30],
+            'M' => [0x33, 0x3f, 0x3f, 0x33, 0x33, 0x33, 0x33],
+            'S' => [0x1e, 0x33, 0x30, 0x1e, 0x03, 0x33, 0x1e],
+            'C' => [0x1e, 0x33, 0x30, 0x30, 0x30, 0x33, 0x1e],
+            'U' => [0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1e],
+            'L' => [0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3f],
+            'A' => [0x0c, 0x1e, 0x33, 0x33, 0x3f, 0x33, 0x33],
+            'D' => [0x3e, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3e],
+            'I' => [0x1e, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x1e],
+            'V' => [0x33, 0x33, 0x33, 0x33, 0x33, 0x1e, 0x0c],
+            '(' => [0x06, 0x0c, 0x18, 0x18, 0x18, 0x0c, 0x06],
+            ')' => [0x18, 0x0c, 0x06, 0x06, 0x06, 0x0c, 0x18],
+            _ => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        };
+
+        let width_i32 = i32::try_from(img.width()).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(img.height()).unwrap_or(i32::MAX);
+        for (row, bits) in glyph.iter().enumerate() {
+            let row_i32 = usize_to_i32_saturating(row);
+            for col in 0..5 {
+                if (bits >> (4 - col)) & 1 == 1 {
+                    let px = x + col;
+                    let py = y + row_i32;
+                    if px >= 0 && py >= 0 && px < width_i32 && py < height_i32 {
+                        if let (Ok(xu), Ok(yu)) = (u32::try_from(px), u32::try_from(py)) {
+                            img.put_pixel(xu, yu, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_rect_filled(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgba<u8>) {
+        let (min_x, max_x) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+        let (min_y, max_y) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+        let width_i32 = i32::try_from(img.width()).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(img.height()).unwrap_or(i32::MAX);
+        for y in min_y..=max_y {
+            if y < 0 || y >= height_i32 {
+                continue;
+            }
+            for x in min_x..=max_x {
+                if x < 0 || x >= width_i32 {
+                    continue;
+                }
+                if let (Ok(xu), Ok(yu)) = (u32::try_from(x), u32::try_from(y)) {
+                    img.put_pixel(xu, yu, color);
+                }
+            }
+        }
+    }
+    fn color32_to_rgba(color: Color32) -> Rgba<u8> {
+        Rgba([color.r(), color.g(), color.b(), color.a()])
     }
 
     fn draw_line(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgba<u8>) {
