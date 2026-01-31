@@ -320,6 +320,16 @@ impl RoiState {
 
     /// Begin dragging a ROI.
     pub fn start_drag(&mut self, roi_id: usize, start: PlotPoint, bounds: PlotBounds) {
+        let already_selected = self
+            .rois
+            .iter()
+            .find(|roi| roi.id == roi_id)
+            .is_some_and(|roi| roi.selected);
+        if !already_selected {
+            self.set_selected(Some(roi_id));
+            let _ = bounds;
+            return;
+        }
         self.set_selected(Some(roi_id));
         let _ = bounds;
         self.drag = Some(RoiDrag {
