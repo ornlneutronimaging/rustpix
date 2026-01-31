@@ -5,6 +5,7 @@
 | Date       | Version | Changes                                                      |
 |------------|---------|--------------------------------------------------------------|
 | 2025-01-30 | v1.0    | Initial design document based on beamline scientist workflow |
+| 2026-01-31 | v1.1    | Refactor progress update (TOF ms axis, settings dialogs, grid toggle, scrollable sidebar, spectrum export) |
 
 ---
 
@@ -21,6 +22,26 @@ based on real-world usage scenarios from beamline scientists and detector expert
 2. **Smart caching** - Cache when memory permits, regenerate when fast enough
 3. **Unified viewer** - Same tools for Hits and Neutrons, just toggle data source
 4. **NeXus compliance** - Metadata (flight path, TOF offset) saved per-file in HDF5
+
+---
+
+## Implementation Status (as of 2026-01-31)
+
+**Implemented (GUI refactor branch):**
+- TOF axis uses **milliseconds** by default (consistent with 1/60 Hz = 16.67 ms)
+- Spectrum toolbar: logX/logY toggles, PNG/CSV export, gear for energy conversion settings
+- Energy axis toggle (TOF ms ↔ Energy eV) with flight-path + TOF offset inputs
+- Hyperstack settings dialog (top-right gear) with separate Hits/Neutrons TOF bins
+- Super-resolution control in clustering advanced panel
+- Scrollable left control panel (prevents panels from being clipped)
+- Viewer grid toggle button next to Reset View (default OFF)
+- TOF slicer row spans full width (visual alignment with mock)
+
+**Pending / Next:**
+- ROI system (multi-ROI, drag/resize, spectrum curves)
+- HDF5 export pipeline (Hits/Neutrons, metadata, masks)
+- Dead/Hot pixel mask workflow and visualization
+- Full streaming pipeline + cancel flows
 
 ---
 
@@ -65,6 +86,8 @@ After loading, the user enters **Hits Analysis Mode** with these tools:
 - All TOF bins collapsed (sum projection)
 - Cursor hover shows `(x, y, counts)`
 - Default colormap: **Grayscale**
+- Reset View fits the full detector into the current plot area with symmetric padding
+- Grid toggle (OFF by default) for alignment and measurement
 
 **B. Hyperstack Slicer View**
 - Slider to navigate through TOF bins
@@ -363,7 +386,7 @@ rustpix-gui/src/
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ [TOF (ms) ▼]  [logX] [logY]  │  [📷 PNG] [💾 CSV]  │  [↺]    │
+│ [TOF (ms) ▼] [⚙] [logX] [logY] │ [📷 PNG] [💾 CSV] │ [↺]     │
 └───────────────────────────────────────────────────────────────┘
         │
         ▼ Dropdown options
@@ -451,32 +474,35 @@ rustpix-gui/src/
 
 ---
 
-## Issue Mapping
+## Issue Mapping (GitHub)
 
-### Existing Issues to Update
+### Project Board
+- Org project: **rustpix Sprint 1** (Project #2)
+- Status values currently used: `Todo`, `Done`
 
-| Issue | Current Title | Status |
-|-------|---------------|--------|
-| #20 | [EPIC] GUI Revamp | Update with new phase structure |
-| #21 | Detector configuration system | Update scope |
-| #22 | Statistics panel | Update with new spec |
-| #23 | Pipeline: Raw → Hits | Update with cancel, out-of-core |
-| #24 | Pipeline: Hits → Neutrons | Update with extraction config |
-| #25 | Full streaming pipeline | Keep as Phase 11 |
-| #26 | HDF5 output | Update with mask export |
-| #27 | N-dimensional histogramming | Update with hyperstack spec |
-| #28 | Slice viewer | Update with slicer spec |
-| #29 | 1D histogram improvements | Update with spectrum spec |
-| #40 | Expose extraction config | Merge into #24 |
-| #41 | Neutron histogram view | Update with toggle spec |
+### Open GUI Issues (repo: ornlneutronimaging/rustpix)
 
-### New Issues Needed
+| Issue | Title | Notes |
+|-------|-------|-------|
+| #20 | [EPIC] GUI Revamp: Multi-format support, pipelines, and visualization overhaul | Phase tracker |
+| #80 | [GUI] Architecture refactor | State machine + module cleanup |
+| #23 | [GUI] Pipeline architecture: Raw → Hits | Auto processing + progress + cancel |
+| #27 | [GUI] N-dimensional histogramming engine | Hyperstack + projections |
+| #41 | [GUI] Visualize extracted neutron histogram | Hits/Neutrons viewer toggle |
+| #28 | [GUI] Slice viewer widget for nD data | TOF slicer |
+| #29 | [GUI] 1D histogram plot improvements | Spectrum viewer |
+| #81 | [GUI] ROI system for spectrum analysis | Multi-ROI + curves |
+| #24 | [GUI] Pipeline architecture: Hits → Neutrons | Clustering + extraction |
+| #82 | [GUI] Dead/hot pixel detection and masking | Pixel health + masks |
+| #21 | [GUI] Detector configuration system | Profiles + advanced config |
+| #22 | [GUI] Statistics panel for data inspection | Pre/post stats |
+| #26 | [GUI] HDF5 output with compression | Export + metadata |
+| #25 | [GUI] Pipeline architecture: Full streaming (Raw → Neutrons) | End-to-end bounded memory |
+| #13 | [ENHANCEMENT] Improve GUI for neutron imaging and detector development | Legacy; superseded by #20 |
 
-| Phase | Title | Description |
-|-------|-------|-------------|
-| 1 | [GUI] Architecture refactor | Module structure, state machine |
-| 6 | [GUI] ROI system | Multi-ROI with spectrum integration |
-| 8 | [GUI] Dead/hot pixel detection | Pixel mask with visualization |
+### Related (non-GUI)
+- #49 [EPIC][IO] HDF5/NeXus IO (scipp-compatible events + histograms)
+- #14 [ENHANCEMENT] Add TPX4/SPIDR4 data format support
 
 ---
 
