@@ -62,6 +62,7 @@ impl RustpixApp {
             !wants_keyboard
                 && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         });
+        let exit_edit_mode = ctx.input(|i| i.key_pressed(egui::Key::Escape));
 
         // Get data bounds based on view mode
         // TODO: Neutron mode may have different bounds due to super-resolution
@@ -78,6 +79,9 @@ impl RustpixApp {
 
         if delete_roi {
             self.roi_state.delete_selected();
+        }
+        if exit_edit_mode {
+            self.roi_state.clear_edit_mode();
         }
 
         egui::CentralPanel::default()
@@ -180,7 +184,8 @@ impl RustpixApp {
                                     let should_reset = needs_plot_reset || reset_view_clicked;
                                     let plot_rect = ui.available_rect_before_wrap();
                                     let shift_down = ctx.input(|i| i.modifiers.shift);
-                                    let roi_drag_active = self.roi_state.is_dragging();
+                                    let roi_drag_active = self.roi_state.is_dragging()
+                                        || self.roi_state.is_edit_dragging();
                                     let roi_drawing_active = self.roi_state.draft.is_some();
                                     let disable_plot_drag =
                                         shift_down || roi_drag_active || roi_drawing_active;
@@ -205,6 +210,7 @@ impl RustpixApp {
 
                                     let roi_mode = self.roi_state.mode;
                                     let min_roi_size = 2.0;
+                                    let handle_radius = 3.0;
                                     plot.show(ui, |plot_ui| {
                                         // Set explicit bounds on reset or double-click
                                         if should_reset || plot_ui.response().double_clicked() {
@@ -267,7 +273,15 @@ impl RustpixApp {
                                         } else {
                                             if response.drag_started() {
                                                 if let Some(pos) = pointer_pos {
-                                                    if let Some(hit_id) =
+                                                    if let Some((hit_id, handle)) = self
+                                                        .roi_state
+                                                        .hit_test_handle(pos, handle_radius)
+                                                    {
+                                                        let bounds = plot_ui.plot_bounds();
+                                                        self.roi_state.start_edit_drag(
+                                                            hit_id, handle, pos, bounds,
+                                                        );
+                                                    } else if let Some(hit_id) =
                                                         self.roi_state.hit_test(pos)
                                                     {
                                                         let bounds = plot_ui.plot_bounds();
@@ -278,14 +292,24 @@ impl RustpixApp {
                                             }
                                             if response.dragged() {
                                                 if let Some(pos) = pointer_pos {
-                                                    self.roi_state.update_drag(pos);
+                                                    if self.roi_state.is_edit_dragging() {
+                                                        self.roi_state
+                                                            .update_edit_drag(pos, min_roi_size);
+                                                    } else {
+                                                        self.roi_state.update_drag(pos);
+                                                    }
                                                 }
                                             }
                                             if response.drag_stopped() {
+                                                self.roi_state.end_edit_drag();
                                                 self.roi_state.end_drag();
                                             }
 
-                                            if let Some(bounds) = self.roi_state.drag_bounds() {
+                                            if let Some(bounds) = self
+                                                .roi_state
+                                                .edit_drag_bounds()
+                                                .or_else(|| self.roi_state.drag_bounds())
+                                            {
                                                 plot_ui.set_plot_bounds(bounds);
                                             }
                                         }
@@ -325,11 +349,56 @@ impl RustpixApp {
                                             && self.roi_state.draft.is_none()
                                             && !shift_down
                                             && !self.roi_state.is_dragging()
+                                            && !self.roi_state.is_edit_dragging()
                                         {
                                             if let Some(pos) = pointer_pos {
-                                                self.roi_state.select_at(pos);
+                                                if self.roi_state.hit_test(pos).is_some() {
+                                                    self.roi_state.select_at(pos);
+                                                } else {
+                                                    self.roi_state.clear_edit_mode();
+                                                }
                                             }
                                         }
+
+                                        if response.double_clicked()
+                                            && self.roi_state.draft.is_none()
+                                        {
+                                            if let Some(pos) = pointer_pos {
+                                                if let Some(hit_id) = self.roi_state.hit_test(pos) {
+                                                    self.roi_state.set_edit_mode(hit_id, true);
+                                                } else {
+                                                    self.roi_state.clear_edit_mode();
+                                                }
+                                            }
+                                        }
+
+                                        if response.secondary_clicked() {
+                                            let mut target = None;
+                                            if let Some(pos) = pointer_pos {
+                                                if let Some(hit_id) = self.roi_state.hit_test(pos) {
+                                                    self.roi_state.select_id(hit_id);
+                                                    target = Some(hit_id);
+                                                }
+                                            }
+                                            self.roi_state.set_context_menu(target);
+                                        }
+
+                                        response.context_menu(|ui| {
+                                            if let Some(target) =
+                                                self.roi_state.context_menu_target()
+                                            {
+                                                if ui.button("Edit").clicked() {
+                                                    self.roi_state.set_edit_mode(target, true);
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Delete").clicked() {
+                                                    self.roi_state.delete_id(target);
+                                                    ui.close_menu();
+                                                }
+                                            } else {
+                                                ui.label("No ROI");
+                                            }
+                                        });
 
                                         self.roi_state.draw(plot_ui);
                                         self.roi_state.draw_draft(plot_ui);

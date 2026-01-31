@@ -47,6 +47,26 @@ pub struct RoiDrag {
     pub bounds: PlotBounds,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoiHandle {
+    North,
+    South,
+    East,
+    West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoiEditDrag {
+    pub roi_id: usize,
+    pub handle: RoiHandle,
+    pub last: PlotPoint,
+    pub bounds: PlotBounds,
+}
+
 /// ROI session state.
 #[derive(Debug)]
 pub struct RoiState {
@@ -55,6 +75,8 @@ pub struct RoiState {
     pub draft: Option<RoiDraft>,
     pub debounce_updates: bool,
     drag: Option<RoiDrag>,
+    edit_drag: Option<RoiEditDrag>,
+    context_menu: Option<usize>,
     next_id: usize,
 }
 
@@ -66,6 +88,8 @@ impl Default for RoiState {
             draft: None,
             debounce_updates: false,
             drag: None,
+            edit_drag: None,
+            context_menu: None,
             next_id: 1,
         }
     }
@@ -77,6 +101,8 @@ impl RoiState {
         self.rois.clear();
         self.draft = None;
         self.drag = None;
+        self.edit_drag = None;
+        self.context_menu = None;
         self.next_id = 1;
     }
 
@@ -88,7 +114,43 @@ impl RoiState {
         self.rois.retain(|roi| roi.id != selected_id);
         self.draft = None;
         self.drag = None;
+        self.edit_drag = None;
+        self.context_menu = None;
         true
+    }
+
+    /// Delete a ROI by id.
+    pub fn delete_id(&mut self, roi_id: usize) -> bool {
+        let before = self.rois.len();
+        self.rois.retain(|roi| roi.id != roi_id);
+        if self.rois.len() == before {
+            return false;
+        }
+        self.draft = None;
+        self.drag = None;
+        self.edit_drag = None;
+        self.context_menu = None;
+        true
+    }
+
+    /// Set edit mode for a ROI.
+    pub fn set_edit_mode(&mut self, roi_id: usize, enabled: bool) {
+        for roi in &mut self.rois {
+            if roi.id == roi_id {
+                roi.edit_mode = enabled;
+                roi.selected = true;
+            } else if enabled {
+                roi.edit_mode = false;
+            }
+        }
+    }
+
+    /// Clear edit mode for all ROIs.
+    pub fn clear_edit_mode(&mut self) {
+        for roi in &mut self.rois {
+            roi.edit_mode = false;
+        }
+        self.edit_drag = None;
     }
 
     /// Begin drawing a rectangle ROI.
@@ -202,9 +264,80 @@ impl RoiState {
         self.drag.is_some()
     }
 
+    /// Whether an edit drag is in progress.
+    pub fn is_edit_dragging(&self) -> bool {
+        self.edit_drag.is_some()
+    }
+
     /// Bounds captured at drag start (used to freeze pan).
     pub fn drag_bounds(&self) -> Option<PlotBounds> {
         self.drag.as_ref().map(|drag| drag.bounds)
+    }
+
+    /// Start edit drag (resize handles).
+    pub fn start_edit_drag(
+        &mut self,
+        roi_id: usize,
+        handle: RoiHandle,
+        start: PlotPoint,
+        bounds: PlotBounds,
+    ) {
+        self.set_edit_mode(roi_id, true);
+        self.edit_drag = Some(RoiEditDrag {
+            roi_id,
+            handle,
+            last: start,
+            bounds,
+        });
+    }
+
+    /// Update edit drag.
+    pub fn update_edit_drag(&mut self, current: PlotPoint, min_size: f64) {
+        let Some(edit) = &mut self.edit_drag else {
+            return;
+        };
+        let dx = current.x - edit.last.x;
+        let dy = current.y - edit.last.y;
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == edit.roi_id) {
+            roi.resize(edit.handle, dx, dy, min_size);
+        }
+        edit.last = current;
+    }
+
+    /// End edit drag.
+    pub fn end_edit_drag(&mut self) {
+        self.edit_drag = None;
+    }
+
+    /// Bounds captured at edit drag start (used to freeze pan).
+    pub fn edit_drag_bounds(&self) -> Option<PlotBounds> {
+        self.edit_drag.as_ref().map(|drag| drag.bounds)
+    }
+
+    /// Set the context menu target.
+    pub fn set_context_menu(&mut self, roi_id: Option<usize>) {
+        self.context_menu = roi_id;
+    }
+
+    /// Current context menu target.
+    pub fn context_menu_target(&self) -> Option<usize> {
+        self.context_menu
+    }
+
+    /// Find resize handle hit for selected ROI in edit mode.
+    pub fn hit_test_handle(&self, point: PlotPoint, threshold: f64) -> Option<(usize, RoiHandle)> {
+        for roi in self.rois.iter().rev() {
+            if !roi.edit_mode {
+                continue;
+            }
+            if let Some(handle) = roi.handle_hit(point, threshold) {
+                return Some((roi.id, handle));
+            }
+        }
+        None
     }
 
     /// Render all ROIs to the plot.
@@ -244,6 +377,11 @@ impl RoiState {
         for roi in &mut self.rois {
             roi.selected = Some(roi.id) == id;
         }
+    }
+
+    /// Select a ROI by id.
+    pub fn select_id(&mut self, roi_id: usize) {
+        self.set_selected(Some(roi_id));
     }
 }
 
@@ -321,6 +459,88 @@ impl Roi {
                 }
             }
         }
+    }
+
+    fn handle_hit(&self, point: PlotPoint, threshold: f64) -> Option<RoiHandle> {
+        let RoiShape::Rectangle { x1, y1, x2, y2 } = self.shape else {
+            return None;
+        };
+        let min_x = x1.min(x2);
+        let max_x = x1.max(x2);
+        let min_y = y1.min(y2);
+        let max_y = y1.max(y2);
+
+        let near_left = (point.x - min_x).abs() <= threshold;
+        let near_right = (point.x - max_x).abs() <= threshold;
+        let near_bottom = (point.y - min_y).abs() <= threshold;
+        let near_top = (point.y - max_y).abs() <= threshold;
+
+        if near_left && near_bottom {
+            Some(RoiHandle::SouthWest)
+        } else if near_left && near_top {
+            Some(RoiHandle::NorthWest)
+        } else if near_right && near_bottom {
+            Some(RoiHandle::SouthEast)
+        } else if near_right && near_top {
+            Some(RoiHandle::NorthEast)
+        } else if near_left && point.y >= min_y && point.y <= max_y {
+            Some(RoiHandle::West)
+        } else if near_right && point.y >= min_y && point.y <= max_y {
+            Some(RoiHandle::East)
+        } else if near_bottom && point.x >= min_x && point.x <= max_x {
+            Some(RoiHandle::South)
+        } else if near_top && point.x >= min_x && point.x <= max_x {
+            Some(RoiHandle::North)
+        } else {
+            None
+        }
+    }
+
+    fn resize(&mut self, handle: RoiHandle, dx: f64, dy: f64, min_size: f64) {
+        let RoiShape::Rectangle { x1, y1, x2, y2 } = &mut self.shape else {
+            return;
+        };
+        let (mut left, mut right) = if *x1 <= *x2 { (*x1, *x2) } else { (*x2, *x1) };
+        let (mut bottom, mut top) = if *y1 <= *y2 { (*y1, *y2) } else { (*y2, *y1) };
+
+        match handle {
+            RoiHandle::West => left += dx,
+            RoiHandle::East => right += dx,
+            RoiHandle::South => bottom += dy,
+            RoiHandle::North => top += dy,
+            RoiHandle::SouthWest => {
+                left += dx;
+                bottom += dy;
+            }
+            RoiHandle::SouthEast => {
+                right += dx;
+                bottom += dy;
+            }
+            RoiHandle::NorthWest => {
+                left += dx;
+                top += dy;
+            }
+            RoiHandle::NorthEast => {
+                right += dx;
+                top += dy;
+            }
+        }
+
+        if right - left < min_size {
+            let mid = (right + left) * 0.5;
+            left = mid - min_size * 0.5;
+            right = mid + min_size * 0.5;
+        }
+        if top - bottom < min_size {
+            let mid = (top + bottom) * 0.5;
+            bottom = mid - min_size * 0.5;
+            top = mid + min_size * 0.5;
+        }
+
+        *x1 = left;
+        *x2 = right;
+        *y1 = bottom;
+        *y2 = top;
     }
 }
 
