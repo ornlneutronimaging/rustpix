@@ -321,7 +321,7 @@ impl RoiState {
     }
 
     /// Update drag with the new pointer position.
-    pub fn update_drag(&mut self, current: PlotPoint) {
+    pub fn update_drag(&mut self, current: PlotPoint, min: f64, max: f64) {
         let Some(drag) = &mut self.drag else {
             return;
         };
@@ -332,6 +332,7 @@ impl RoiState {
         }
         if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == drag.roi_id) {
             roi.translate(dx, dy);
+            roi.clamp_within(min, max);
         }
         drag.last = current;
     }
@@ -374,7 +375,7 @@ impl RoiState {
     }
 
     /// Update edit drag.
-    pub fn update_edit_drag(&mut self, current: PlotPoint, min_size: f64) {
+    pub fn update_edit_drag(&mut self, current: PlotPoint, min_size: f64, min: f64, max: f64) {
         let Some(edit) = &mut self.edit_drag else {
             return;
         };
@@ -385,6 +386,7 @@ impl RoiState {
         }
         if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == edit.roi_id) {
             roi.resize(edit.handle, dx, dy, min_size);
+            roi.clamp_within(min, max);
         }
         edit.last = current;
     }
@@ -739,6 +741,66 @@ impl Roi {
         *x2 = right;
         *y1 = bottom;
         *y2 = top;
+    }
+
+    fn clamp_within(&mut self, min: f64, max: f64) {
+        match &mut self.shape {
+            RoiShape::Rectangle { x1, y1, x2, y2 } => {
+                let min_x = x1.min(*x2);
+                let max_x = x1.max(*x2);
+                let min_y = y1.min(*y2);
+                let max_y = y1.max(*y2);
+                let mut shift_x = 0.0;
+                let mut shift_y = 0.0;
+                if min_x < min {
+                    shift_x = min - min_x;
+                } else if max_x > max {
+                    shift_x = max - max_x;
+                }
+                if min_y < min {
+                    shift_y = min - min_y;
+                } else if max_y > max {
+                    shift_y = max - max_y;
+                }
+                *x1 += shift_x;
+                *x2 += shift_x;
+                *y1 += shift_y;
+                *y2 += shift_y;
+            }
+            RoiShape::Polygon { vertices } => {
+                if vertices.is_empty() {
+                    return;
+                }
+                let mut min_x = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                let mut min_y = f64::INFINITY;
+                let mut max_y = f64::NEG_INFINITY;
+                for (x, y) in vertices.iter() {
+                    min_x = min_x.min(*x);
+                    max_x = max_x.max(*x);
+                    min_y = min_y.min(*y);
+                    max_y = max_y.max(*y);
+                }
+                let mut shift_x = 0.0;
+                let mut shift_y = 0.0;
+                if min_x < min {
+                    shift_x = min - min_x;
+                } else if max_x > max {
+                    shift_x = max - max_x;
+                }
+                if min_y < min {
+                    shift_y = min - min_y;
+                } else if max_y > max {
+                    shift_y = max - max_y;
+                }
+                if shift_x != 0.0 || shift_y != 0.0 {
+                    for (x, y) in vertices.iter_mut() {
+                        *x += shift_x;
+                        *y += shift_y;
+                    }
+                }
+            }
+        }
     }
 
     fn handle_points(&self) -> Vec<[f64; 2]> {

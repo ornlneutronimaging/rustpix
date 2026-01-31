@@ -63,7 +63,9 @@ impl RustpixApp {
                 && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         });
         let exit_edit_mode = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        let commit_polygon = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        let commit_polygon = !wants_keyboard
+            && self.roi_state.polygon_draft.is_some()
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
         // Get data bounds based on view mode
         // TODO: Neutron mode may have different bounds due to super-resolution
@@ -318,10 +320,15 @@ impl RustpixApp {
                                                 if let Some(pos) = pointer_pos {
                                                     if self.roi_state.is_edit_dragging() {
                                                         self.roi_state.update_vertex_drag(pos);
-                                                        self.roi_state
-                                                            .update_edit_drag(pos, min_roi_size);
+                                                        self.roi_state.update_edit_drag(
+                                                            pos,
+                                                            min_roi_size,
+                                                            0.0,
+                                                            data_size,
+                                                        );
                                                     } else {
-                                                        self.roi_state.update_drag(pos);
+                                                        self.roi_state
+                                                            .update_drag(pos, 0.0, data_size);
                                                     }
                                                 }
                                             }
