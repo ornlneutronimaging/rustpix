@@ -58,7 +58,7 @@ impl RustpixApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let colors = ThemeColors::from_ui(ui);
-                        // Settings gear icon
+                        // Settings gear icon (hyperstack settings)
                         if ui
                             .add(
                                 egui::Button::new("⚙")
@@ -66,10 +66,10 @@ impl RustpixApp {
                                     .stroke(Stroke::new(1.0, colors.border_light))
                                     .rounding(Rounding::same(4.0)),
                             )
-                            .on_hover_text("Settings")
+                            .on_hover_text("Hyperstack settings")
                             .clicked()
                         {
-                            // TODO: Open settings panel
+                            self.ui_state.show_app_settings = !self.ui_state.show_app_settings;
                         }
 
                         ui.add_space(12.0);
@@ -460,9 +460,12 @@ impl RustpixApp {
 
         ui.checkbox(&mut self.ui_state.show_histogram, "Spectrum");
 
-        ui.add_enabled_ui(self.ui_state.show_histogram, |ui| {
-            ui.checkbox(&mut self.ui_state.log_plot, "Log scale");
-        });
+        if ui
+            .checkbox(&mut self.ui_state.log_scale, "Log scale")
+            .changed()
+        {
+            self.texture = None;
+        }
     }
 
     /// Regenerate texture if needed.
@@ -638,6 +641,30 @@ impl RustpixApp {
                                 .show_value(false),
                         );
                     }
+
+                    ui.add_space(4.0);
+
+                    // Super-resolution factor
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Super-res")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new(format!("{:.1}×", self.super_resolution_factor))
+                                    .size(10.0)
+                                    .color(colors.text_primary),
+                            );
+                        });
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut self.super_resolution_factor, 1.0..=16.0)
+                            .show_value(false),
+                    );
                 });
         }
 
@@ -657,6 +684,93 @@ impl RustpixApp {
         {
             self.processing.reset_cancel();
             self.run_processing();
+        }
+    }
+
+    /// Render floating settings windows (app + spectrum).
+    pub(crate) fn render_settings_windows(&mut self, ctx: &egui::Context) {
+        if self.ui_state.show_app_settings {
+            let mut show_app_settings = self.ui_state.show_app_settings;
+            egui::Window::new("Hyperstack Settings")
+                .open(&mut show_app_settings)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Adjust TOF binning for hits and neutrons.");
+                    ui.add_space(8.0);
+
+                    egui::CollapsingHeader::new("Hits Hyperstack")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("TOF bins");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.hit_tof_bins)
+                                        .range(10..=2000),
+                                );
+                            });
+
+                            let can_rebuild = self.hit_batch.is_some();
+                            if ui
+                                .add_enabled(can_rebuild, egui::Button::new("Rebuild Hits"))
+                                .clicked()
+                            {
+                                self.rebuild_hit_hyperstack();
+                            }
+                        });
+
+                    egui::CollapsingHeader::new("Neutrons Hyperstack")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("TOF bins");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.neutron_tof_bins)
+                                        .range(10..=2000),
+                                );
+                            });
+
+                            let can_rebuild = !self.neutrons.is_empty();
+                            if ui
+                                .add_enabled(can_rebuild, egui::Button::new("Rebuild Neutrons"))
+                                .clicked()
+                            {
+                                self.rebuild_neutron_hyperstack();
+                            }
+                        });
+                });
+            self.ui_state.show_app_settings = show_app_settings;
+        }
+
+        if self.ui_state.show_spectrum_settings {
+            let mut show_spectrum_settings = self.ui_state.show_spectrum_settings;
+            egui::Window::new("Spectrum Settings")
+                .open(&mut show_spectrum_settings)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Energy axis requires flight path and TOF offset.");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Flight path (m)");
+                        ui.add(
+                            egui::DragValue::new(&mut self.flight_path_m)
+                                .range(0.0..=100.0)
+                                .speed(0.1),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("TOF offset (ns)");
+                        ui.add(
+                            egui::DragValue::new(&mut self.tof_offset_ns)
+                                .range(0.0..=1_000_000.0)
+                                .speed(10.0),
+                        );
+                    });
+                });
+            self.ui_state.show_spectrum_settings = show_spectrum_settings;
         }
     }
 }

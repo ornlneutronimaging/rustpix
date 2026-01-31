@@ -87,3 +87,56 @@ pub fn format_number_si(n: usize) -> String {
         n.to_string()
     }
 }
+
+/// Neutron mass in kilograms.
+const NEUTRON_MASS_KG: f64 = 1.674_927_498e-27;
+/// Elementary charge in joules per eV.
+const EV_J: f64 = 1.602_176_634e-19;
+
+/// Convert TOF (µs) to neutron energy (eV).
+///
+/// Returns `None` if the input is invalid or results in non-physical values.
+#[must_use]
+pub fn tof_us_to_energy_ev(tof_us: f64, flight_path_m: f64, tof_offset_ns: f64) -> Option<f64> {
+    if !tof_us.is_finite() || !flight_path_m.is_finite() || flight_path_m <= 0.0 {
+        return None;
+    }
+    let tof_offset_us = tof_offset_ns / 1000.0;
+    let t_us = tof_us - tof_offset_us;
+    if t_us <= 0.0 {
+        return None;
+    }
+    let t_s = t_us * 1e-6;
+    let v = flight_path_m / t_s;
+    let e_j = 0.5 * NEUTRON_MASS_KG * v * v;
+    Some(e_j / EV_J)
+}
+
+/// Convert neutron energy (eV) to TOF (µs).
+///
+/// Returns `None` if the input is invalid or results in non-physical values.
+#[must_use]
+pub fn energy_ev_to_tof_us(energy_ev: f64, flight_path_m: f64, tof_offset_ns: f64) -> Option<f64> {
+    if !energy_ev.is_finite() || energy_ev <= 0.0 || !flight_path_m.is_finite() || flight_path_m <= 0.0 {
+        return None;
+    }
+    let e_j = energy_ev * EV_J;
+    let t_s = flight_path_m * (NEUTRON_MASS_KG / (2.0 * e_j)).sqrt();
+    let tof_offset_us = tof_offset_ns / 1000.0;
+    Some(t_s * 1e6 + tof_offset_us)
+}
+
+/// Convert TOF (ms) to neutron energy (eV).
+#[must_use]
+pub fn tof_ms_to_energy_ev(tof_ms: f64, flight_path_m: f64, tof_offset_ns: f64) -> Option<f64> {
+    if !tof_ms.is_finite() {
+        return None;
+    }
+    tof_us_to_energy_ev(tof_ms * 1000.0, flight_path_m, tof_offset_ns)
+}
+
+/// Convert neutron energy (eV) to TOF (ms).
+#[must_use]
+pub fn energy_ev_to_tof_ms(energy_ev: f64, flight_path_m: f64, tof_offset_ns: f64) -> Option<f64> {
+    energy_ev_to_tof_us(energy_ev, flight_path_m, tof_offset_ns).map(|us| us / 1000.0)
+}

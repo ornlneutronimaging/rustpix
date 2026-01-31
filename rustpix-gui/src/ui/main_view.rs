@@ -1,12 +1,22 @@
 //! Main view (central panel) rendering.
 
+use std::fs::File;
+use std::io::Write;
+
 use eframe::egui::{self, Color32, Rounding, Stroke, Vec2b};
 use egui_plot::{Line, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, VLine};
+use image::{Rgba, RgbaImage};
+use rfd::FileDialog;
 
 use super::theme::{accent, ThemeColors};
 use crate::app::RustpixApp;
-use crate::state::ViewMode;
-use crate::util::{f64_to_usize_bounded, u64_to_f64, usize_to_f64};
+use crate::state::{SpectrumXAxis, ViewMode};
+use crate::util::{
+    energy_ev_to_tof_ms, f64_to_usize_bounded, tof_ms_to_energy_ev, u64_to_f64, usize_to_f64,
+};
+
+/// Unique ID for the main histogram plot (used for state persistence).
+const HISTOGRAM_PLOT_ID: &str = "histogram_plot";
 
 impl RustpixApp {
     /// Render the central panel with histogram, slicer, and spectrum.
@@ -25,6 +35,7 @@ impl RustpixApp {
         let current_tof_bin = self.ui_state.current_tof_bin;
         let show_spectrum = self.ui_state.show_histogram;
         let n_bins = self.n_tof_bins();
+        let needs_plot_reset = self.ui_state.needs_plot_reset;
 
         // Get data bounds based on view mode
         // TODO: Neutron mode may have different bounds due to super-resolution
@@ -36,6 +47,8 @@ impl RustpixApp {
 
         // Track if bin changed via interaction
         let mut new_tof_bin: Option<usize> = None;
+        // Track if user clicked reset view button
+        let mut reset_view_clicked = false;
 
         egui::CentralPanel::default()
             .frame(
@@ -67,10 +80,43 @@ impl RustpixApp {
                             |ui| {
                                 let colors = ThemeColors::from_ui(ui);
                                 if let Some(tex) = &self.texture {
+                                    // Toolbar row above the plot
+                                    ui.horizontal(|ui| {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let colors = ThemeColors::from_ui(ui);
+                                                // Reset View button
+                                                let reset_btn = egui::Button::new(
+                                                    egui::RichText::new("↺ Reset View")
+                                                        .size(10.0)
+                                                        .color(colors.text_muted),
+                                                )
+                                                .fill(Color32::TRANSPARENT)
+                                                .stroke(Stroke::new(1.0, colors.border_light))
+                                                .rounding(Rounding::same(4.0));
+
+                                                if ui
+                                                    .add(reset_btn)
+                                                    .on_hover_text("Reset view to fit data (or double-click)")
+                                                    .clicked()
+                                                {
+                                                    reset_view_clicked = true;
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+
                                     let half = data_size / 2.0;
                                     #[allow(clippy::cast_possible_truncation)]
                                     let data_size_f32 = data_size as f32;
-                                    Plot::new("plot")
+
+                                    // Determine if we need to reset the plot view
+                                    let should_reset = needs_plot_reset || reset_view_clicked;
+
+                                    // Build the base plot
+                                    let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
                                         .data_aspect(1.0)
                                         .auto_bounds(Vec2b::new(false, false))
                                         .include_x(0.0)
@@ -78,10 +124,17 @@ impl RustpixApp {
                                         .include_y(0.0)
                                         .include_y(data_size)
                                         .x_axis_label("X (pixels)")
-                                        .y_axis_label("Y (pixels)")
-                                        .show(ui, |plot_ui| {
-                                            // Set initial bounds to match data dimensions
-                                            if plot_ui.response().double_clicked() {
+                                        .y_axis_label("Y (pixels)");
+
+                                    // Apply reset if needed
+                                    if should_reset {
+                                        plot = plot.reset();
+                                    }
+
+                                    plot.show(ui, |plot_ui| {
+                                            // Set explicit bounds on reset or double-click
+                                            if should_reset || plot_ui.response().double_clicked()
+                                            {
                                                 plot_ui.set_plot_bounds(PlotBounds::from_min_max(
                                                     [0.0, 0.0],
                                                     [data_size, data_size],
@@ -167,30 +220,56 @@ impl RustpixApp {
                         .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                         .show(ui, |ui| {
                             let colors = ThemeColors::from_ui(ui);
+
+                            // Clamp to valid range
+                            let clamped_bin = current_tof_bin.min(n_bins - 1);
+                            let mut bin = clamped_bin;
+
+                            // Use horizontal layout with fixed label widths
+                            let total_width = ui.available_width();
+                            let label_width = 70.0;
+                            let value_width = 70.0;
+                            let spacing = ui.spacing().item_spacing.x;
+                            let slider_width =
+                                (total_width - label_width - value_width - spacing * 2.0)
+                                    .max(120.0);
+
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("TOF Slice")
-                                        .size(11.0)
-                                        .color(colors.text_muted),
+                                // Left: Label (fixed width)
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(label_width, ui.available_height()),
+                                    egui::Layout::centered_and_justified(
+                                        egui::Direction::LeftToRight,
+                                    ),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new("TOF Slice")
+                                                .size(11.0)
+                                                .color(colors.text_muted),
+                                        );
+                                    },
                                 );
 
-                                ui.add_space(16.0);
-
-                                // Clamp to valid range
-                                let clamped_bin = current_tof_bin.min(n_bins - 1);
-                                let mut bin = clamped_bin;
-                                let slider = ui.add(
+                                // Middle: Slider (fills remaining space)
+                                let slider = ui.add_sized(
+                                    [slider_width, 20.0],
                                     egui::Slider::new(&mut bin, 0..=(n_bins - 1))
                                         .show_value(false)
                                         .clamping(egui::SliderClamping::Always),
                                 );
 
-                                ui.add_space(16.0);
-
-                                ui.label(
-                                    egui::RichText::new(format!("{} / {}", bin + 1, n_bins))
-                                        .size(11.0)
-                                        .color(colors.text_primary),
+                                // Right: Value display (fixed width)
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(value_width, ui.available_height()),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let colors = ThemeColors::from_ui(ui);
+                                        ui.label(
+                                            egui::RichText::new(format!("{} / {}", bin + 1, n_bins))
+                                                .size(11.0)
+                                                .color(colors.text_primary),
+                                        );
+                                    },
                                 );
 
                                 if slider.changed() && bin != current_tof_bin {
@@ -219,6 +298,11 @@ impl RustpixApp {
             self.ui_state.current_tof_bin = bin;
             self.texture = None;
         }
+
+        // Clear the reset flag after rendering
+        if needs_plot_reset || reset_view_clicked {
+            self.ui_state.needs_plot_reset = false;
+        }
     }
 
     /// Render the colorbar legend.
@@ -226,8 +310,15 @@ impl RustpixApp {
     fn render_colorbar(&self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
         ui.vertical(|ui| {
+            // "max" label at top
+            ui.horizontal(|ui| {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("max").size(9.0).color(colors.text_dim));
+            });
+            ui.add_space(4.0);
+
             // Gradient bar
-            let gradient_height = ui.available_height() - 40.0;
+            let gradient_height = ui.available_height() - 24.0; // Reserve space for "0" label
             let rect = ui.allocate_space(egui::vec2(20.0, gradient_height.max(100.0)));
 
             // Draw gradient using the current colormap
@@ -252,16 +343,9 @@ impl RustpixApp {
             // Border
             painter.rect_stroke(rect.1, Rounding::ZERO, Stroke::new(1.0, colors.border));
 
-            // Labels
+            // "0" label at bottom
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let colors = ThemeColors::from_ui(ui);
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("max").size(9.0).color(colors.text_dim));
-            });
-            ui.add_space(gradient_height - 30.0);
-            ui.horizontal(|ui| {
-                let colors = ThemeColors::from_ui(ui);
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("0").size(9.0).color(colors.text_dim));
             });
@@ -286,6 +370,16 @@ impl RustpixApp {
     ) {
         let colors = ThemeColors::from_ui(ui);
 
+        // Track if spectrum reset was clicked
+        let mut spectrum_reset_clicked = false;
+        if self.ui_state.spectrum_x_axis == SpectrumXAxis::EnergyEv && self.flight_path_m <= 0.0 {
+            self.ui_state.spectrum_x_axis = SpectrumXAxis::ToFMs;
+            spectrum_reset_clicked = true;
+        }
+        let has_spectrum = spectrum.as_ref().map_or(false, |s| !s.is_empty());
+        let mut export_png_clicked = false;
+        let mut export_csv_clicked = false;
+
         // Spectrum toolbar
         egui::Frame::none()
             .fill(colors.bg_panel)
@@ -295,67 +389,105 @@ impl RustpixApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let colors = ThemeColors::from_ui(ui);
-                    // TOF unit selector (placeholder for now)
+                    let energy_available = self.flight_path_m > 0.0;
+                    let prev_axis = self.ui_state.spectrum_x_axis;
+
+                    // TOF/Energy selector
                     egui::ComboBox::from_id_salt("tof_unit")
-                        .selected_text("TOF (µs)")
+                        .selected_text(self.ui_state.spectrum_x_axis.to_string())
                         .width(90.0)
                         .show_ui(ui, |ui| {
-                            let _ = ui.selectable_label(true, "TOF (µs)");
-                            let _ = ui.selectable_label(false, "Energy (eV)");
+                            if ui
+                                .selectable_label(
+                                    self.ui_state.spectrum_x_axis == SpectrumXAxis::ToFMs,
+                                    SpectrumXAxis::ToFMs.to_string(),
+                                )
+                                .clicked()
+                            {
+                                self.ui_state.spectrum_x_axis = SpectrumXAxis::ToFMs;
+                            }
+
+                            if ui
+                                .add_enabled(
+                                    energy_available,
+                                    egui::SelectableLabel::new(
+                                        self.ui_state.spectrum_x_axis == SpectrumXAxis::EnergyEv,
+                                        SpectrumXAxis::EnergyEv.to_string(),
+                                    ),
+                                )
+                                .on_hover_text(if energy_available {
+                                    "Energy axis"
+                                } else {
+                                    "Set flight path in spectrum settings"
+                                })
+                                .clicked()
+                            {
+                                self.ui_state.spectrum_x_axis = SpectrumXAxis::EnergyEv;
+                            }
                         });
 
-                    // Settings button
-                    ui.add(
-                        egui::Button::new("⚙")
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::new(1.0, colors.border_light))
-                            .rounding(Rounding::same(4.0)),
-                    );
-
-                    ui.add_space(8.0);
-                    self.toolbar_divider(ui);
-                    ui.add_space(8.0);
-
-                    // logX button
-                    let log_x_btn =
-                        egui::Button::new(egui::RichText::new("logX").size(10.0).strong().color(
-                            if self.ui_state.log_x {
-                                Color32::WHITE
-                            } else {
-                                colors.text_muted
-                            },
-                        ))
-                        .fill(if self.ui_state.log_x {
-                            accent::BLUE
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(Stroke::new(1.0, colors.border_light))
-                        .rounding(Rounding::same(4.0));
-
-                    if ui.add(log_x_btn).clicked() {
-                        self.ui_state.log_x = !self.ui_state.log_x;
+                    if prev_axis != self.ui_state.spectrum_x_axis {
+                        spectrum_reset_clicked = true;
                     }
 
-                    // logY button
-                    let log_y_btn =
-                        egui::Button::new(egui::RichText::new("logY").size(10.0).strong().color(
-                            if self.ui_state.log_plot {
+                    // Spectrum settings
+                    if ui
+                        .add(
+                            egui::Button::new("⚙")
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::new(1.0, colors.border_light))
+                                .rounding(Rounding::same(4.0)),
+                        )
+                        .on_hover_text("Spectrum settings")
+                        .clicked()
+                    {
+                        self.ui_state.show_spectrum_settings =
+                            !self.ui_state.show_spectrum_settings;
+                    }
+
+                    ui.add_space(8.0);
+
+                    // Log axis toggles
+                    let logx_btn = egui::Button::new(
+                        egui::RichText::new("logX")
+                            .size(10.0)
+                            .color(if self.ui_state.log_x {
                                 Color32::WHITE
                             } else {
-                                colors.text_muted
-                            },
-                        ))
-                        .fill(if self.ui_state.log_plot {
-                            accent::BLUE
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(Stroke::new(1.0, colors.border_light))
-                        .rounding(Rounding::same(4.0));
+                                colors.text_dim
+                            }),
+                    )
+                    .fill(if self.ui_state.log_x {
+                        accent::BLUE
+                    } else {
+                        Color32::TRANSPARENT
+                    })
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0));
+                    if ui.add(logx_btn).clicked() {
+                        self.ui_state.log_x = !self.ui_state.log_x;
+                        spectrum_reset_clicked = true;
+                    }
 
-                    if ui.add(log_y_btn).clicked() {
-                        self.ui_state.log_plot = !self.ui_state.log_plot;
+                    let logy_btn = egui::Button::new(
+                        egui::RichText::new("logY")
+                            .size(10.0)
+                            .color(if self.ui_state.log_y {
+                                Color32::WHITE
+                            } else {
+                                colors.text_dim
+                            }),
+                    )
+                    .fill(if self.ui_state.log_y {
+                        accent::BLUE
+                    } else {
+                        Color32::TRANSPARENT
+                    })
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0));
+                    if ui.add(logy_btn).clicked() {
+                        self.ui_state.log_y = !self.ui_state.log_y;
+                        spectrum_reset_clicked = true;
                     }
 
                     ui.add_space(8.0);
@@ -363,38 +495,36 @@ impl RustpixApp {
                     ui.add_space(8.0);
 
                     // Export buttons
+                    let png_btn = egui::Button::new(
+                        egui::RichText::new("📷 PNG")
+                            .size(10.0)
+                            .color(colors.text_dim),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0));
                     if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("📷 PNG")
-                                    .size(10.0)
-                                    .color(colors.text_muted),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::new(1.0, colors.border_light))
-                            .rounding(Rounding::same(4.0)),
-                        )
+                        .add_enabled(has_spectrum, png_btn)
                         .on_hover_text("Export spectrum as PNG")
                         .clicked()
                     {
-                        // TODO: Export PNG
+                        export_png_clicked = true;
                     }
 
+                    let csv_btn = egui::Button::new(
+                        egui::RichText::new("💾 CSV")
+                            .size(10.0)
+                            .color(colors.text_dim),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0));
                     if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("💾 CSV")
-                                    .size(10.0)
-                                    .color(colors.text_muted),
-                            )
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::new(1.0, colors.border_light))
-                            .rounding(Rounding::same(4.0)),
-                        )
+                        .add_enabled(has_spectrum, csv_btn)
                         .on_hover_text("Export spectrum as CSV")
                         .clicked()
                     {
-                        // TODO: Export CSV
+                        export_csv_clicked = true;
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -407,8 +537,9 @@ impl RustpixApp {
                             ui.label(
                                 egui::RichText::new("ROI 1")
                                     .size(10.0)
-                                    .color(colors.text_muted),
-                            );
+                                    .color(colors.text_dim),
+                            )
+                            .on_hover_text("ROI selection not yet implemented");
 
                             ui.add_space(8.0);
 
@@ -435,9 +566,10 @@ impl RustpixApp {
                                 .stroke(Stroke::new(1.0, colors.border_light))
                                 .rounding(Rounding::same(4.0)),
                             )
+                            .on_hover_text("Reset spectrum view (or double-click)")
                             .clicked()
                         {
-                            // Reset view
+                            spectrum_reset_clicked = true;
                         }
                     });
                 });
@@ -446,88 +578,173 @@ impl RustpixApp {
         ui.add_space(4.0);
 
         // Spectrum plot
+        let log_x = self.ui_state.log_x;
+        let log_y = self.ui_state.log_y;
         if let Some(full) = spectrum.as_ref() {
             let colors = ThemeColors::from_ui(ui);
             let tdc_period = 1.0 / self.tdc_frequency;
-            let max_us = tdc_period * 1e6;
+            let max_ms = tdc_period * 1e3;
             let spec_bins = full.len();
-            let bin_width_us = max_us / usize_to_f64(spec_bins);
+            let bin_width_ms = max_ms / usize_to_f64(spec_bins);
+            let axis = self.ui_state.spectrum_x_axis;
+            let flight_path_m = self.flight_path_m;
+            let tof_offset_ns = self.tof_offset_ns;
+
+            let mut points = Vec::with_capacity(spec_bins);
+            let mut x_min = f64::INFINITY;
+            let mut x_max = f64::NEG_INFINITY;
+            let mut y_max = 0.0;
+
+            for (i, &c) in full.iter().enumerate() {
+                let tof_ms = usize_to_f64(i) * bin_width_ms;
+                let mut x = match axis {
+                    SpectrumXAxis::ToFMs => tof_ms,
+                    SpectrumXAxis::EnergyEv => {
+                        let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
+                        else {
+                            continue;
+                        };
+                        e
+                    }
+                };
+                if log_x {
+                    if x <= 0.0 {
+                        continue;
+                    }
+                    x = x.log10();
+                }
+
+                let mut y = u64_to_f64(c);
+                if log_y {
+                    y = u64_to_f64(c.max(1)).log10();
+                }
+
+                if y > y_max {
+                    y_max = y;
+                }
+                if x < x_min {
+                    x_min = x;
+                }
+                if x > x_max {
+                    x_max = x;
+                }
+                points.push([x, y]);
+            }
+
+            if !x_min.is_finite() || !x_max.is_finite() || x_min == x_max {
+                x_min = 0.0;
+                x_max = 1.0;
+            }
+            if y_max <= 0.0 {
+                y_max = 1.0;
+            } else {
+                y_max *= 1.05;
+            }
+
+            let x_label = match axis {
+                SpectrumXAxis::ToFMs => {
+                    if log_x {
+                        "log10(TOF (ms))"
+                    } else {
+                        "TOF (ms)"
+                    }
+                }
+                SpectrumXAxis::EnergyEv => {
+                    if log_x {
+                        "log10(Energy (eV))"
+                    } else {
+                        "Energy (eV)"
+                    }
+                }
+            };
+            let y_label = if log_y {
+                "log10(Counts)"
+            } else {
+                "Counts"
+            };
 
             let line_color = colors.text_muted;
-            let plot_response = Plot::new("spectrum")
-                .height(140.0)
-                .x_axis_label("TOF (µs)")
-                .y_axis_label(if self.ui_state.log_plot {
-                    "log₁₀(Counts)"
-                } else {
-                    "Counts"
-                })
-                .include_x(0.0)
-                .include_x(max_us)
-                .include_y(0.0)
-                .show(ui, |plot_ui| {
-                    // Full spectrum as line
-                    let points: Vec<[f64; 2]> = full
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &c)| {
-                            let x = if self.ui_state.log_x && i > 0 {
-                                (usize_to_f64(i) * bin_width_us).log10()
-                            } else {
-                                usize_to_f64(i) * bin_width_us
-                            };
-                            let y = if self.ui_state.log_plot {
-                                if c > 0 {
-                                    u64_to_f64(c).log10()
-                                } else {
-                                    0.0
-                                }
-                            } else {
-                                u64_to_f64(c)
-                            };
-                            [x, y]
-                        })
-                        .collect();
 
-                    plot_ui.line(
-                        Line::new(PlotPoints::new(points))
-                            .color(line_color)
-                            .name("Full"),
-                    );
+            // Build the base spectrum plot
+            let mut spectrum_plot = Plot::new("spectrum")
+                .height(140.0)
+                .x_axis_label(x_label)
+                .y_axis_label(y_label)
+                .include_x(x_min)
+                .include_x(x_max)
+                .include_y(0.0);
+
+            // Apply reset if needed
+            if spectrum_reset_clicked {
+                spectrum_plot = spectrum_plot.reset();
+            }
+
+            let points = points;
+            let plot_response = spectrum_plot.show(ui, |plot_ui| {
+                    // Reset on button click or double-click - show ALL data
+                    if spectrum_reset_clicked || plot_ui.response().double_clicked() {
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                            [x_min, 0.0],
+                            [x_max, y_max],
+                        ));
+                    }
+
+                    // Full spectrum as line
+                    plot_ui.line(Line::new(PlotPoints::new(points)).color(line_color).name("Full"));
 
                     // Slice marker
                     if slicer_enabled && current_tof_bin < spec_bins {
-                        let slice_x = if self.ui_state.log_x && current_tof_bin > 0 {
-                            (usize_to_f64(current_tof_bin) * bin_width_us).log10()
-                        } else {
-                            usize_to_f64(current_tof_bin) * bin_width_us
+                        let slice_tof_ms = usize_to_f64(current_tof_bin) * bin_width_ms;
+                        let slice_x = match axis {
+                            SpectrumXAxis::ToFMs => Some(slice_tof_ms),
+                            SpectrumXAxis::EnergyEv => {
+                                tof_ms_to_energy_ev(slice_tof_ms, flight_path_m, tof_offset_ns)
+                            }
                         };
-                        plot_ui.vline(
-                            VLine::new(slice_x)
-                                .color(accent::RED)
-                                .width(1.0)
-                                .style(egui_plot::LineStyle::Dashed { length: 4.0 })
-                                .name(format!("Slice {}", current_tof_bin + 1)),
-                        );
+
+                        if let Some(mut slice_x) = slice_x {
+                            if log_x {
+                                if slice_x > 0.0 {
+                                    slice_x = slice_x.log10();
+                                } else {
+                                    slice_x = x_min;
+                                }
+                            }
+                            plot_ui.vline(
+                                VLine::new(slice_x)
+                                    .color(accent::RED)
+                                    .width(1.0)
+                                    .style(egui_plot::LineStyle::Dashed { length: 4.0 })
+                                    .name(format!("Slice {}", current_tof_bin + 1)),
+                            );
+                        }
                     }
 
-                    // Handle drag
+                    // Handle drag to move slice marker
                     if slicer_enabled && spec_bins > 0 {
                         let drag_delta = plot_ui.pointer_coordinate_drag_delta();
                         if drag_delta.x.abs() > 0.0 {
                             if let Some(coord) = plot_ui.pointer_coordinate() {
-                                let x_us = if self.ui_state.log_x {
-                                    10f64.powf(coord.x)
-                                } else {
-                                    coord.x
+                                let mut x_axis = coord.x;
+                                if log_x {
+                                    x_axis = 10_f64.powf(x_axis);
+                                }
+                                let x_ms = match axis {
+                                    SpectrumXAxis::ToFMs => Some(x_axis),
+                                    SpectrumXAxis::EnergyEv => {
+                                        energy_ev_to_tof_ms(x_axis, flight_path_m, tof_offset_ns)
+                                    }
+                                };
+                                let Some(x_ms) = x_ms else {
+                                    return;
                                 };
                                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                                let bin = if x_us <= 0.0 {
+                                let bin = if x_ms <= 0.0 {
                                     0
-                                } else if x_us >= max_us {
+                                } else if x_ms >= max_ms {
                                     spec_bins - 1
                                 } else {
-                                    ((x_us / bin_width_us) as usize).min(spec_bins - 1)
+                                    ((x_ms / bin_width_ms) as usize).min(spec_bins - 1)
                                 };
                                 if bin != current_tof_bin {
                                     *new_tof_bin = Some(bin);
@@ -537,7 +754,7 @@ impl RustpixApp {
                     }
                 });
 
-            // Click to set position
+            // Click to set slice position
             if slicer_enabled && spec_bins > 0 && plot_response.response.clicked() {
                 if let Some(pos) = plot_response.response.interact_pointer_pos() {
                     let plot_bounds = plot_response.transform.bounds();
@@ -545,23 +762,53 @@ impl RustpixApp {
                     let x_frac = f64::from(pos.x - plot_rect.left()) / f64::from(plot_rect.width());
                     let x_plot = plot_bounds.min()[0]
                         + x_frac * (plot_bounds.max()[0] - plot_bounds.min()[0]);
-                    let x_us = if self.ui_state.log_x {
-                        10f64.powf(x_plot)
-                    } else {
-                        x_plot
+                    let mut x_axis = x_plot;
+                    if log_x {
+                        x_axis = 10_f64.powf(x_axis);
+                    }
+                    let x_ms = match axis {
+                        SpectrumXAxis::ToFMs => Some(x_axis),
+                        SpectrumXAxis::EnergyEv => {
+                            energy_ev_to_tof_ms(x_axis, flight_path_m, tof_offset_ns)
+                        }
+                    };
+                    let Some(x_ms) = x_ms else {
+                        return;
                     };
 
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let bin = if x_us <= 0.0 {
+                    let bin = if x_ms <= 0.0 {
                         0
-                    } else if x_us >= max_us {
+                    } else if x_ms >= max_ms {
                         spec_bins - 1
                     } else {
-                        ((x_us / bin_width_us) as usize).min(spec_bins - 1)
+                        ((x_ms / bin_width_ms) as usize).min(spec_bins - 1)
                     };
                     if bin != current_tof_bin {
                         *new_tof_bin = Some(bin);
                     }
+                }
+            }
+
+            if export_csv_clicked {
+                if let Err(err) =
+                    self.export_spectrum_csv(full, bin_width_ms, axis, flight_path_m, tof_offset_ns)
+                {
+                    log::error!("Failed to export spectrum CSV: {err}");
+                }
+            }
+
+            if export_png_clicked {
+                if let Err(err) = self.export_spectrum_png(
+                    full,
+                    bin_width_ms,
+                    axis,
+                    flight_path_m,
+                    tof_offset_ns,
+                    log_x,
+                    log_y,
+                ) {
+                    log::error!("Failed to export spectrum PNG: {err}");
                 }
             }
         } else {
@@ -611,6 +858,184 @@ impl RustpixApp {
                 ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, Rounding::same(2.0), color);
             response
+        }
+    }
+
+    fn export_spectrum_csv(
+        &self,
+        spectrum: &[u64],
+        bin_width_ms: f64,
+        axis: SpectrumXAxis,
+        flight_path_m: f64,
+        tof_offset_ns: f64,
+    ) -> anyhow::Result<()> {
+        let Some(path) = FileDialog::new().set_file_name("spectrum.csv").save_file() else {
+            return Ok(());
+        };
+
+        let mut file = File::create(path)?;
+        let header = match axis {
+            SpectrumXAxis::ToFMs => "tof_ms,counts",
+            SpectrumXAxis::EnergyEv => "energy_ev,counts",
+        };
+        writeln!(file, "{header}")?;
+        for (i, &count) in spectrum.iter().enumerate() {
+            let tof_ms = usize_to_f64(i) * bin_width_ms;
+            match axis {
+                SpectrumXAxis::ToFMs => {
+                    writeln!(file, "{tof_ms:.6},{count}")?;
+                }
+                SpectrumXAxis::EnergyEv => {
+                    let Some(energy) =
+                        tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
+                    else {
+                        continue;
+                    };
+                    writeln!(file, "{energy:.6},{count}")?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn export_spectrum_png(
+        &self,
+        spectrum: &[u64],
+        bin_width_ms: f64,
+        axis: SpectrumXAxis,
+        flight_path_m: f64,
+        tof_offset_ns: f64,
+        log_x: bool,
+        log_y: bool,
+    ) -> anyhow::Result<()> {
+        let Some(path) = FileDialog::new().set_file_name("spectrum.png").save_file() else {
+            return Ok(());
+        };
+
+        let width: u32 = 800;
+        let height: u32 = 240;
+        let pad: i32 = 24;
+        let bg = Rgba([0x0d, 0x0d, 0x0d, 0xff]);
+        let line = Rgba([0xb8, 0xb8, 0xb8, 0xff]);
+        let axis_color = Rgba([0x33, 0x33, 0x33, 0xff]);
+
+        let mut img = RgbaImage::from_pixel(width, height, bg);
+
+        let spec_bins = spectrum.len();
+        let mut points = Vec::with_capacity(spec_bins);
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
+        let mut y_max = 0.0;
+
+        for (i, &count) in spectrum.iter().enumerate() {
+            let tof_ms = usize_to_f64(i) * bin_width_ms;
+            let mut x = match axis {
+                SpectrumXAxis::ToFMs => tof_ms,
+                SpectrumXAxis::EnergyEv => {
+                    let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
+                    else {
+                        continue;
+                    };
+                    e
+                }
+            };
+            if log_x {
+                if x <= 0.0 {
+                    continue;
+                }
+                x = x.log10();
+            }
+
+            let mut y = u64_to_f64(count);
+            if log_y {
+                y = u64_to_f64(count.max(1)).log10();
+            }
+
+            if y > y_max {
+                y_max = y;
+            }
+            if x < x_min {
+                x_min = x;
+            }
+            if x > x_max {
+                x_max = x;
+            }
+            points.push((x, y));
+        }
+
+        if !x_min.is_finite() || !x_max.is_finite() || x_min == x_max {
+            x_min = 0.0;
+            x_max = 1.0;
+        }
+        if y_max <= 0.0 {
+            y_max = 1.0;
+        } else {
+            y_max *= 1.05;
+        }
+
+        let plot_w = (width as i32 - pad * 2).max(1) as f64;
+        let plot_h = (height as i32 - pad * 2).max(1) as f64;
+        let x_scale = plot_w / (x_max - x_min).max(1e-9);
+        let y_scale = plot_h / y_max.max(1e-9);
+
+        // Axes
+        Self::draw_line(
+            &mut img,
+            pad,
+            height as i32 - pad,
+            width as i32 - pad,
+            height as i32 - pad,
+            axis_color,
+        );
+        Self::draw_line(&mut img, pad, pad, pad, height as i32 - pad, axis_color);
+
+        let mut prev: Option<(i32, i32)> = None;
+        for (x, y) in points {
+            let px = pad as f64 + (x - x_min) * x_scale;
+            let py = height as f64 - pad as f64 - y * y_scale;
+            let (px_i, py_i) = (px.round() as i32, py.round() as i32);
+
+            if let Some((prev_x, prev_y)) = prev {
+                Self::draw_line(&mut img, prev_x, prev_y, px_i, py_i, line);
+            }
+            prev = Some((px_i, py_i));
+        }
+
+        img.save(path)?;
+        Ok(())
+    }
+
+    fn draw_line(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgba<u8>) {
+        let (mut x0, mut y0, x1, y1) = (x0, y0, x1, y1);
+        let dx = (x1 - x0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let dy = -(y1 - y0).abs();
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+
+        loop {
+            if x0 >= 0 && y0 >= 0 && x0 < img.width() as i32 && y0 < img.height() as i32 {
+                img.put_pixel(x0 as u32, y0 as u32, color);
+            }
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                if x0 == x1 {
+                    break;
+                }
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                if y0 == y1 {
+                    break;
+                }
+                err += dx;
+                y0 += sy;
+            }
         }
     }
 }

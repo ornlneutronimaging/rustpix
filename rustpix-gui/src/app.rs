@@ -56,6 +56,16 @@ pub struct RustpixApp {
 
     /// TDC frequency in Hz.
     pub(crate) tdc_frequency: f64,
+    /// Flight path length in meters (for energy conversion).
+    pub(crate) flight_path_m: f64,
+    /// TOF offset in nanoseconds (for energy conversion).
+    pub(crate) tof_offset_ns: f64,
+    /// TOF bins for hits hyperstack.
+    pub(crate) hit_tof_bins: usize,
+    /// TOF bins for neutron hyperstack.
+    pub(crate) neutron_tof_bins: usize,
+    /// Super-resolution factor for clustering extraction.
+    pub(crate) super_resolution_factor: f64,
     /// UI display state.
     pub(crate) ui_state: UiState,
 
@@ -80,7 +90,7 @@ impl Default for RustpixApp {
         let (tx, rx) = channel();
         Self {
             selected_file: None,
-            algo_type: AlgorithmType::Grid, // Default to Grid (Fastest)
+            algo_type: AlgorithmType::Abs, // Default to ABS per design doc
             radius: 5.0,
             temporal_window_ns: 75.0,
             min_cluster_size: 1,
@@ -97,6 +107,11 @@ impl Default for RustpixApp {
             cursor_info: None,
 
             tdc_frequency: 60.0,
+            flight_path_m: 0.0,
+            tof_offset_ns: 0.0,
+            hit_tof_bins: 200,
+            neutron_tof_bins: 200,
+            super_resolution_factor: 1.0,
             ui_state: UiState::default(),
             rx,
             tx,
@@ -105,7 +120,7 @@ impl Default for RustpixApp {
             statistics: Statistics::default(),
 
             texture: None,
-            colormap: Colormap::Green,
+            colormap: Colormap::Grayscale,
         }
     }
 }
@@ -117,7 +132,8 @@ impl RustpixApp {
 
         let tx = self.tx.clone();
         let tdc_frequency = self.tdc_frequency;
-        thread::spawn(move || load_file_worker(path.as_path(), &tx, tdc_frequency));
+        let hit_tof_bins = self.hit_tof_bins;
+        thread::spawn(move || load_file_worker(path.as_path(), &tx, tdc_frequency, hit_tof_bins));
     }
 
     /// Reset application state for a new file load.
@@ -170,6 +186,7 @@ impl RustpixApp {
                 min_cluster_size: self.min_cluster_size,
                 dbscan_min_points: self.dbscan_min_points,
                 tdc_frequency: self.tdc_frequency,
+                super_resolution_factor: self.super_resolution_factor,
                 total_hits: self.hit_batch.as_ref().map_or(0, HitBatch::len),
             };
 
@@ -207,7 +224,7 @@ impl RustpixApp {
         let Some(counts) = counts else {
             return egui::ColorImage::new([512, 512], egui::Color32::BLACK);
         };
-        generate_histogram_image(counts, self.colormap)
+        generate_histogram_image(counts, self.colormap, self.ui_state.log_scale)
     }
 
     /// Get the cached TOF spectrum (full detector integration).
@@ -239,6 +256,45 @@ impl RustpixApp {
         self.neutron_hyperstack.is_some()
     }
 
+    /// Rebuild the hits hyperstack with current settings.
+    pub fn rebuild_hit_hyperstack(&mut self) {
+        let Some(hit_batch) = &self.hit_batch else {
+            return;
+        };
+        let tof_max = self.statistics.tof_max;
+        let bins = self.hit_tof_bins.max(1);
+        let hyperstack = Hyperstack3D::from_hits(hit_batch, bins, tof_max, 512, 512);
+        self.hit_counts = Some(hyperstack.project_xy());
+        self.tof_spectrum = Some(hyperstack.full_spectrum());
+        self.hyperstack = Some(hyperstack);
+        self.ui_state.current_tof_bin = 0;
+        self.ui_state.needs_plot_reset = true;
+        self.texture = None;
+    }
+
+    /// Rebuild the neutron hyperstack with current settings.
+    pub fn rebuild_neutron_hyperstack(&mut self) {
+        if self.neutrons.is_empty() {
+            return;
+        }
+        let tof_max = self.statistics.tof_max;
+        let bins = self.neutron_tof_bins.max(1);
+        let neutron_hs = Hyperstack3D::from_neutrons(
+            &self.neutrons,
+            bins,
+            tof_max,
+            512,
+            512,
+            self.super_resolution_factor,
+        );
+        self.neutron_counts = Some(neutron_hs.project_xy());
+        self.neutron_spectrum = Some(neutron_hs.full_spectrum());
+        self.neutron_hyperstack = Some(neutron_hs);
+        self.ui_state.current_tof_bin = 0;
+        self.ui_state.needs_plot_reset = true;
+        self.texture = None;
+    }
+
     /// Handle pending messages from async workers.
     pub fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
@@ -262,6 +318,9 @@ impl RustpixApp {
                     self.tof_spectrum = Some(hyperstack.full_spectrum());
                     self.hyperstack = Some(*hyperstack);
                     self.hit_batch = Some(*batch);
+
+                    // Trigger auto-fit of plot view
+                    self.ui_state.needs_plot_reset = true;
 
                     let img = self.generate_histogram();
                     self.texture =
@@ -291,10 +350,11 @@ impl RustpixApp {
                     if let Some(hit_hs) = &self.hyperstack {
                         let neutron_hs = Hyperstack3D::from_neutrons(
                             &neutrons,
-                            hit_hs.n_tof_bins(),
+                            self.neutron_tof_bins.max(1),
                             hit_hs.tof_max(),
                             hit_hs.width(),
                             hit_hs.height(),
+                            self.super_resolution_factor,
                         );
                         self.neutron_counts = Some(neutron_hs.project_xy());
                         self.neutron_spectrum = Some(neutron_hs.full_spectrum());
@@ -324,6 +384,7 @@ impl eframe::App for RustpixApp {
         self.render_bottom_panel(ctx);
         self.render_side_panel(ctx);
         self.render_central_panel(ctx);
+        self.render_settings_windows(ctx);
 
         if self.processing.is_loading || self.processing.is_processing {
             ctx.request_repaint();

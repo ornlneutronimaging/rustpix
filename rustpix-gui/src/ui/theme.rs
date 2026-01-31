@@ -262,7 +262,7 @@ fn configure_fonts_and_spacing(ctx: &egui::Context) {
 /// Style a button as the primary action button.
 pub fn primary_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
-        .fill(accent::GREEN)
+        .fill(accent::BLUE)
         .rounding(Rounding::same(4.0))
 }
 

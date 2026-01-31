@@ -30,6 +30,8 @@ pub struct ClusteringWorkerConfig {
     pub dbscan_min_points: usize,
     /// TDC frequency in Hz.
     pub tdc_frequency: f64,
+    /// Super-resolution factor for extraction.
+    pub super_resolution_factor: f64,
     /// Total hits for progress calculation.
     pub total_hits: usize,
 }
@@ -80,7 +82,7 @@ pub fn run_clustering_worker(
 
     // Preserve legacy GUI behavior: naive centroid, no TOT filtering, no super-res.
     let extraction = ExtractionConfig {
-        super_resolution_factor: 1.0,
+        super_resolution_factor: config.super_resolution_factor,
         weighted_by_tot: false,
         min_tot_threshold: 0,
     };

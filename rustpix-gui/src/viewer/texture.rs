@@ -21,16 +21,27 @@ fn u64_to_f32(value: u64) -> f32 {
 /// # Returns
 /// RGBA color image suitable for display
 #[must_use]
-pub fn generate_histogram_image(counts: &[u64], colormap: Colormap) -> ColorImage {
+pub fn generate_histogram_image(counts: &[u64], colormap: Colormap, log_scale: bool) -> ColorImage {
     // Find max for scaling
-    let max_count = u64_to_f32(counts.iter().max().copied().unwrap_or(1));
+    let max_count_u64 = counts.iter().max().copied().unwrap_or(1);
+    let max_count = u64_to_f32(max_count_u64.max(1));
+    let max_log = if log_scale {
+        max_count.log10().max(1.0)
+    } else {
+        1.0
+    };
     let mut pixels = Vec::with_capacity(512 * 512 * 4);
 
     for &count in counts {
         if count == 0 {
             pixels.extend_from_slice(&[0, 0, 0, 255]);
         } else {
-            let val = (u64_to_f32(count) / max_count).sqrt(); // Sqrt scale
+            let val = if log_scale {
+                let log_val = u64_to_f32(count.max(1)).log10() / max_log;
+                log_val.clamp(0.0, 1.0)
+            } else {
+                (u64_to_f32(count) / max_count).sqrt() // Sqrt scale
+            };
             let rgba = colormap.apply(val);
             pixels.extend_from_slice(&rgba);
         }

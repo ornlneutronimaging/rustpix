@@ -19,8 +19,6 @@ use crate::histogram::Hyperstack3D;
 use crate::message::AppMessage;
 use crate::util::usize_to_f32;
 
-/// Number of TOF bins for hyperstack.
-const N_TOF_BINS: usize = 200;
 /// Detector width in pixels.
 const DETECTOR_WIDTH: usize = 512;
 /// Detector height in pixels.
@@ -30,7 +28,12 @@ const DETECTOR_HEIGHT: usize = 512;
 ///
 /// Opens a TPX3 file, memory-maps it, scans sections, processes hits,
 /// and sends progress/completion messages via the provided channel.
-pub fn load_file_worker(path: &Path, tx: &Sender<AppMessage>, tdc_frequency: f64) {
+pub fn load_file_worker(
+    path: &Path,
+    tx: &Sender<AppMessage>,
+    tdc_frequency: f64,
+    n_tof_bins: usize,
+) {
     let start = Instant::now();
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -86,7 +89,7 @@ pub fn load_file_worker(path: &Path, tx: &Sender<AppMessage>, tdc_frequency: f64
     // Build 3D hyperstack
     let hyperstack = Hyperstack3D::from_hits(
         &full_batch,
-        N_TOF_BINS,
+        n_tof_bins.max(1),
         tdc_correction,
         DETECTOR_WIDTH,
         DETECTOR_HEIGHT,

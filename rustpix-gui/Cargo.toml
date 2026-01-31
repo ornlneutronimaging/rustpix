@@ -23,6 +23,7 @@ eframe = "0.29"
 egui = "0.29"
 egui_plot = "0.29"
 rfd = "0.15"
+image = "0.25"
 
 # Utils
 anyhow = "1.0"

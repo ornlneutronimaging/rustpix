@@ -122,6 +122,7 @@ impl Hyperstack3D {
     /// * `tof_max` - Maximum TOF value in 25ns units
     /// * `width` - Width in pixels (typically 512)
     /// * `height` - Height in pixels (typically 512)
+    /// * `super_resolution_factor` - Super-resolution factor for neutron coordinates
     #[must_use]
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn from_neutrons(
@@ -130,13 +131,19 @@ impl Hyperstack3D {
         tof_max: u32,
         width: usize,
         height: usize,
+        super_resolution_factor: f64,
     ) -> Self {
         let mut hyperstack = Self::new(n_tof_bins, width, height, tof_max);
+        let factor = if super_resolution_factor > 0.0 {
+            super_resolution_factor
+        } else {
+            1.0
+        };
 
         for i in 0..batch.len() {
             // Round float coordinates to nearest integer
-            let x = batch.x[i].round();
-            let y = batch.y[i].round();
+            let x = (batch.x[i] / factor).round();
+            let y = (batch.y[i] / factor).round();
             let tof = batch.tof[i];
 
             // Skip out-of-bounds
