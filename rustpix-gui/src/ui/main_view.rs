@@ -213,70 +213,83 @@ impl RustpixApp {
                 if slicer_enabled && n_bins > 0 {
                     let colors = ThemeColors::from_ui(ui);
                     ui.add_space(8.0);
-                    egui::Frame::none()
-                        .fill(colors.bg_panel)
-                        .stroke(Stroke::new(1.0, colors.border))
-                        .rounding(Rounding::same(4.0))
-                        .inner_margin(egui::Margin::symmetric(16.0, 12.0))
-                        .show(ui, |ui| {
+                    let margin = egui::Margin::symmetric(16.0, 12.0);
+                    let content_height = ui.spacing().interact_size.y.max(20.0);
+                    let frame_height = content_height + margin.top + margin.bottom;
+
+                    let left = ui.max_rect().left();
+                    let right = ui.max_rect().right();
+                    let top = ui.cursor().top();
+                    let rect = egui::Rect::from_min_max(
+                        egui::pos2(left, top),
+                        egui::pos2(right, top + frame_height),
+                    );
+                    let _ = ui.allocate_rect(rect, egui::Sense::hover());
+
+                    // Draw frame manually at full width.
+                    ui.painter().rect_filled(rect, 4.0, colors.bg_panel);
+                    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.0, colors.border));
+
+                    let inner_rect =
+                        rect.shrink2(egui::vec2(margin.left, margin.top));
+                    let mut slicer_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(inner_rect)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+
+                    let colors = ThemeColors::from_ui(&slicer_ui);
+                    slicer_ui.set_width(inner_rect.width());
+
+                    // Clamp to valid range
+                    let clamped_bin = current_tof_bin.min(n_bins - 1);
+                    let mut bin = clamped_bin;
+
+                    // Use horizontal layout with fixed label widths
+                    let total_width = inner_rect.width();
+                    let label_width = 70.0;
+                    let value_width = 70.0;
+                    let spacing = slicer_ui.spacing().item_spacing.x;
+                    let slider_width =
+                        (total_width - label_width - value_width - spacing * 2.0).max(120.0);
+
+                    let prev_slider_width = slicer_ui.spacing().slider_width;
+                    slicer_ui.spacing_mut().slider_width = slider_width;
+                    slicer_ui.allocate_ui_with_layout(
+                        egui::vec2(label_width, slicer_ui.available_height()),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new("TOF Slice")
+                                    .size(11.0)
+                                    .color(colors.text_muted),
+                            );
+                        },
+                    );
+
+                    let slider = slicer_ui.add(
+                        egui::Slider::new(&mut bin, 0..=(n_bins - 1))
+                            .show_value(false)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+                    slicer_ui.spacing_mut().slider_width = prev_slider_width;
+
+                    slicer_ui.allocate_ui_with_layout(
+                        egui::vec2(value_width, slicer_ui.available_height()),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
                             let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new(format!("{} / {}", bin + 1, n_bins))
+                                    .size(11.0)
+                                    .color(colors.text_primary),
+                            );
+                        },
+                    );
 
-                            // Clamp to valid range
-                            let clamped_bin = current_tof_bin.min(n_bins - 1);
-                            let mut bin = clamped_bin;
-
-                            // Use horizontal layout with fixed label widths
-                            let total_width = ui.available_width();
-                            let label_width = 70.0;
-                            let value_width = 70.0;
-                            let spacing = ui.spacing().item_spacing.x;
-                            let slider_width =
-                                (total_width - label_width - value_width - spacing * 2.0)
-                                    .max(120.0);
-
-                            ui.horizontal(|ui| {
-                                // Left: Label (fixed width)
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(label_width, ui.available_height()),
-                                    egui::Layout::centered_and_justified(
-                                        egui::Direction::LeftToRight,
-                                    ),
-                                    |ui| {
-                                        ui.label(
-                                            egui::RichText::new("TOF Slice")
-                                                .size(11.0)
-                                                .color(colors.text_muted),
-                                        );
-                                    },
-                                );
-
-                                // Middle: Slider (fills remaining space)
-                                let slider = ui.add_sized(
-                                    [slider_width, 20.0],
-                                    egui::Slider::new(&mut bin, 0..=(n_bins - 1))
-                                        .show_value(false)
-                                        .clamping(egui::SliderClamping::Always),
-                                );
-
-                                // Right: Value display (fixed width)
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(value_width, ui.available_height()),
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        let colors = ThemeColors::from_ui(ui);
-                                        ui.label(
-                                            egui::RichText::new(format!("{} / {}", bin + 1, n_bins))
-                                                .size(11.0)
-                                                .color(colors.text_primary),
-                                        );
-                                    },
-                                );
-
-                                if slider.changed() && bin != current_tof_bin {
-                                    new_tof_bin = Some(bin);
-                                }
-                            });
-                        });
+                    if slider.changed() && bin != current_tof_bin {
+                        new_tof_bin = Some(bin);
+                    }
                 }
 
                 // Spectrum viewer (at bottom)
