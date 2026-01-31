@@ -23,6 +23,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Rustpix",
         opts,
-        Box::new(|_| Ok(Box::new(RustpixApp::default()))),
+        Box::new(|cc| {
+            // Apply custom styling based on system theme preference
+            ui::theme::configure_style(&cc.egui_ctx);
+            Ok(Box::new(RustpixApp::default()))
+        }),
     )
 }

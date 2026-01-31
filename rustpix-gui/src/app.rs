@@ -314,10 +314,16 @@ impl RustpixApp {
 
 impl eframe::App for RustpixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply system theme (follows system light/dark preference)
+        crate::ui::theme::apply_system_theme(ctx);
+
         self.handle_messages(ctx);
+
+        // Render panels in order: top, bottom, side, central
+        self.render_top_panel(ctx);
+        self.render_bottom_panel(ctx);
         self.render_side_panel(ctx);
         self.render_central_panel(ctx);
-        self.render_histogram_window(ctx);
 
         if self.processing.is_loading || self.processing.is_processing {
             ctx.request_repaint();

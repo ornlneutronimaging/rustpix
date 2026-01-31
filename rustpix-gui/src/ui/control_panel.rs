@@ -1,52 +1,404 @@
-//! Control panel (left sidebar) rendering.
+//! Control panel (left sidebar) and top/bottom bars rendering.
 
-use eframe::egui;
+use eframe::egui::{self, Color32, Rounding, Stroke};
 use rfd::FileDialog;
 
+use super::theme::{accent, form_label, primary_button, ThemeColors};
 use crate::app::RustpixApp;
 use crate::pipeline::AlgorithmType;
 use crate::state::ViewMode;
+use crate::util::format_number;
 use crate::viewer::Colormap;
 
 impl RustpixApp {
+    /// Render the top panel with RUSTPIX branding, file info, and view mode toggle.
+    pub(crate) fn render_top_panel(&mut self, ctx: &egui::Context) {
+        let colors = ThemeColors::from_ctx(ctx);
+
+        egui::TopBottomPanel::top("top_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(colors.bg_header)
+                    .inner_margin(egui::Margin {
+                        left: 16.0,
+                        right: 16.0,
+                        top: 8.0,
+                        bottom: 8.0,
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let colors = ThemeColors::from_ui(ui);
+                    // RUSTPIX branding
+                    ui.label(
+                        egui::RichText::new("RUSTPIX")
+                            .size(14.0)
+                            .strong()
+                            .color(accent::BLUE),
+                    );
+
+                    ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
+
+                    // File name
+                    if let Some(p) = &self.selected_file {
+                        ui.label(
+                            egui::RichText::new(
+                                p.file_name().unwrap_or_default().to_string_lossy(),
+                            )
+                            .size(11.0)
+                            .color(colors.text_muted),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("No file loaded")
+                                .size(11.0)
+                                .color(colors.text_dim),
+                        );
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        // Settings gear icon
+                        if ui
+                            .add(
+                                egui::Button::new("⚙")
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(Stroke::new(1.0, colors.border_light))
+                                    .rounding(Rounding::same(4.0)),
+                            )
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
+                            // TODO: Open settings panel
+                        }
+
+                        ui.add_space(12.0);
+
+                        // HITS/NEUTRONS toggle buttons
+                        self.render_view_mode_toggle(ui);
+                    });
+                });
+            });
+    }
+
+    /// Render the HITS/NEUTRONS toggle button group.
+    fn render_view_mode_toggle(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let old_mode = self.ui_state.view_mode;
+
+        // Container frame for the toggle group
+        egui::Frame::none()
+            .fill(colors.bg_dark)
+            .stroke(Stroke::new(1.0, colors.border))
+            .rounding(Rounding::same(4.0))
+            .inner_margin(egui::Margin::same(2.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let colors = ThemeColors::from_ui(ui);
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+
+                    // HITS button
+                    let hits_active = self.ui_state.view_mode == ViewMode::Hits;
+                    let hits_btn =
+                        egui::Button::new(egui::RichText::new("HITS").size(11.0).strong().color(
+                            if hits_active {
+                                Color32::WHITE
+                            } else {
+                                colors.text_muted
+                            },
+                        ))
+                        .fill(if hits_active {
+                            accent::BLUE
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(3.0))
+                        .min_size(egui::vec2(70.0, 0.0));
+
+                    if ui.add(hits_btn).clicked() {
+                        self.ui_state.view_mode = ViewMode::Hits;
+                    }
+
+                    // NEUTRONS button
+                    let neutrons_active = self.ui_state.view_mode == ViewMode::Neutrons;
+                    let neutrons_enabled = self.has_neutrons();
+                    let neutrons_btn = egui::Button::new(
+                        egui::RichText::new("NEUTRONS").size(11.0).strong().color(
+                            if neutrons_active {
+                                Color32::WHITE
+                            } else if neutrons_enabled {
+                                colors.text_muted
+                            } else {
+                                colors.text_dim
+                            },
+                        ),
+                    )
+                    .fill(if neutrons_active {
+                        accent::GREEN
+                    } else {
+                        Color32::TRANSPARENT
+                    })
+                    .stroke(Stroke::NONE)
+                    .rounding(Rounding::same(3.0))
+                    .min_size(egui::vec2(90.0, 0.0));
+
+                    if ui.add_enabled(neutrons_enabled, neutrons_btn).clicked() {
+                        self.ui_state.view_mode = ViewMode::Neutrons;
+                    }
+                });
+            });
+
+        if self.ui_state.view_mode != old_mode {
+            self.texture = None;
+            self.ui_state.current_tof_bin = 0;
+        }
+    }
+
+    /// Render the bottom status bar.
+    pub(crate) fn render_bottom_panel(&self, ctx: &egui::Context) {
+        let colors = ThemeColors::from_ctx(ctx);
+
+        egui::TopBottomPanel::bottom("status_bar")
+            .frame(
+                egui::Frame::none()
+                    .fill(colors.bg_header)
+                    .inner_margin(egui::Margin {
+                        left: 16.0,
+                        right: 16.0,
+                        top: 6.0,
+                        bottom: 6.0,
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let colors = ThemeColors::from_ui(ui);
+                    // Status indicator
+                    let (status_color, status_text) =
+                        if self.processing.is_loading || self.processing.is_processing {
+                            (accent::BLUE, &self.processing.status_text)
+                        } else {
+                            (accent::GREEN, &"Ready".to_string())
+                        };
+
+                    ui.label(egui::RichText::new("●").size(11.0).color(status_color));
+                    ui.label(
+                        egui::RichText::new(status_text)
+                            .size(11.0)
+                            .color(status_color),
+                    );
+
+                    ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
+
+                    // Cursor info
+                    if let Some((x, y, count)) = self.cursor_info {
+                        ui.label(
+                            egui::RichText::new(format!("Cursor: ({x}, {y}) = "))
+                                .size(11.0)
+                                .color(colors.text_muted),
+                        );
+                        #[allow(clippy::cast_possible_truncation)]
+                        let count_usize = count as usize;
+                        ui.label(
+                            egui::RichText::new(format_number(count_usize))
+                                .size(11.0)
+                                .color(colors.text_primary),
+                        );
+                        ui.label(
+                            egui::RichText::new(" counts")
+                                .size(11.0)
+                                .color(colors.text_muted),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Cursor: -")
+                                .size(11.0)
+                                .color(colors.text_muted),
+                        );
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        // Hot pixel count (placeholder)
+                        ui.label(egui::RichText::new("0").size(11.0).color(accent::RED));
+                        ui.label(
+                            egui::RichText::new("Hot: ")
+                                .size(11.0)
+                                .color(colors.text_muted),
+                        );
+
+                        ui.add_space(8.0);
+
+                        // Dead pixel count (placeholder)
+                        ui.label(egui::RichText::new("0").size(11.0).color(colors.text_dim));
+                        ui.label(
+                            egui::RichText::new("Dead: ")
+                                .size(11.0)
+                                .color(colors.text_muted),
+                        );
+                    });
+                });
+            });
+    }
+
     /// Render the left control panel.
     pub(crate) fn render_side_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("ctrl").show(ctx, |ui| {
-            ui.heading("Rustpix GUI");
-            ui.separator();
+        let colors = ThemeColors::from_ctx(ctx);
 
-            self.render_file_controls(ui);
-            ui.separator();
+        egui::SidePanel::left("ctrl")
+            .default_width(240.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(colors.bg_panel)
+                    .inner_margin(egui::Margin::ZERO),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Statistics section
+                    self.render_section(ui, "Statistics", true, |app, ui| {
+                        app.render_statistics(ui);
+                    });
 
-            self.render_progress_status(ui);
-            ui.separator();
+                    // Clustering section
+                    self.render_section(ui, "Clustering", true, |app, ui| {
+                        app.render_clustering_controls(ui);
+                    });
 
-            self.render_statistics(ui);
-            ui.separator();
+                    // View section
+                    self.render_section(ui, "View", true, |app, ui| {
+                        app.render_view_options(ui);
+                    });
 
-            self.render_cursor_info(ui);
-            ui.separator();
+                    // Pixel Health section (placeholder)
+                    self.render_section(ui, "Pixel Health", false, |_app, ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Coming soon...")
+                                .size(11.0)
+                                .color(colors.text_dim),
+                        );
+                    });
 
-            self.render_visualization_controls(ctx, ui);
-            ui.separator();
+                    // Export section (placeholder)
+                    self.render_section(ui, "Export", false, |_app, ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Coming soon...")
+                                .size(11.0)
+                                .color(colors.text_dim),
+                        );
+                    });
+                });
 
-            self.render_processing_controls(ui);
+                // Spacer to push Open File to bottom
+                ui.add_space(ui.available_height() - 60.0);
+
+                // Progress indicator (when active)
+                self.render_progress_status(ui);
+
+                // Open File button at bottom
+                ui.separator();
+                egui::Frame::none()
+                    .inner_margin(egui::Margin::symmetric(12.0, 12.0))
+                    .show(ui, |ui| {
+                        self.render_file_controls(ui);
+                    });
+            });
+    }
+
+    /// Render a collapsible section with header.
+    fn render_section<F>(&mut self, ui: &mut egui::Ui, title: &str, default_open: bool, content: F)
+    where
+        F: FnOnce(&mut Self, &mut egui::Ui),
+    {
+        // Section container
+        ui.push_id(title, |ui| {
+            let colors = ThemeColors::from_ui(ui);
+            // Header
+            let header_response = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(title.to_uppercase())
+                        .size(11.0)
+                        .strong()
+                        .color(colors.text_primary),
+                )
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::NONE)
+                .rounding(Rounding::ZERO)
+                .min_size(egui::vec2(ui.available_width(), 0.0)),
+            );
+
+            // Get/toggle state
+            let id = ui.make_persistent_id(format!("{title}_open"));
+            let mut is_open = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || default_open));
+
+            if header_response.clicked() {
+                is_open = !is_open;
+                ui.data_mut(|d| d.insert_temp(id, is_open));
+            }
+
+            // Draw the header with proper styling
+            let header_rect = header_response.rect;
+            ui.painter()
+                .rect_filled(header_rect, 0.0, Color32::TRANSPARENT);
+
+            // Arrow indicator
+            let arrow = if is_open { "▼" } else { "▶" };
+            let arrow_pos = header_rect.right_center() - egui::vec2(20.0, 0.0);
+            ui.painter().text(
+                arrow_pos,
+                egui::Align2::CENTER_CENTER,
+                arrow,
+                egui::FontId::monospace(10.0),
+                colors.text_dim,
+            );
+
+            // Separator line
+            ui.painter().hline(
+                header_rect.x_range(),
+                header_rect.bottom(),
+                Stroke::new(1.0, colors.border),
+            );
+
+            // Content
+            if is_open {
+                egui::Frame::none()
+                    .inner_margin(egui::Margin {
+                        left: 16.0,
+                        right: 16.0,
+                        top: 12.0,
+                        bottom: 16.0,
+                    })
+                    .show(ui, |ui| {
+                        content(self, ui);
+                    });
+            }
+
+            // Bottom border
+            let last_rect = ui.min_rect();
+            ui.painter().hline(
+                last_rect.x_range(),
+                last_rect.bottom(),
+                Stroke::new(1.0, colors.border),
+            );
         });
     }
 
     fn render_file_controls(&mut self, ui: &mut egui::Ui) {
-        // Disable file loading while loading or processing to prevent state corruption
+        let colors = ThemeColors::from_ui(ui);
         let can_load = !self.processing.is_loading && !self.processing.is_processing;
-        if ui
-            .add_enabled(can_load, egui::Button::new("Open File"))
-            .clicked()
-        {
+
+        // Theme-aware secondary button
+        let btn = egui::Button::new(egui::RichText::new("Open File...").color(colors.text_primary))
+            .fill(colors.button_bg)
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0))
+            .min_size(egui::vec2(ui.available_width(), 0.0));
+
+        if ui.add_enabled(can_load, btn).clicked() {
             if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
                 self.load_file(path);
             }
-        }
-        if let Some(p) = &self.selected_file {
-            ui.label(p.file_name().unwrap_or_default().to_string_lossy());
         }
     }
 
@@ -54,119 +406,67 @@ impl RustpixApp {
         let is_busy = self.processing.is_loading || self.processing.is_processing;
 
         if is_busy {
-            ui.add(
-                egui::ProgressBar::new(self.processing.progress).text(&self.processing.status_text),
-            );
-            if ui.button("Cancel").clicked() {
-                self.cancel_operation();
-            }
-        } else if !self.processing.status_text.is_empty()
-            && self.processing.status_text != "Ready"
-        {
-            ui.label(&self.processing.status_text);
-        }
-    }
-
-    fn render_cursor_info(&self, ui: &mut egui::Ui) {
-        if let Some((x, y, count)) = self.cursor_info {
-            ui.label(egui::RichText::new("Pixel Info:").strong());
-            let label = match self.ui_state.view_mode {
-                ViewMode::Hits => "Hits",
-                ViewMode::Neutrons => "Neutrons",
-            };
-            ui.label(format!("X: {x}\nY: {y}\n{label}: {count}"));
-        } else {
-            ui.label("Hover over image for details.");
-        }
-    }
-
-    fn render_visualization_controls(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        ui.heading("Visualization");
-
-        // Data source toggle (Hits/Neutrons)
-        ui.horizontal(|ui| {
-            ui.label("Source:");
-            let old_mode = self.ui_state.view_mode;
-            egui::ComboBox::from_id_salt("view_mode")
-                .selected_text(self.ui_state.view_mode.to_string())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.ui_state.view_mode, ViewMode::Hits, "Hits");
-                    ui.add_enabled_ui(self.has_neutrons(), |ui| {
-                        ui.selectable_value(
-                            &mut self.ui_state.view_mode,
-                            ViewMode::Neutrons,
-                            "Neutrons",
-                        );
-                    });
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::ProgressBar::new(self.processing.progress)
+                            .text(&self.processing.status_text),
+                    );
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_operation();
+                    }
                 });
-            if self.ui_state.view_mode != old_mode {
-                self.texture = None;
-                // Reset slicer bin if switching to mode with different bin count
-                self.ui_state.current_tof_bin = 0;
-            }
-        });
+        }
+    }
 
-        egui::ComboBox::from_label("Color")
+    /// Render view options (colormap, toggles).
+    fn render_view_options(&mut self, ui: &mut egui::Ui) {
+        // Colormap selection
+        ui.label(form_label("Colormap"));
+        ui.add_space(4.0);
+
+        egui::ComboBox::from_id_salt("colormap_select")
             .selected_text(self.colormap.to_string())
+            .width(ui.available_width() - 8.0)
             .show_ui(ui, |ui| {
-                if ui
-                    .selectable_value(&mut self.colormap, Colormap::Green, "Green")
-                    .clicked()
-                {
-                    self.texture = None;
-                }
-                if ui
-                    .selectable_value(&mut self.colormap, Colormap::Hot, "Hot")
-                    .clicked()
-                {
-                    self.texture = None;
-                }
-                if ui
-                    .selectable_value(&mut self.colormap, Colormap::Grayscale, "Gray")
-                    .clicked()
-                {
-                    self.texture = None;
-                }
-                if ui
-                    .selectable_value(&mut self.colormap, Colormap::Viridis, "Viridis")
-                    .clicked()
-                {
-                    self.texture = None;
+                for cmap in [
+                    Colormap::Grayscale,
+                    Colormap::Green,
+                    Colormap::Hot,
+                    Colormap::Viridis,
+                ] {
+                    if ui
+                        .selectable_value(&mut self.colormap, cmap, cmap.to_string())
+                        .clicked()
+                    {
+                        self.texture = None;
+                    }
                 }
             });
 
-        // TOF Slicer controls
+        ui.add_space(12.0);
+
+        // Checkboxes
         let n_bins = self.n_tof_bins();
-        if n_bins > 0 {
+        ui.add_enabled_ui(n_bins > 0, |ui| {
             if ui
-                .toggle_value(&mut self.ui_state.slicer_enabled, "TOF Slicer")
+                .checkbox(&mut self.ui_state.slicer_enabled, "TOF Slicer")
                 .changed()
             {
                 self.texture = None;
             }
+        });
 
-            if self.ui_state.slicer_enabled {
-                // Clamp current bin to valid range
-                self.ui_state.current_tof_bin = self.ui_state.current_tof_bin.min(n_bins - 1);
+        ui.checkbox(&mut self.ui_state.show_histogram, "Spectrum");
 
-                let old_bin = self.ui_state.current_tof_bin;
-                let slider_response = ui.add(
-                    egui::Slider::new(&mut self.ui_state.current_tof_bin, 0..=(n_bins - 1))
-                        .text("TOF Bin"),
-                );
-                // Show current bin info
-                ui.label(format!(
-                    "Slice {}/{}",
-                    self.ui_state.current_tof_bin + 1,
-                    n_bins
-                ));
-                if slider_response.changed() || self.ui_state.current_tof_bin != old_bin {
-                    self.texture = None;
-                }
-            }
-        }
+        ui.add_enabled_ui(self.ui_state.show_histogram, |ui| {
+            ui.checkbox(&mut self.ui_state.log_plot, "Log scale");
+        });
+    }
 
-        // Regenerate texture if needed
+    /// Regenerate texture if needed.
+    pub(crate) fn ensure_texture(&mut self, ctx: &egui::Context) {
         let has_data = match self.ui_state.view_mode {
             ViewMode::Hits => self.hit_counts.is_some(),
             ViewMode::Neutrons => self.neutron_counts.is_some(),
@@ -175,43 +475,184 @@ impl RustpixApp {
             let img = self.generate_histogram();
             self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
         }
-
-        ui.toggle_value(&mut self.ui_state.show_histogram, "Show TOF Histogram");
     }
 
-    fn render_processing_controls(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Processing");
-        ui.add(
-            egui::DragValue::new(&mut self.tdc_frequency)
-                .speed(0.1)
-                .range(1.0..=120.0)
-                .prefix("TDC (Hz): "),
-        );
+    #[allow(clippy::too_many_lines)]
+    fn render_clustering_controls(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
 
-        egui::ComboBox::from_label("Algo")
-            .selected_text(self.algo_type.to_string())
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.algo_type, AlgorithmType::Grid, "Grid");
-                ui.selectable_value(&mut self.algo_type, AlgorithmType::Abs, "ABS");
-                ui.selectable_value(&mut self.algo_type, AlgorithmType::Dbscan, "DBSCAN");
-            });
+        // Algorithm selection
+        ui.label(form_label("Algorithm"));
+        ui.add_space(4.0);
 
-        ui.add(egui::Slider::new(&mut self.radius, 1.0..=50.0).text("Radius"));
-        ui.add(
-            egui::Slider::new(&mut self.temporal_window_ns, 10.0..=500.0).text("Time Window (ns)"),
-        );
-        ui.add(egui::Slider::new(&mut self.min_cluster_size, 1..=10).text("Min Cluster"));
+        ui.horizontal(|ui| {
+            let colors = ThemeColors::from_ui(ui);
+            egui::ComboBox::from_id_salt("algo_select")
+                .selected_text(self.algo_type.to_string())
+                .width(ui.available_width() - 40.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.algo_type,
+                        AlgorithmType::Abs,
+                        "ABS (Adaptive Box Search)",
+                    );
+                    ui.selectable_value(&mut self.algo_type, AlgorithmType::Dbscan, "DBSCAN");
+                    ui.selectable_value(&mut self.algo_type, AlgorithmType::Grid, "Grid");
+                });
 
-        if self.algo_type == AlgorithmType::Dbscan {
-            ui.add(egui::Slider::new(&mut self.dbscan_min_points, 1..=10).text("Min Points"));
+            // Settings button for advanced options
+            if ui
+                .add(
+                    egui::Button::new("⚙")
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, colors.border_light))
+                        .rounding(Rounding::same(4.0)),
+                )
+                .on_hover_text("Algorithm parameters")
+                .clicked()
+            {
+                self.ui_state.show_clustering_params = !self.ui_state.show_clustering_params;
+            }
+        });
+
+        // Advanced parameters (collapsible)
+        if self.ui_state.show_clustering_params {
+            ui.add_space(8.0);
+            egui::Frame::none()
+                .fill(colors.bg_header)
+                .stroke(Stroke::new(1.0, colors.border))
+                .rounding(Rounding::same(4.0))
+                .inner_margin(egui::Margin::same(12.0))
+                .show(ui, |ui| {
+                    // TDC Frequency
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("TDC Freq")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} Hz", self.tdc_frequency))
+                                    .size(10.0)
+                                    .color(colors.text_primary),
+                            );
+                        });
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut self.tdc_frequency, 1.0..=120.0).show_value(false),
+                    );
+
+                    ui.add_space(4.0);
+
+                    // Radius
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Radius")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} px", self.radius))
+                                    .size(10.0)
+                                    .color(colors.text_primary),
+                            );
+                        });
+                    });
+                    ui.add(egui::Slider::new(&mut self.radius, 1.0..=50.0).show_value(false));
+
+                    ui.add_space(4.0);
+
+                    // Time window
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Time window")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} ns", self.temporal_window_ns))
+                                    .size(10.0)
+                                    .color(colors.text_primary),
+                            );
+                        });
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut self.temporal_window_ns, 10.0..=500.0)
+                            .show_value(false),
+                    );
+
+                    ui.add_space(4.0);
+
+                    // Min cluster
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Min cluster")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new(format!("{}", self.min_cluster_size))
+                                    .size(10.0)
+                                    .color(colors.text_primary),
+                            );
+                        });
+                    });
+                    ui.add(egui::Slider::new(&mut self.min_cluster_size, 1..=10).show_value(false));
+
+                    // DBSCAN-specific
+                    if self.algo_type == AlgorithmType::Dbscan {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new("Min points")
+                                    .size(10.0)
+                                    .color(colors.text_muted),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let colors = ThemeColors::from_ui(ui);
+                                    ui.label(
+                                        egui::RichText::new(format!("{}", self.dbscan_min_points))
+                                            .size(10.0)
+                                            .color(colors.text_primary),
+                                    );
+                                },
+                            );
+                        });
+                        ui.add(
+                            egui::Slider::new(&mut self.dbscan_min_points, 1..=10)
+                                .show_value(false),
+                        );
+                    }
+                });
         }
 
+        ui.add_space(12.0);
+
+        // Run Clustering button
         let can_cluster = !self.processing.is_loading
             && !self.processing.is_processing
             && self.hit_batch.is_some();
 
         if ui
-            .add_enabled(can_cluster, egui::Button::new("Run Clustering"))
+            .add_enabled(
+                can_cluster,
+                primary_button("Run Clustering").min_size(egui::vec2(ui.available_width(), 0.0)),
+            )
             .clicked()
         {
             self.processing.reset_cancel();

@@ -1,5 +1,7 @@
 //! Colormap definitions and application logic.
 
+use eframe::egui::Color32;
+
 use crate::util::f32_to_u8;
 
 /// Available colormaps for histogram visualization.
@@ -68,5 +70,15 @@ impl Colormap {
                 [r, g, b, 255]
             }
         }
+    }
+
+    /// Get the color at a normalized value as `Color32`.
+    ///
+    /// # Arguments
+    /// * `val` - Normalized value between 0.0 and 1.0
+    #[must_use]
+    pub fn color_at(self, val: f32) -> Color32 {
+        let [r, g, b, a] = self.apply(val);
+        Color32::from_rgba_unmultiplied(r, g, b, a)
     }
 }
