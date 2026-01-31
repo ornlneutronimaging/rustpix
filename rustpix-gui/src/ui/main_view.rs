@@ -416,14 +416,7 @@ impl RustpixApp {
                                                 self.roi_state.end_drag();
                                             }
 
-                                            if let Some(bounds) = self
-                                                .roi_state
-                                                .edit_drag_bounds()
-                                                .or_else(|| self.roi_state.vertex_drag_bounds())
-                                                .or_else(|| self.roi_state.drag_bounds())
-                                            {
-                                                plot_ui.set_plot_bounds(bounds);
-                                            }
+                                            // Plot dragging is disabled during ROI interactions; no bounds reset needed.
                                         }
 
                                         if let Some(curr) = plot_ui.pointer_coordinate() {

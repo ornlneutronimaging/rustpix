@@ -52,7 +52,6 @@ pub struct RoiPolygonDraft {
 pub struct RoiDrag {
     pub roi_id: usize,
     pub last: PlotPoint,
-    pub bounds: PlotBounds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +71,6 @@ pub struct RoiEditDrag {
     pub roi_id: usize,
     pub handle: RoiHandle,
     pub last: PlotPoint,
-    pub bounds: PlotBounds,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +78,6 @@ pub struct RoiVertexDrag {
     pub roi_id: usize,
     pub index: usize,
     pub last: PlotPoint,
-    pub bounds: PlotBounds,
     pub previous: Vec<(f64, f64)>,
 }
 
@@ -324,10 +321,10 @@ impl RoiState {
     /// Begin dragging a ROI.
     pub fn start_drag(&mut self, roi_id: usize, start: PlotPoint, bounds: PlotBounds) {
         self.set_selected(Some(roi_id));
+        let _ = bounds;
         self.drag = Some(RoiDrag {
             roi_id,
             last: start,
-            bounds,
         });
     }
 
@@ -363,11 +360,6 @@ impl RoiState {
         self.edit_drag.is_some() || self.vertex_drag.is_some()
     }
 
-    /// Bounds captured at drag start (used to freeze pan).
-    pub fn drag_bounds(&self) -> Option<PlotBounds> {
-        self.drag.as_ref().map(|drag| drag.bounds)
-    }
-
     /// Start edit drag (resize handles).
     pub fn start_edit_drag(
         &mut self,
@@ -377,11 +369,11 @@ impl RoiState {
         bounds: PlotBounds,
     ) {
         self.set_edit_mode(roi_id, true);
+        let _ = bounds;
         self.edit_drag = Some(RoiEditDrag {
             roi_id,
             handle,
             last: start,
-            bounds,
         });
     }
 
@@ -407,11 +399,6 @@ impl RoiState {
         self.edit_drag = None;
     }
 
-    /// Bounds captured at edit drag start (used to freeze pan).
-    pub fn edit_drag_bounds(&self) -> Option<PlotBounds> {
-        self.edit_drag.as_ref().map(|drag| drag.bounds)
-    }
-
     /// Start vertex drag (polygon edit).
     pub fn start_vertex_drag(
         &mut self,
@@ -421,6 +408,7 @@ impl RoiState {
         bounds: PlotBounds,
     ) {
         self.set_edit_mode(roi_id, true);
+        let _ = bounds;
         let previous = self
             .rois
             .iter()
@@ -434,7 +422,6 @@ impl RoiState {
             roi_id,
             index,
             last: start,
-            bounds,
             previous,
         });
     }
@@ -464,11 +451,6 @@ impl RoiState {
             }
         }
         Ok(())
-    }
-
-    /// Bounds captured at vertex drag start (used to freeze pan).
-    pub fn vertex_drag_bounds(&self) -> Option<PlotBounds> {
-        self.vertex_drag.as_ref().map(|drag| drag.bounds)
     }
 
     /// Delete a polygon vertex by hit test.
