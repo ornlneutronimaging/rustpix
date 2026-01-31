@@ -654,9 +654,12 @@ impl RustpixApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let colors = ThemeColors::from_ui(ui);
                             ui.label(
-                                egui::RichText::new(format!("{:.1}×", self.super_resolution_factor))
-                                    .size(10.0)
-                                    .color(colors.text_primary),
+                                egui::RichText::new(format!(
+                                    "{:.1}×",
+                                    self.super_resolution_factor
+                                ))
+                                .size(10.0)
+                                .color(colors.text_primary),
                             );
                         });
                     });
@@ -704,8 +707,7 @@ impl RustpixApp {
                             ui.horizontal(|ui| {
                                 ui.label("TOF bins");
                                 ui.add(
-                                    egui::DragValue::new(&mut self.hit_tof_bins)
-                                        .range(10..=2000),
+                                    egui::DragValue::new(&mut self.hit_tof_bins).range(10..=2000),
                                 );
                             });
 

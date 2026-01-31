@@ -22,18 +22,13 @@ impl fmt::Display for ViewMode {
 }
 
 /// X-axis mode for the spectrum plot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpectrumXAxis {
     /// Time-of-flight in milliseconds.
+    #[default]
     ToFMs,
     /// Neutron energy in eV.
     EnergyEv,
-}
-
-impl Default for SpectrumXAxis {
-    fn default() -> Self {
-        Self::ToFMs
-    }
 }
 
 impl fmt::Display for SpectrumXAxis {

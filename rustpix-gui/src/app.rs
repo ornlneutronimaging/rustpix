@@ -15,7 +15,7 @@ use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
 use crate::state::{ProcessingState, Statistics, UiState, ViewMode};
-use crate::viewer::{generate_histogram_image, Colormap};
+use crate::viewer::{generate_histogram_image, Colormap, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 
@@ -68,6 +68,8 @@ pub struct RustpixApp {
     pub(crate) super_resolution_factor: f64,
     /// UI display state.
     pub(crate) ui_state: UiState,
+    /// ROI session state.
+    pub(crate) roi_state: RoiState,
 
     /// Message receiver for async operations.
     pub(crate) rx: Receiver<AppMessage>,
@@ -113,6 +115,7 @@ impl Default for RustpixApp {
             neutron_tof_bins: 200,
             super_resolution_factor: 1.0,
             ui_state: UiState::default(),
+            roi_state: RoiState::default(),
             rx,
             tx,
 
@@ -153,6 +156,7 @@ impl RustpixApp {
         self.neutron_counts = None;
         self.neutron_spectrum = None;
         self.ui_state.view_mode = ViewMode::Hits;
+        self.roi_state.clear();
         self.texture = None;
         self.statistics.clear();
     }

@@ -14,9 +14,29 @@ use crate::state::{SpectrumXAxis, ViewMode};
 use crate::util::{
     energy_ev_to_tof_ms, f64_to_usize_bounded, tof_ms_to_energy_ev, u64_to_f64, usize_to_f64,
 };
+use crate::viewer::RoiSelectionMode;
 
 /// Unique ID for the main histogram plot (used for state persistence).
 const HISTOGRAM_PLOT_ID: &str = "histogram_plot";
+
+struct SpectrumExportConfig {
+    axis: SpectrumXAxis,
+    flight_path_m: f64,
+    tof_offset_ns: f64,
+    log_x: bool,
+    log_y: bool,
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn round_to_i32_clamped(value: f64) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let clamped = value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
+    clamped as i32
+}
 
 impl RustpixApp {
     /// Render the central panel with histogram, slicer, and spectrum.
@@ -37,6 +57,11 @@ impl RustpixApp {
         let n_bins = self.n_tof_bins();
         let needs_plot_reset = self.ui_state.needs_plot_reset;
         let show_grid = self.ui_state.show_grid;
+        let wants_keyboard = ctx.wants_keyboard_input();
+        let delete_roi = ctx.input(|i| {
+            !wants_keyboard
+                && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+        });
 
         // Get data bounds based on view mode
         // TODO: Neutron mode may have different bounds due to super-resolution
@@ -50,6 +75,10 @@ impl RustpixApp {
         let mut new_tof_bin: Option<usize> = None;
         // Track if user clicked reset view button
         let mut reset_view_clicked = false;
+
+        if delete_roi {
+            self.roi_state.delete_selected();
+        }
 
         egui::CentralPanel::default()
             .frame(
@@ -80,22 +109,25 @@ impl RustpixApp {
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 let colors = ThemeColors::from_ui(ui);
-                                if let Some(tex) = &self.texture {
+                                let texture_id = self.texture.as_ref().map(egui::TextureHandle::id);
+                                if let Some(tex_id) = texture_id {
                                     // Toolbar row above the plot
                                     ui.horizontal(|ui| {
+                                        self.render_roi_toolbar(ui);
+
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 let colors = ThemeColors::from_ui(ui);
                                                 // Grid toggle
                                                 let grid_btn = egui::Button::new(
-                                                    egui::RichText::new("▦ Grid")
-                                                        .size(10.0)
-                                                        .color(if self.ui_state.show_grid {
+                                                    egui::RichText::new("▦ Grid").size(10.0).color(
+                                                        if self.ui_state.show_grid {
                                                             Color32::WHITE
                                                         } else {
                                                             colors.text_muted
-                                                        }),
+                                                        },
+                                                    ),
                                                 )
                                                 .fill(if self.ui_state.show_grid {
                                                     accent::BLUE
@@ -110,7 +142,8 @@ impl RustpixApp {
                                                     .on_hover_text("Toggle grid")
                                                     .clicked()
                                                 {
-                                                    self.ui_state.show_grid = !self.ui_state.show_grid;
+                                                    self.ui_state.show_grid =
+                                                        !self.ui_state.show_grid;
                                                 }
 
                                                 ui.add_space(8.0);
@@ -127,7 +160,9 @@ impl RustpixApp {
 
                                                 if ui
                                                     .add(reset_btn)
-                                                    .on_hover_text("Reset view to fit data (or double-click)")
+                                                    .on_hover_text(
+                                                        "Reset view to fit data (or double-click)",
+                                                    )
                                                     .clicked()
                                                 {
                                                     reset_view_clicked = true;
@@ -144,6 +179,11 @@ impl RustpixApp {
                                     // Determine if we need to reset the plot view
                                     let should_reset = needs_plot_reset || reset_view_clicked;
                                     let plot_rect = ui.available_rect_before_wrap();
+                                    let shift_down = ctx.input(|i| i.modifiers.shift);
+                                    let roi_drag_active = self.roi_state.is_dragging();
+                                    let roi_drawing_active = self.roi_state.draft.is_some();
+                                    let disable_plot_drag =
+                                        shift_down || roi_drag_active || roi_drawing_active;
 
                                     // Build the base plot
                                     let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
@@ -155,76 +195,145 @@ impl RustpixApp {
                                         .include_y(data_size)
                                         .show_grid(Vec2b::new(show_grid, show_grid))
                                         .x_axis_label("X (pixels)")
-                                        .y_axis_label("Y (pixels)");
+                                        .y_axis_label("Y (pixels)")
+                                        .allow_drag(!disable_plot_drag);
 
                                     // Apply reset if needed
                                     if should_reset {
                                         plot = plot.reset();
                                     }
 
+                                    let roi_mode = self.roi_state.mode;
+                                    let min_roi_size = 2.0;
                                     plot.show(ui, |plot_ui| {
-                                            // Set explicit bounds on reset or double-click
-                                            if should_reset || plot_ui.response().double_clicked()
-                                            {
-                                                let pad = (data_size * 0.05).max(16.0);
+                                        // Set explicit bounds on reset or double-click
+                                        if should_reset || plot_ui.response().double_clicked() {
+                                            let pad = (data_size * 0.05).max(16.0);
 
-                                                // Fit the full detector + padding to the current plot aspect.
-                                                let plot_w = plot_rect.width().max(1.0) as f64;
-                                                let plot_h = plot_rect.height().max(1.0) as f64;
-                                                let available_aspect = plot_w / plot_h;
-                                                let data_span = data_size + pad * 2.0;
-                                                let mut x_half = data_span / 2.0;
-                                                let mut y_half = data_span / 2.0;
+                                            // Fit the full detector + padding to the current plot aspect.
+                                            let plot_w = f64::from(plot_rect.width().max(1.0));
+                                            let plot_h = f64::from(plot_rect.height().max(1.0));
+                                            let available_aspect = plot_w / plot_h;
+                                            let data_span = data_size + pad * 2.0;
+                                            let mut x_half = data_span / 2.0;
+                                            let mut y_half = data_span / 2.0;
 
-                                                if available_aspect >= 1.0 {
-                                                    x_half = y_half * available_aspect;
-                                                } else {
-                                                    y_half = x_half / available_aspect;
-                                                }
-
-                                                let center = data_size / 2.0;
-                                                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                                    [center - x_half, center - y_half],
-                                                    [center + x_half, center + y_half],
-                                                ));
+                                            if available_aspect >= 1.0 {
+                                                x_half = y_half * available_aspect;
+                                            } else {
+                                                y_half = x_half / available_aspect;
                                             }
-                                            plot_ui.image(PlotImage::new(
-                                                tex,
-                                                PlotPoint::new(half, half),
-                                                [data_size_f32, data_size_f32],
-                                            ));
 
-                                            if let Some(curr) = plot_ui.pointer_coordinate() {
-                                                let x = curr.x;
-                                                let y = curr.y;
-                                                if x >= 0.0
-                                                    && y >= 0.0
-                                                    && x < data_size
-                                                    && y < data_size
-                                                {
-                                                    #[allow(
-                                                        clippy::cast_possible_truncation,
-                                                        clippy::cast_sign_loss
-                                                    )]
-                                                    let bound = data_size as usize;
-                                                    let (Some(xi), Some(yi)) = (
-                                                        f64_to_usize_bounded(x, bound),
-                                                        f64_to_usize_bounded(y, bound),
-                                                    ) else {
-                                                        self.cursor_info = None;
-                                                        return;
-                                                    };
-                                                    let count = counts_for_cursor
-                                                        .as_ref()
-                                                        .map_or(0, |c| c[yi * 512 + xi]);
-                                                    self.cursor_info = Some((xi, yi, count));
-                                                } else {
-                                                    self.cursor_info = None;
+                                            let center = data_size / 2.0;
+                                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                                                [center - x_half, center - y_half],
+                                                [center + x_half, center + y_half],
+                                            ));
+                                        }
+                                        plot_ui.image(PlotImage::new(
+                                            tex_id,
+                                            PlotPoint::new(half, half),
+                                            [data_size_f32, data_size_f32],
+                                        ));
+
+                                        let clamp_point = |point: PlotPoint| {
+                                            PlotPoint::new(
+                                                point.x.clamp(0.0, data_size),
+                                                point.y.clamp(0.0, data_size),
+                                            )
+                                        };
+
+                                        let response = plot_ui.response().clone();
+                                        let pointer_pos =
+                                            plot_ui.pointer_coordinate().map(clamp_point);
+
+                                        let drawing_active = roi_mode
+                                            == RoiSelectionMode::Rectangle
+                                            && (shift_down || self.roi_state.draft.is_some());
+                                        if drawing_active {
+                                            if response.drag_started() {
+                                                if let Some(pos) = pointer_pos {
+                                                    self.roi_state.begin_rectangle(pos);
                                                 }
+                                            }
+                                            if response.dragged() {
+                                                if let Some(pos) = pointer_pos {
+                                                    self.roi_state.update_rectangle(pos);
+                                                }
+                                            }
+                                            if response.drag_stopped() {
+                                                self.roi_state.commit_rectangle(min_roi_size);
+                                            }
+                                        } else {
+                                            if response.drag_started() {
+                                                if let Some(pos) = pointer_pos {
+                                                    if let Some(hit_id) =
+                                                        self.roi_state.hit_test(pos)
+                                                    {
+                                                        let bounds = plot_ui.plot_bounds();
+                                                        self.roi_state
+                                                            .start_drag(hit_id, pos, bounds);
+                                                    }
+                                                }
+                                            }
+                                            if response.dragged() {
+                                                if let Some(pos) = pointer_pos {
+                                                    self.roi_state.update_drag(pos);
+                                                }
+                                            }
+                                            if response.drag_stopped() {
+                                                self.roi_state.end_drag();
+                                            }
+
+                                            if let Some(bounds) = self.roi_state.drag_bounds() {
+                                                plot_ui.set_plot_bounds(bounds);
+                                            }
+                                        }
+
+                                        if let Some(curr) = plot_ui.pointer_coordinate() {
+                                            let x = curr.x;
+                                            let y = curr.y;
+                                            if x >= 0.0
+                                                && y >= 0.0
+                                                && x < data_size
+                                                && y < data_size
+                                            {
+                                                #[allow(
+                                                    clippy::cast_possible_truncation,
+                                                    clippy::cast_sign_loss
+                                                )]
+                                                let bound = data_size as usize;
+                                                let (Some(xi), Some(yi)) = (
+                                                    f64_to_usize_bounded(x, bound),
+                                                    f64_to_usize_bounded(y, bound),
+                                                ) else {
+                                                    self.cursor_info = None;
+                                                    return;
+                                                };
+                                                let count = counts_for_cursor
+                                                    .as_ref()
+                                                    .map_or(0, |c| c[yi * 512 + xi]);
+                                                self.cursor_info = Some((xi, yi, count));
                                             } else {
                                                 self.cursor_info = None;
                                             }
-                                        });
+                                        } else {
+                                            self.cursor_info = None;
+                                        }
+
+                                        if response.clicked()
+                                            && self.roi_state.draft.is_none()
+                                            && !shift_down
+                                            && !self.roi_state.is_dragging()
+                                        {
+                                            if let Some(pos) = pointer_pos {
+                                                self.roi_state.select_at(pos);
+                                            }
+                                        }
+
+                                        self.roi_state.draw(plot_ui);
+                                        self.roi_state.draw_draft(plot_ui);
+                                    });
                                 } else {
                                     // "No Data" placeholder - use theme-aware background
                                     let no_data_bg =
@@ -276,10 +385,10 @@ impl RustpixApp {
 
                     // Draw frame manually at full width.
                     ui.painter().rect_filled(rect, 4.0, colors.bg_panel);
-                    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.0, colors.border));
+                    ui.painter()
+                        .rect_stroke(rect, 4.0, Stroke::new(1.0, colors.border));
 
-                    let inner_rect =
-                        rect.shrink2(egui::vec2(margin.left, margin.top));
+                    let inner_rect = rect.shrink2(egui::vec2(margin.left, margin.top));
                     let mut slicer_ui = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(inner_rect)
@@ -413,6 +522,60 @@ impl RustpixApp {
         });
     }
 
+    /// Render ROI tool group controls.
+    fn render_roi_toolbar(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let mode_icon = match self.roi_state.mode {
+            RoiSelectionMode::Rectangle => "▭",
+            RoiSelectionMode::Polygon => "⬠",
+        };
+
+        egui::Frame::none()
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0))
+            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("roi_selection_mode")
+                        .selected_text(egui::RichText::new(mode_icon).size(11.0))
+                        .width(36.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.roi_state.mode,
+                                RoiSelectionMode::Rectangle,
+                                "▭ Rectangle",
+                            );
+                            ui.add_enabled(false, egui::SelectableLabel::new(false, "⬠ Polygon"))
+                                .on_hover_text("Polygon selection (coming soon)");
+                        });
+
+                    let clear_btn = egui::Button::new(
+                        egui::RichText::new("✕").size(11.0).color(colors.text_muted),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0));
+                    if ui.add(clear_btn).on_hover_text("Clear all ROIs").clicked() {
+                        self.roi_state.clear();
+                    }
+
+                    ui.menu_button(
+                        egui::RichText::new("⚙").size(11.0).color(colors.text_muted),
+                        |ui| {
+                            ui.checkbox(
+                                &mut self.roi_state.debounce_updates,
+                                "Debounce spectrum updates",
+                            );
+                        },
+                    )
+                    .response
+                    .on_hover_text("ROI settings");
+                });
+            });
+
+        ui.add_space(8.0);
+    }
+
     /// Render the spectrum panel with toolbar.
     #[allow(
         clippy::too_many_arguments,
@@ -437,7 +600,7 @@ impl RustpixApp {
             self.ui_state.spectrum_x_axis = SpectrumXAxis::ToFMs;
             spectrum_reset_clicked = true;
         }
-        let has_spectrum = spectrum.as_ref().map_or(false, |s| !s.is_empty());
+        let has_spectrum = spectrum.as_ref().is_some_and(|s| !s.is_empty());
         let mut export_png_clicked = false;
         let mut export_csv_clicked = false;
 
@@ -509,15 +672,13 @@ impl RustpixApp {
                     ui.add_space(8.0);
 
                     // Log axis toggles
-                    let logx_btn = egui::Button::new(
-                        egui::RichText::new("logX")
-                            .size(10.0)
-                            .color(if self.ui_state.log_x {
-                                Color32::WHITE
-                            } else {
-                                colors.text_dim
-                            }),
-                    )
+                    let logx_btn = egui::Button::new(egui::RichText::new("logX").size(10.0).color(
+                        if self.ui_state.log_x {
+                            Color32::WHITE
+                        } else {
+                            colors.text_dim
+                        },
+                    ))
                     .fill(if self.ui_state.log_x {
                         accent::BLUE
                     } else {
@@ -530,15 +691,13 @@ impl RustpixApp {
                         spectrum_reset_clicked = true;
                     }
 
-                    let logy_btn = egui::Button::new(
-                        egui::RichText::new("logY")
-                            .size(10.0)
-                            .color(if self.ui_state.log_y {
-                                Color32::WHITE
-                            } else {
-                                colors.text_dim
-                            }),
-                    )
+                    let logy_btn = egui::Button::new(egui::RichText::new("logY").size(10.0).color(
+                        if self.ui_state.log_y {
+                            Color32::WHITE
+                        } else {
+                            colors.text_dim
+                        },
+                    ))
                     .fill(if self.ui_state.log_y {
                         accent::BLUE
                     } else {
@@ -552,7 +711,7 @@ impl RustpixApp {
                     }
 
                     ui.add_space(8.0);
-                    self.toolbar_divider(ui);
+                    Self::toolbar_divider(ui);
                     ui.add_space(8.0);
 
                     // Export buttons
@@ -593,19 +752,8 @@ impl RustpixApp {
                         // Legend
                         ui.horizontal(|ui| {
                             let colors = ThemeColors::from_ui(ui);
-                            // ROI 1 legend (placeholder)
-                            ui.add(self.legend_box(accent::BLUE));
-                            ui.label(
-                                egui::RichText::new("ROI 1")
-                                    .size(10.0)
-                                    .color(colors.text_dim),
-                            )
-                            .on_hover_text("ROI selection not yet implemented");
-
-                            ui.add_space(8.0);
-
                             // Full legend
-                            ui.add(self.legend_box(colors.text_muted));
+                            ui.add(Self::legend_box(colors.text_muted));
                             ui.label(
                                 egui::RichText::new("Full")
                                     .size(10.0)
@@ -692,7 +840,8 @@ impl RustpixApp {
                 points.push([x, y]);
             }
 
-            if !x_min.is_finite() || !x_max.is_finite() || x_min == x_max {
+            let x_span = x_max - x_min;
+            if !x_min.is_finite() || !x_max.is_finite() || x_span.abs() <= f64::EPSILON {
                 x_min = 0.0;
                 x_max = 1.0;
             }
@@ -718,11 +867,7 @@ impl RustpixApp {
                     }
                 }
             };
-            let y_label = if log_y {
-                "log10(Counts)"
-            } else {
-                "Counts"
-            };
+            let y_label = if log_y { "log10(Counts)" } else { "Counts" };
 
             let line_color = colors.text_muted;
 
@@ -742,78 +887,79 @@ impl RustpixApp {
 
             let points = points;
             let plot_response = spectrum_plot.show(ui, |plot_ui| {
-                    // Reset on button click or double-click - show ALL data
-                    if spectrum_reset_clicked || plot_ui.response().double_clicked() {
-                        plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                            [x_min, 0.0],
-                            [x_max, y_max],
-                        ));
-                    }
+                // Reset on button click or double-click - show ALL data
+                if spectrum_reset_clicked || plot_ui.response().double_clicked() {
+                    plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, 0.0], [x_max, y_max]));
+                }
 
-                    // Full spectrum as line
-                    plot_ui.line(Line::new(PlotPoints::new(points)).color(line_color).name("Full"));
+                // Full spectrum as line
+                plot_ui.line(
+                    Line::new(PlotPoints::new(points))
+                        .color(line_color)
+                        .name("Full"),
+                );
 
-                    // Slice marker
-                    if slicer_enabled && current_tof_bin < spec_bins {
-                        let slice_tof_ms = usize_to_f64(current_tof_bin) * bin_width_ms;
-                        let slice_x = match axis {
-                            SpectrumXAxis::ToFMs => Some(slice_tof_ms),
-                            SpectrumXAxis::EnergyEv => {
-                                tof_ms_to_energy_ev(slice_tof_ms, flight_path_m, tof_offset_ns)
+                // Slice marker
+                if slicer_enabled && current_tof_bin < spec_bins {
+                    let slice_tof_ms = usize_to_f64(current_tof_bin) * bin_width_ms;
+                    let slice_x = match axis {
+                        SpectrumXAxis::ToFMs => Some(slice_tof_ms),
+                        SpectrumXAxis::EnergyEv => {
+                            tof_ms_to_energy_ev(slice_tof_ms, flight_path_m, tof_offset_ns)
+                        }
+                    };
+
+                    if let Some(mut slice_x) = slice_x {
+                        if log_x {
+                            if slice_x > 0.0 {
+                                slice_x = slice_x.log10();
+                            } else {
+                                slice_x = x_min;
                             }
-                        };
+                        }
+                        plot_ui.vline(
+                            VLine::new(slice_x)
+                                .color(accent::RED)
+                                .width(1.0)
+                                .style(egui_plot::LineStyle::Dashed { length: 4.0 })
+                                .name(format!("Slice {}", current_tof_bin + 1)),
+                        );
+                    }
+                }
 
-                        if let Some(mut slice_x) = slice_x {
+                // Handle drag to move slice marker
+                if slicer_enabled && spec_bins > 0 {
+                    let drag_delta = plot_ui.pointer_coordinate_drag_delta();
+                    if drag_delta.x.abs() > 0.0 {
+                        if let Some(coord) = plot_ui.pointer_coordinate() {
+                            let mut x_axis = coord.x;
                             if log_x {
-                                if slice_x > 0.0 {
-                                    slice_x = slice_x.log10();
-                                } else {
-                                    slice_x = x_min;
-                                }
+                                x_axis = 10_f64.powf(x_axis);
                             }
-                            plot_ui.vline(
-                                VLine::new(slice_x)
-                                    .color(accent::RED)
-                                    .width(1.0)
-                                    .style(egui_plot::LineStyle::Dashed { length: 4.0 })
-                                    .name(format!("Slice {}", current_tof_bin + 1)),
-                            );
-                        }
-                    }
-
-                    // Handle drag to move slice marker
-                    if slicer_enabled && spec_bins > 0 {
-                        let drag_delta = plot_ui.pointer_coordinate_drag_delta();
-                        if drag_delta.x.abs() > 0.0 {
-                            if let Some(coord) = plot_ui.pointer_coordinate() {
-                                let mut x_axis = coord.x;
-                                if log_x {
-                                    x_axis = 10_f64.powf(x_axis);
+                            let x_ms = match axis {
+                                SpectrumXAxis::ToFMs => Some(x_axis),
+                                SpectrumXAxis::EnergyEv => {
+                                    energy_ev_to_tof_ms(x_axis, flight_path_m, tof_offset_ns)
                                 }
-                                let x_ms = match axis {
-                                    SpectrumXAxis::ToFMs => Some(x_axis),
-                                    SpectrumXAxis::EnergyEv => {
-                                        energy_ev_to_tof_ms(x_axis, flight_path_m, tof_offset_ns)
-                                    }
-                                };
-                                let Some(x_ms) = x_ms else {
-                                    return;
-                                };
-                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                                let bin = if x_ms <= 0.0 {
-                                    0
-                                } else if x_ms >= max_ms {
-                                    spec_bins - 1
-                                } else {
-                                    ((x_ms / bin_width_ms) as usize).min(spec_bins - 1)
-                                };
-                                if bin != current_tof_bin {
-                                    *new_tof_bin = Some(bin);
-                                }
+                            };
+                            let Some(x_ms) = x_ms else {
+                                return;
+                            };
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let bin = if x_ms <= 0.0 {
+                                0
+                            } else if x_ms >= max_ms {
+                                spec_bins - 1
+                            } else {
+                                ((x_ms / bin_width_ms) as usize).min(spec_bins - 1)
+                            };
+                            if bin != current_tof_bin {
+                                *new_tof_bin = Some(bin);
                             }
                         }
                     }
-                });
+                }
+            });
 
             // Click to set slice position
             if slicer_enabled && spec_bins > 0 && plot_response.response.clicked() {
@@ -852,23 +998,26 @@ impl RustpixApp {
             }
 
             if export_csv_clicked {
-                if let Err(err) =
-                    self.export_spectrum_csv(full, bin_width_ms, axis, flight_path_m, tof_offset_ns)
-                {
-                    log::error!("Failed to export spectrum CSV: {err}");
-                }
-            }
-
-            if export_png_clicked {
-                if let Err(err) = self.export_spectrum_png(
+                if let Err(err) = Self::export_spectrum_csv(
                     full,
                     bin_width_ms,
                     axis,
                     flight_path_m,
                     tof_offset_ns,
+                ) {
+                    log::error!("Failed to export spectrum CSV: {err}");
+                }
+            }
+
+            if export_png_clicked {
+                let export_config = SpectrumExportConfig {
+                    axis,
+                    flight_path_m,
+                    tof_offset_ns,
                     log_x,
                     log_y,
-                ) {
+                };
+                if let Err(err) = Self::export_spectrum_png(full, bin_width_ms, &export_config) {
                     log::error!("Failed to export spectrum PNG: {err}");
                 }
             }
@@ -900,8 +1049,7 @@ impl RustpixApp {
     }
 
     /// Render a toolbar divider.
-    #[allow(clippy::unused_self)]
-    fn toolbar_divider(&self, ui: &mut egui::Ui) {
+    fn toolbar_divider(ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
         let rect = ui.allocate_space(egui::vec2(1.0, 20.0));
         ui.painter().vline(
@@ -912,8 +1060,7 @@ impl RustpixApp {
     }
 
     /// Create a legend box widget.
-    #[allow(clippy::unused_self)]
-    fn legend_box(&self, color: Color32) -> impl egui::Widget + '_ {
+    fn legend_box(color: Color32) -> impl egui::Widget {
         move |ui: &mut egui::Ui| {
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
@@ -923,7 +1070,6 @@ impl RustpixApp {
     }
 
     fn export_spectrum_csv(
-        &self,
         spectrum: &[u64],
         bin_width_ms: f64,
         axis: SpectrumXAxis,
@@ -947,8 +1093,7 @@ impl RustpixApp {
                     writeln!(file, "{tof_ms:.6},{count}")?;
                 }
                 SpectrumXAxis::EnergyEv => {
-                    let Some(energy) =
-                        tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
+                    let Some(energy) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
                     else {
                         continue;
                     };
@@ -961,22 +1106,26 @@ impl RustpixApp {
     }
 
     fn export_spectrum_png(
-        &self,
         spectrum: &[u64],
         bin_width_ms: f64,
-        axis: SpectrumXAxis,
-        flight_path_m: f64,
-        tof_offset_ns: f64,
-        log_x: bool,
-        log_y: bool,
+        export: &SpectrumExportConfig,
     ) -> anyhow::Result<()> {
         let Some(path) = FileDialog::new().set_file_name("spectrum.png").save_file() else {
             return Ok(());
         };
 
+        let axis = export.axis;
+        let flight_path_m = export.flight_path_m;
+        let tof_offset_ns = export.tof_offset_ns;
+        let log_x = export.log_x;
+        let log_y = export.log_y;
+
         let width: u32 = 800;
         let height: u32 = 240;
         let pad: i32 = 24;
+        let width_i32 = i32::try_from(width).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(height).unwrap_or(i32::MAX);
+        let pad_f64 = f64::from(pad);
         let bg = Rgba([0x0d, 0x0d, 0x0d, 0xff]);
         let line = Rgba([0xb8, 0xb8, 0xb8, 0xff]);
         let axis_color = Rgba([0x33, 0x33, 0x33, 0xff]);
@@ -994,8 +1143,7 @@ impl RustpixApp {
             let mut x = match axis {
                 SpectrumXAxis::ToFMs => tof_ms,
                 SpectrumXAxis::EnergyEv => {
-                    let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
-                    else {
+                    let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns) else {
                         continue;
                     };
                     e
@@ -1025,7 +1173,8 @@ impl RustpixApp {
             points.push((x, y));
         }
 
-        if !x_min.is_finite() || !x_max.is_finite() || x_min == x_max {
+        let x_span = x_max - x_min;
+        if !x_min.is_finite() || !x_max.is_finite() || x_span.abs() <= f64::EPSILON {
             x_min = 0.0;
             x_max = 1.0;
         }
@@ -1035,8 +1184,8 @@ impl RustpixApp {
             y_max *= 1.05;
         }
 
-        let plot_w = (width as i32 - pad * 2).max(1) as f64;
-        let plot_h = (height as i32 - pad * 2).max(1) as f64;
+        let plot_w = f64::from((width_i32 - pad * 2).max(1));
+        let plot_h = f64::from((height_i32 - pad * 2).max(1));
         let x_scale = plot_w / (x_max - x_min).max(1e-9);
         let y_scale = plot_h / y_max.max(1e-9);
 
@@ -1044,23 +1193,23 @@ impl RustpixApp {
         Self::draw_line(
             &mut img,
             pad,
-            height as i32 - pad,
-            width as i32 - pad,
-            height as i32 - pad,
+            height_i32 - pad,
+            width_i32 - pad,
+            height_i32 - pad,
             axis_color,
         );
-        Self::draw_line(&mut img, pad, pad, pad, height as i32 - pad, axis_color);
+        Self::draw_line(&mut img, pad, pad, pad, height_i32 - pad, axis_color);
 
         let mut prev: Option<(i32, i32)> = None;
         for (x, y) in points {
-            let px = pad as f64 + (x - x_min) * x_scale;
-            let py = height as f64 - pad as f64 - y * y_scale;
-            let (px_i, py_i) = (px.round() as i32, py.round() as i32);
+            let px = pad_f64 + (x - x_min) * x_scale;
+            let py = f64::from(height_i32) - pad_f64 - y * y_scale;
+            let pixel = (round_to_i32_clamped(px), round_to_i32_clamped(py));
 
             if let Some((prev_x, prev_y)) = prev {
-                Self::draw_line(&mut img, prev_x, prev_y, px_i, py_i, line);
+                Self::draw_line(&mut img, prev_x, prev_y, pixel.0, pixel.1, line);
             }
-            prev = Some((px_i, py_i));
+            prev = Some(pixel);
         }
 
         img.save(path)?;
@@ -1069,6 +1218,8 @@ impl RustpixApp {
 
     fn draw_line(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgba<u8>) {
         let (mut x0, mut y0, x1, y1) = (x0, y0, x1, y1);
+        let width_i32 = i32::try_from(img.width()).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(img.height()).unwrap_or(i32::MAX);
         let dx = (x1 - x0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
         let dy = -(y1 - y0).abs();
@@ -1076,8 +1227,10 @@ impl RustpixApp {
         let mut err = dx + dy;
 
         loop {
-            if x0 >= 0 && y0 >= 0 && x0 < img.width() as i32 && y0 < img.height() as i32 {
-                img.put_pixel(x0 as u32, y0 as u32, color);
+            if x0 >= 0 && y0 >= 0 && x0 < width_i32 && y0 < height_i32 {
+                if let (Ok(xu), Ok(yu)) = (u32::try_from(x0), u32::try_from(y0)) {
+                    img.put_pixel(xu, yu, color);
+                }
             }
             if x0 == x1 && y0 == y1 {
                 break;

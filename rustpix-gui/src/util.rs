@@ -101,13 +101,13 @@ pub fn tof_us_to_energy_ev(tof_us: f64, flight_path_m: f64, tof_offset_ns: f64) 
     if !tof_us.is_finite() || !flight_path_m.is_finite() || flight_path_m <= 0.0 {
         return None;
     }
-    let tof_offset_us = tof_offset_ns / 1000.0;
-    let t_us = tof_us - tof_offset_us;
+    let offset_us = tof_offset_ns / 1000.0;
+    let t_us = tof_us - offset_us;
     if t_us <= 0.0 {
         return None;
     }
-    let t_s = t_us * 1e-6;
-    let v = flight_path_m / t_s;
+    let time_seconds = t_us * 1e-6;
+    let v = flight_path_m / time_seconds;
     let e_j = 0.5 * NEUTRON_MASS_KG * v * v;
     Some(e_j / EV_J)
 }
@@ -117,13 +117,17 @@ pub fn tof_us_to_energy_ev(tof_us: f64, flight_path_m: f64, tof_offset_ns: f64) 
 /// Returns `None` if the input is invalid or results in non-physical values.
 #[must_use]
 pub fn energy_ev_to_tof_us(energy_ev: f64, flight_path_m: f64, tof_offset_ns: f64) -> Option<f64> {
-    if !energy_ev.is_finite() || energy_ev <= 0.0 || !flight_path_m.is_finite() || flight_path_m <= 0.0 {
+    if !energy_ev.is_finite()
+        || energy_ev <= 0.0
+        || !flight_path_m.is_finite()
+        || flight_path_m <= 0.0
+    {
         return None;
     }
     let e_j = energy_ev * EV_J;
-    let t_s = flight_path_m * (NEUTRON_MASS_KG / (2.0 * e_j)).sqrt();
-    let tof_offset_us = tof_offset_ns / 1000.0;
-    Some(t_s * 1e6 + tof_offset_us)
+    let time_seconds = flight_path_m * (NEUTRON_MASS_KG / (2.0 * e_j)).sqrt();
+    let offset_us = tof_offset_ns / 1000.0;
+    Some(time_seconds * 1e6 + offset_us)
 }
 
 /// Convert TOF (ms) to neutron energy (eV).
