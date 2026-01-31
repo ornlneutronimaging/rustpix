@@ -1,7 +1,9 @@
 //! ROI data structures and rendering helpers.
 
 use eframe::egui::{Align2, Color32, Stroke};
-use egui_plot::{PlotBounds, PlotPoint, PlotUi, Polygon, Text};
+use egui_plot::{
+    Line, MarkerShape, PlotBounds, PlotPoint, PlotPoints, PlotUi, Points, Polygon, Text,
+};
 
 /// ROI selection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +43,12 @@ pub struct RoiDraft {
 }
 
 #[derive(Debug, Clone)]
+pub struct RoiPolygonDraft {
+    pub vertices: Vec<(f64, f64)>,
+    pub hover: Option<PlotPoint>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RoiDrag {
     pub roi_id: usize,
     pub last: PlotPoint,
@@ -67,15 +75,25 @@ pub struct RoiEditDrag {
     pub bounds: PlotBounds,
 }
 
+#[derive(Debug, Clone)]
+pub struct RoiVertexDrag {
+    pub roi_id: usize,
+    pub index: usize,
+    pub last: PlotPoint,
+    pub bounds: PlotBounds,
+}
+
 /// ROI session state.
 #[derive(Debug)]
 pub struct RoiState {
     pub mode: RoiSelectionMode,
     pub rois: Vec<Roi>,
     pub draft: Option<RoiDraft>,
+    pub polygon_draft: Option<RoiPolygonDraft>,
     pub debounce_updates: bool,
     drag: Option<RoiDrag>,
     edit_drag: Option<RoiEditDrag>,
+    vertex_drag: Option<RoiVertexDrag>,
     context_menu: Option<usize>,
     next_id: usize,
 }
@@ -86,9 +104,11 @@ impl Default for RoiState {
             mode: RoiSelectionMode::default(),
             rois: Vec::new(),
             draft: None,
+            polygon_draft: None,
             debounce_updates: false,
             drag: None,
             edit_drag: None,
+            vertex_drag: None,
             context_menu: None,
             next_id: 1,
         }
@@ -100,8 +120,10 @@ impl RoiState {
     pub fn clear(&mut self) {
         self.rois.clear();
         self.draft = None;
+        self.polygon_draft = None;
         self.drag = None;
         self.edit_drag = None;
+        self.vertex_drag = None;
         self.context_menu = None;
         self.next_id = 1;
     }
@@ -113,8 +135,10 @@ impl RoiState {
         };
         self.rois.retain(|roi| roi.id != selected_id);
         self.draft = None;
+        self.polygon_draft = None;
         self.drag = None;
         self.edit_drag = None;
+        self.vertex_drag = None;
         self.context_menu = None;
         true
     }
@@ -127,8 +151,10 @@ impl RoiState {
             return false;
         }
         self.draft = None;
+        self.polygon_draft = None;
         self.drag = None;
         self.edit_drag = None;
+        self.vertex_drag = None;
         self.context_menu = None;
         true
     }
@@ -151,6 +177,13 @@ impl RoiState {
             roi.edit_mode = false;
         }
         self.edit_drag = None;
+        self.vertex_drag = None;
+    }
+
+    /// Cancel any in-progress ROI draft.
+    pub fn cancel_draft(&mut self) {
+        self.draft = None;
+        self.polygon_draft = None;
     }
 
     /// Begin drawing a rectangle ROI.
@@ -211,6 +244,55 @@ impl RoiState {
         self.set_selected(Some(id));
     }
 
+    /// Add a point to the polygon draft.
+    pub fn add_polygon_point(&mut self, point: PlotPoint) {
+        let point = (point.x, point.y);
+        if let Some(draft) = &mut self.polygon_draft {
+            draft.vertices.push(point);
+        } else {
+            self.polygon_draft = Some(RoiPolygonDraft {
+                vertices: vec![point],
+                hover: None,
+            });
+        }
+    }
+
+    /// Update hover point for polygon draft preview.
+    pub fn update_polygon_hover(&mut self, point: Option<PlotPoint>) {
+        if let Some(draft) = &mut self.polygon_draft {
+            draft.hover = point;
+        }
+    }
+
+    /// Commit polygon draft into a ROI.
+    pub fn commit_polygon(&mut self, min_points: usize) -> bool {
+        let Some(draft) = self.polygon_draft.take() else {
+            return false;
+        };
+        if draft.vertices.len() < min_points {
+            return false;
+        }
+
+        let id = self.next_id.max(1);
+        self.next_id = id + 1;
+        let color = roi_palette_color(id - 1);
+        let roi = Roi {
+            id,
+            name: format!("ROI {id}"),
+            color,
+            shape: RoiShape::Polygon {
+                vertices: draft.vertices,
+            },
+            visible: true,
+            selected: false,
+            edit_mode: false,
+        };
+
+        self.rois.push(roi);
+        self.set_selected(Some(id));
+        true
+    }
+
     /// Select the topmost ROI containing the point.
     pub fn select_at(&mut self, point: PlotPoint) {
         if let Some(hit_id) = self.hit_test(point) {
@@ -266,7 +348,7 @@ impl RoiState {
 
     /// Whether an edit drag is in progress.
     pub fn is_edit_dragging(&self) -> bool {
-        self.edit_drag.is_some()
+        self.edit_drag.is_some() || self.vertex_drag.is_some()
     }
 
     /// Bounds captured at drag start (used to freeze pan).
@@ -317,6 +399,65 @@ impl RoiState {
         self.edit_drag.as_ref().map(|drag| drag.bounds)
     }
 
+    /// Start vertex drag (polygon edit).
+    pub fn start_vertex_drag(
+        &mut self,
+        roi_id: usize,
+        index: usize,
+        start: PlotPoint,
+        bounds: PlotBounds,
+    ) {
+        self.set_edit_mode(roi_id, true);
+        self.vertex_drag = Some(RoiVertexDrag {
+            roi_id,
+            index,
+            last: start,
+            bounds,
+        });
+    }
+
+    /// Update vertex drag.
+    pub fn update_vertex_drag(&mut self, current: PlotPoint) {
+        let Some(drag) = &mut self.vertex_drag else {
+            return;
+        };
+        if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == drag.roi_id) {
+            roi.move_vertex(drag.index, current);
+        }
+        drag.last = current;
+    }
+
+    /// End vertex drag.
+    pub fn end_vertex_drag(&mut self) {
+        self.vertex_drag = None;
+    }
+
+    /// Bounds captured at vertex drag start (used to freeze pan).
+    pub fn vertex_drag_bounds(&self) -> Option<PlotBounds> {
+        self.vertex_drag.as_ref().map(|drag| drag.bounds)
+    }
+
+    /// Delete a polygon vertex by hit test.
+    pub fn delete_vertex_at(&mut self, point: PlotPoint, threshold: f64) -> bool {
+        if let Some((roi_id, index)) = self.hit_test_vertex(point, threshold) {
+            if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == roi_id) {
+                return roi.delete_vertex(index);
+            }
+        }
+        false
+    }
+
+    /// Insert a polygon vertex on edge hit.
+    pub fn insert_vertex_at(&mut self, point: PlotPoint, threshold: f64) -> bool {
+        if let Some((roi_id, edge_index)) = self.hit_test_edge(point, threshold) {
+            if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == roi_id) {
+                roi.insert_vertex(edge_index, point);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Set the context menu target.
     pub fn set_context_menu(&mut self, roi_id: Option<usize>) {
         self.context_menu = roi_id;
@@ -340,6 +481,32 @@ impl RoiState {
         None
     }
 
+    /// Hit test polygon vertices in edit mode.
+    pub fn hit_test_vertex(&self, point: PlotPoint, threshold: f64) -> Option<(usize, usize)> {
+        for roi in self.rois.iter().rev() {
+            if !roi.edit_mode {
+                continue;
+            }
+            if let Some(index) = roi.vertex_hit(point, threshold) {
+                return Some((roi.id, index));
+            }
+        }
+        None
+    }
+
+    /// Hit test polygon edges in edit mode.
+    pub fn hit_test_edge(&self, point: PlotPoint, threshold: f64) -> Option<(usize, usize)> {
+        for roi in self.rois.iter().rev() {
+            if !roi.edit_mode {
+                continue;
+            }
+            if let Some(index) = roi.edge_hit(point, threshold) {
+                return Some((roi.id, index));
+            }
+        }
+        None
+    }
+
     /// Render all ROIs to the plot.
     pub fn draw(&self, plot_ui: &mut PlotUi) {
         for roi in &self.rois {
@@ -358,19 +525,50 @@ impl RoiState {
                     .color(roi.color)
                     .anchor(Align2::LEFT_TOP),
             );
+
+            if roi.edit_mode {
+                let handle_points = roi.handle_points();
+                if !handle_points.is_empty() {
+                    plot_ui.points(
+                        Points::new(handle_points)
+                            .color(roi.color)
+                            .shape(MarkerShape::Square)
+                            .radius(3.0),
+                    );
+                }
+            }
         }
     }
 
     /// Render the draft ROI while dragging.
     pub fn draw_draft(&self, plot_ui: &mut PlotUi) {
-        let Some(draft) = &self.draft else {
-            return;
-        };
-        let color = roi_palette_color(self.next_id.saturating_sub(1));
-        let stroke = Stroke::new(1.0, color);
-        let fill = roi_fill_color(color);
-        let points = draft_plot_points(draft);
-        plot_ui.polygon(Polygon::new(points).stroke(stroke).fill_color(fill));
+        if let Some(draft) = &self.draft {
+            let color = roi_palette_color(self.next_id.saturating_sub(1));
+            let stroke = Stroke::new(1.0, color);
+            let fill = roi_fill_color(color);
+            let points = draft_plot_points(draft);
+            plot_ui.polygon(Polygon::new(points).stroke(stroke).fill_color(fill));
+        }
+
+        if let Some(draft) = &self.polygon_draft {
+            let color = roi_palette_color(self.next_id.saturating_sub(1));
+            if !draft.vertices.is_empty() {
+                let mut line_points: Vec<[f64; 2]> =
+                    draft.vertices.iter().map(|(x, y)| [*x, *y]).collect();
+                if let Some(hover) = draft.hover {
+                    line_points.push([hover.x, hover.y]);
+                }
+                plot_ui.line(Line::new(PlotPoints::new(line_points)).color(color));
+                let handle_points: Vec<[f64; 2]> =
+                    draft.vertices.iter().map(|(x, y)| [*x, *y]).collect();
+                plot_ui.points(
+                    Points::new(handle_points)
+                        .color(color)
+                        .shape(MarkerShape::Circle)
+                        .radius(3.0),
+                );
+            }
+        }
     }
 
     fn set_selected(&mut self, id: Option<usize>) {
@@ -542,6 +740,118 @@ impl Roi {
         *y1 = bottom;
         *y2 = top;
     }
+
+    fn handle_points(&self) -> Vec<[f64; 2]> {
+        match &self.shape {
+            RoiShape::Rectangle { x1, y1, x2, y2 } => {
+                let min_x = x1.min(*x2);
+                let max_x = x1.max(*x2);
+                let min_y = y1.min(*y2);
+                let max_y = y1.max(*y2);
+                let center_x = (min_x + max_x) * 0.5;
+                let center_y = (min_y + max_y) * 0.5;
+                vec![
+                    [min_x, min_y],
+                    [center_x, min_y],
+                    [max_x, min_y],
+                    [max_x, center_y],
+                    [max_x, max_y],
+                    [center_x, max_y],
+                    [min_x, max_y],
+                    [min_x, center_y],
+                ]
+            }
+            RoiShape::Polygon { vertices } => {
+                vertices.iter().map(|(x, y)| [*x, *y]).collect::<Vec<_>>()
+            }
+        }
+    }
+
+    fn vertex_hit(&self, point: PlotPoint, threshold: f64) -> Option<usize> {
+        let RoiShape::Polygon { vertices } = &self.shape else {
+            return None;
+        };
+        for (idx, (x, y)) in vertices.iter().enumerate() {
+            let dx = point.x - *x;
+            let dy = point.y - *y;
+            if (dx * dx + dy * dy).sqrt() <= threshold {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    fn edge_hit(&self, point: PlotPoint, threshold: f64) -> Option<usize> {
+        let RoiShape::Polygon { vertices } = &self.shape else {
+            return None;
+        };
+        if vertices.len() < 2 {
+            return None;
+        }
+        let mut closest = None;
+        let mut closest_dist = f64::INFINITY;
+        for i in 0..vertices.len() {
+            let (ax, ay) = vertices[i];
+            let (bx, by) = vertices[(i + 1) % vertices.len()];
+            let dist = distance_point_to_segment(point, (ax, ay), (bx, by));
+            if dist < closest_dist {
+                closest_dist = dist;
+                closest = Some(i);
+            }
+        }
+        if closest_dist <= threshold {
+            closest
+        } else {
+            None
+        }
+    }
+
+    fn move_vertex(&mut self, index: usize, point: PlotPoint) {
+        let RoiShape::Polygon { vertices } = &mut self.shape else {
+            return;
+        };
+        if let Some(vertex) = vertices.get_mut(index) {
+            *vertex = (point.x, point.y);
+        }
+    }
+
+    fn insert_vertex(&mut self, edge_index: usize, point: PlotPoint) {
+        let RoiShape::Polygon { vertices } = &mut self.shape else {
+            return;
+        };
+        let insert_at = (edge_index + 1).min(vertices.len());
+        vertices.insert(insert_at, (point.x, point.y));
+    }
+
+    fn delete_vertex(&mut self, index: usize) -> bool {
+        let RoiShape::Polygon { vertices } = &mut self.shape else {
+            return false;
+        };
+        if vertices.len() <= 3 || index >= vertices.len() {
+            return false;
+        }
+        vertices.remove(index);
+        true
+    }
+}
+
+fn distance_point_to_segment(point: PlotPoint, a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (px, py) = (point.x, point.y);
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let apx = px - ax;
+    let apy = py - ay;
+    let ab_len_sq = abx * abx + aby * aby;
+    if ab_len_sq <= f64::EPSILON {
+        return ((px - ax).powi(2) + (py - ay).powi(2)).sqrt();
+    }
+    let t = (apx * abx + apy * aby) / ab_len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let closest_x = ax + abx * t;
+    let closest_y = ay + aby * t;
+    ((px - closest_x).powi(2) + (py - closest_y).powi(2)).sqrt()
 }
 
 fn draft_plot_points(draft: &RoiDraft) -> Vec<[f64; 2]> {

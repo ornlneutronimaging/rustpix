@@ -63,6 +63,7 @@ impl RustpixApp {
                 && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         });
         let exit_edit_mode = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let commit_polygon = ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
         // Get data bounds based on view mode
         // TODO: Neutron mode may have different bounds due to super-resolution
@@ -82,6 +83,10 @@ impl RustpixApp {
         }
         if exit_edit_mode {
             self.roi_state.clear_edit_mode();
+            self.roi_state.cancel_draft();
+        }
+        if commit_polygon {
+            let _ = self.roi_state.commit_polygon(3);
         }
 
         egui::CentralPanel::default()
@@ -186,7 +191,8 @@ impl RustpixApp {
                                     let shift_down = ctx.input(|i| i.modifiers.shift);
                                     let roi_drag_active = self.roi_state.is_dragging()
                                         || self.roi_state.is_edit_dragging();
-                                    let roi_drawing_active = self.roi_state.draft.is_some();
+                                    let roi_drawing_active = self.roi_state.draft.is_some()
+                                        || self.roi_state.polygon_draft.is_some();
                                     let disable_plot_drag =
                                         shift_down || roi_drag_active || roi_drawing_active;
 
@@ -253,10 +259,13 @@ impl RustpixApp {
                                         let pointer_pos =
                                             plot_ui.pointer_coordinate().map(clamp_point);
 
-                                        let drawing_active = roi_mode
-                                            == RoiSelectionMode::Rectangle
+                                        let rect_drawing = roi_mode == RoiSelectionMode::Rectangle
                                             && (shift_down || self.roi_state.draft.is_some());
-                                        if drawing_active {
+                                        let poly_drawing = roi_mode == RoiSelectionMode::Polygon
+                                            && (shift_down
+                                                || self.roi_state.polygon_draft.is_some());
+
+                                        if rect_drawing {
                                             if response.drag_started() {
                                                 if let Some(pos) = pointer_pos {
                                                     self.roi_state.begin_rectangle(pos);
@@ -270,10 +279,25 @@ impl RustpixApp {
                                             if response.drag_stopped() {
                                                 self.roi_state.commit_rectangle(min_roi_size);
                                             }
+                                        } else if poly_drawing {
+                                            self.roi_state.update_polygon_hover(pointer_pos);
+                                            if response.clicked() {
+                                                if let Some(pos) = pointer_pos {
+                                                    self.roi_state.add_polygon_point(pos);
+                                                }
+                                            }
                                         } else {
                                             if response.drag_started() {
                                                 if let Some(pos) = pointer_pos {
-                                                    if let Some((hit_id, handle)) = self
+                                                    if let Some((roi_id, index)) = self
+                                                        .roi_state
+                                                        .hit_test_vertex(pos, handle_radius)
+                                                    {
+                                                        let bounds = plot_ui.plot_bounds();
+                                                        self.roi_state.start_vertex_drag(
+                                                            roi_id, index, pos, bounds,
+                                                        );
+                                                    } else if let Some((hit_id, handle)) = self
                                                         .roi_state
                                                         .hit_test_handle(pos, handle_radius)
                                                     {
@@ -293,6 +317,7 @@ impl RustpixApp {
                                             if response.dragged() {
                                                 if let Some(pos) = pointer_pos {
                                                     if self.roi_state.is_edit_dragging() {
+                                                        self.roi_state.update_vertex_drag(pos);
                                                         self.roi_state
                                                             .update_edit_drag(pos, min_roi_size);
                                                     } else {
@@ -301,6 +326,7 @@ impl RustpixApp {
                                                 }
                                             }
                                             if response.drag_stopped() {
+                                                self.roi_state.end_vertex_drag();
                                                 self.roi_state.end_edit_drag();
                                                 self.roi_state.end_drag();
                                             }
@@ -308,6 +334,7 @@ impl RustpixApp {
                                             if let Some(bounds) = self
                                                 .roi_state
                                                 .edit_drag_bounds()
+                                                .or_else(|| self.roi_state.vertex_drag_bounds())
                                                 .or_else(|| self.roi_state.drag_bounds())
                                             {
                                                 plot_ui.set_plot_bounds(bounds);
@@ -347,12 +374,17 @@ impl RustpixApp {
 
                                         if response.clicked()
                                             && self.roi_state.draft.is_none()
+                                            && self.roi_state.polygon_draft.is_none()
                                             && !shift_down
                                             && !self.roi_state.is_dragging()
                                             && !self.roi_state.is_edit_dragging()
                                         {
                                             if let Some(pos) = pointer_pos {
-                                                if self.roi_state.hit_test(pos).is_some() {
+                                                if self
+                                                    .roi_state
+                                                    .insert_vertex_at(pos, handle_radius)
+                                                    || self.roi_state.hit_test(pos).is_some()
+                                                {
                                                     self.roi_state.select_at(pos);
                                                 } else {
                                                     self.roi_state.clear_edit_mode();
@@ -372,10 +404,19 @@ impl RustpixApp {
                                             }
                                         }
 
+                                        let mut suppress_context_menu = false;
                                         if response.secondary_clicked() {
                                             let mut target = None;
                                             if let Some(pos) = pointer_pos {
-                                                if let Some(hit_id) = self.roi_state.hit_test(pos) {
+                                                if self
+                                                    .roi_state
+                                                    .delete_vertex_at(pos, handle_radius)
+                                                {
+                                                    self.roi_state.set_context_menu(None);
+                                                    suppress_context_menu = true;
+                                                } else if let Some(hit_id) =
+                                                    self.roi_state.hit_test(pos)
+                                                {
                                                     self.roi_state.select_id(hit_id);
                                                     target = Some(hit_id);
                                                 }
@@ -384,6 +425,10 @@ impl RustpixApp {
                                         }
 
                                         response.context_menu(|ui| {
+                                            if suppress_context_menu {
+                                                ui.close_menu();
+                                                return;
+                                            }
                                             if let Some(target) =
                                                 self.roi_state.context_menu_target()
                                             {
@@ -605,18 +650,26 @@ impl RustpixApp {
             .inner_margin(egui::Margin::symmetric(4.0, 2.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    let mut selection_mode = self.roi_state.mode;
                     egui::ComboBox::from_id_salt("roi_selection_mode")
                         .selected_text(egui::RichText::new(mode_icon).size(11.0))
                         .width(36.0)
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut self.roi_state.mode,
+                                &mut selection_mode,
                                 RoiSelectionMode::Rectangle,
                                 "▭ Rectangle",
                             );
-                            ui.add_enabled(false, egui::SelectableLabel::new(false, "⬠ Polygon"))
-                                .on_hover_text("Polygon selection (coming soon)");
+                            ui.selectable_value(
+                                &mut selection_mode,
+                                RoiSelectionMode::Polygon,
+                                "⬠ Polygon",
+                            );
                         });
+                    if selection_mode != self.roi_state.mode {
+                        self.roi_state.mode = selection_mode;
+                        self.roi_state.cancel_draft();
+                    }
 
                     let clear_btn = egui::Button::new(
                         egui::RichText::new("✕").size(11.0).color(colors.text_muted),
