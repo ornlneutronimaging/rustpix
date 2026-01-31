@@ -3,7 +3,7 @@
 use std::fmt;
 
 use eframe::egui::Rect;
-use egui_plot::PlotBounds;
+use egui_plot::{PlotBounds, PlotPoint};
 /// Data source for the main viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -42,6 +42,16 @@ impl fmt::Display for SpectrumXAxis {
     }
 }
 
+/// Zoom tool mode for plot navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ZoomMode {
+    #[default]
+    None,
+    In,
+    Out,
+    Box,
+}
+
 /// UI panel visibility and toggle state.
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -78,4 +88,38 @@ pub struct UiState {
     pub roi_last_plot_bounds: Option<PlotBounds>,
     /// Cached plot rect for ROI hit-testing before plot interaction.
     pub roi_last_plot_rect: Option<Rect>,
+    /// Cached plot bounds for spectrum interactions.
+    pub spectrum_last_plot_bounds: Option<PlotBounds>,
+    /// Cached plot rect for spectrum interactions.
+    pub spectrum_last_plot_rect: Option<Rect>,
+    /// Active zoom tool for the histogram view.
+    pub hist_zoom_mode: ZoomMode,
+    /// Active zoom tool for the spectrum view.
+    pub spectrum_zoom_mode: ZoomMode,
+    /// Histogram zoom box drag start in plot coordinates.
+    pub hist_zoom_start: Option<PlotPoint>,
+    /// Spectrum zoom box drag start in plot coordinates.
+    pub spectrum_zoom_start: Option<PlotPoint>,
+    /// Whether the spectrum data selection panel is open.
+    pub show_roi_panel: bool,
+    /// Whether the spectrum range panel is open.
+    pub show_spectrum_range: bool,
+    /// Spectrum X range override (min, max) in axis units.
+    pub spectrum_x_range: Option<(f64, f64)>,
+    /// Spectrum Y range override (min, max) in axis units.
+    pub spectrum_y_range: Option<(f64, f64)>,
+    /// Editable input for spectrum X min.
+    pub spectrum_x_min_input: String,
+    /// Editable input for spectrum X max.
+    pub spectrum_x_max_input: String,
+    /// Editable input for spectrum Y min.
+    pub spectrum_y_min_input: String,
+    /// Editable input for spectrum Y max.
+    pub spectrum_y_max_input: String,
+    /// Whether the full-FOV spectrum is visible.
+    pub full_fov_visible: bool,
+    /// ROI currently being renamed.
+    pub roi_rename_id: Option<usize>,
+    /// Editable name buffer for ROI renaming.
+    pub roi_rename_text: String,
 }

@@ -37,11 +37,19 @@ based on real-world usage scenarios from beamline scientists and detector expert
 - Viewer grid toggle button next to Reset View (default OFF)
 - TOF slicer row spans full width (visual alignment with mock)
 
-**Pending / Next:**
-- ROI system (multi-ROI, drag/resize, spectrum curves)
+**In Progress / Next (Phase 3):**
+- ROI spectrum integration (multi-curve, data selection panel, legend, CSV metadata export)
 - HDF5 export pipeline (Hits/Neutrons, metadata, masks)
 - Dead/Hot pixel mask workflow and visualization
 - Full streaming pipeline + cancel flows
+
+**Implemented (Phase 2 ROI foundation):**
+- Multi-ROI drawing (rectangle + polygon) with shift-to-draw and edit mode
+- ROI selection, move, resize, delete (context menu, Delete key, Clear All)
+- Polygon editing (insert/move/delete vertices) with self-intersection validation
+- Concave polygon fill via triangulation (consistent filled overlay)
+- ROI persistence across Hits ↔ Neutrons view switches
+- ROI tool group icons (SVG) and settings (debounce toggle)
 
 ---
 
@@ -110,10 +118,12 @@ After loading, the user enters **Hits Analysis Mode** with these tools:
 
 #### 1.3 ROI Tools
 
-- Add multiple ROIs on histogram view
-- Drag/resize ROIs → spectrum updates in real-time
-- Each ROI generates a separate spectrum curve
+- Add multiple ROIs on histogram view (rectangle + free-form polygon)
+- Shift+drag or shift+click to draw; default state supports move/selection
+- Edit mode: resize rectangle or edit polygon vertices (insert/move/delete)
+- Delete via context menu, Delete key, or Clear All
 - ROIs persist when switching between Hits and Neutrons mode
+- Spectrum integration and data selection panel (Phase 3)
 
 ---
 

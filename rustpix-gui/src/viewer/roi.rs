@@ -16,13 +16,14 @@ pub enum RoiSelectionMode {
 
 /// Region of interest definition.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::struct_excessive_bools)]
 pub struct Roi {
     pub id: usize,
     pub name: String,
     pub color: Color32,
     pub shape: RoiShape,
     pub visible: bool,
+    pub spectrum_visible: bool,
     pub selected: bool,
     pub edit_mode: bool,
 }
@@ -100,6 +101,7 @@ pub struct RoiState {
     vertex_drag: Option<RoiVertexDrag>,
     context_menu: Option<usize>,
     next_id: usize,
+    revision: u64,
 }
 
 impl Default for RoiState {
@@ -115,6 +117,7 @@ impl Default for RoiState {
             vertex_drag: None,
             context_menu: None,
             next_id: 1,
+            revision: 0,
         }
     }
 }
@@ -130,6 +133,7 @@ impl RoiState {
         self.vertex_drag = None;
         self.context_menu = None;
         self.next_id = 1;
+        self.touch();
     }
 
     /// Delete the currently selected ROI.
@@ -144,6 +148,7 @@ impl RoiState {
         self.edit_drag = None;
         self.vertex_drag = None;
         self.context_menu = None;
+        self.touch();
         true
     }
 
@@ -160,6 +165,7 @@ impl RoiState {
         self.edit_drag = None;
         self.vertex_drag = None;
         self.context_menu = None;
+        self.touch();
         true
     }
 
@@ -240,12 +246,14 @@ impl RoiState {
                 y2: max_y,
             },
             visible: true,
+            spectrum_visible: true,
             selected: false,
             edit_mode: false,
         };
 
         self.rois.push(roi);
         self.set_selected(Some(id));
+        self.touch();
     }
 
     /// Add a point to the polygon draft.
@@ -292,12 +300,14 @@ impl RoiState {
                 vertices: draft.vertices,
             },
             visible: true,
+            spectrum_visible: true,
             selected: false,
             edit_mode: false,
         };
 
         self.rois.push(roi);
         self.set_selected(Some(id));
+        self.touch();
         Ok(())
     }
 
@@ -353,6 +363,7 @@ impl RoiState {
             roi.clamp_within(min, max);
         }
         drag.last = current;
+        self.touch();
     }
 
     /// End ROI drag.
@@ -402,6 +413,7 @@ impl RoiState {
             roi.clamp_within(min, max);
         }
         edit.last = current;
+        self.touch();
     }
 
     /// End edit drag.
@@ -445,6 +457,7 @@ impl RoiState {
             roi.move_vertex(drag.index, current);
         }
         drag.last = current;
+        self.touch();
     }
 
     /// End vertex drag.
@@ -460,6 +473,7 @@ impl RoiState {
                 }
             }
         }
+        self.touch();
         Ok(())
     }
 
@@ -488,11 +502,20 @@ impl RoiState {
                         vertices.remove(insert_at);
                         return Err(RoiCommitError::SelfIntersecting);
                     }
+                    self.touch();
                     return Ok(true);
                 }
             }
         }
         Ok(false)
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Set the context menu target.
