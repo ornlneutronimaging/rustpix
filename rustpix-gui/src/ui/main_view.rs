@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::Write;
 
-use eframe::egui::{self, Color32, Rounding, Stroke, Vec2b};
+use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Stroke, Vec2b};
 use egui_plot::{Line, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, VLine};
 use image::{Rgba, RgbaImage};
 use rfd::FileDialog;
@@ -18,6 +18,15 @@ use crate::viewer::RoiSelectionMode;
 
 /// Unique ID for the main histogram plot (used for state persistence).
 const HISTOGRAM_PLOT_ID: &str = "histogram_plot";
+
+#[derive(Clone, Copy)]
+enum RoiToolbarIcon {
+    Rectangle,
+    Polygon,
+    Clear,
+    Gear,
+    Close,
+}
 
 struct SpectrumExportConfig {
     axis: SpectrumXAxis,
@@ -88,19 +97,7 @@ impl RustpixApp {
             self.roi_state.cancel_draft();
         }
         if commit_polygon {
-            if let Err(err) = self.roi_state.commit_polygon(3) {
-                let message = match err {
-                    crate::viewer::RoiCommitError::TooFewPoints => {
-                        "Polygon needs at least 3 points".to_string()
-                    }
-                    crate::viewer::RoiCommitError::SelfIntersecting => {
-                        "Polygon edges cannot self-intersect".to_string()
-                    }
-                };
-                let expires_at = ctx.input(|i| i.time) + 2.5;
-                self.ui_state.roi_warning = Some((message, expires_at));
-                self.roi_state.cancel_draft();
-            }
+            self.commit_polygon_draft(ctx);
         }
 
         egui::CentralPanel::default()
@@ -791,63 +788,127 @@ impl RustpixApp {
     /// Render ROI tool group controls.
     fn render_roi_toolbar(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
-        let mode_icon = match self.roi_state.mode {
-            RoiSelectionMode::Rectangle => "▭",
-            RoiSelectionMode::Polygon => "⬠",
-        };
-
         egui::Frame::none()
             .stroke(Stroke::new(1.0, colors.border_light))
             .rounding(Rounding::same(4.0))
             .inner_margin(egui::Margin::symmetric(4.0, 2.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let mut selection_mode = self.roi_state.mode;
-                    egui::ComboBox::from_id_salt("roi_selection_mode")
-                        .selected_text(egui::RichText::new(mode_icon).size(11.0))
-                        .width(36.0)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut selection_mode,
-                                RoiSelectionMode::Rectangle,
-                                "▭ Rectangle",
-                            );
-                            ui.selectable_value(
-                                &mut selection_mode,
-                                RoiSelectionMode::Polygon,
-                                "⬠ Polygon",
-                            );
-                        });
+                    let selection_mode = self.render_roi_mode_menu(ui, &colors);
                     if selection_mode != self.roi_state.mode {
                         self.roi_state.mode = selection_mode;
                         self.roi_state.cancel_draft();
                     }
 
-                    let clear_btn = egui::Button::new(
-                        egui::RichText::new("✕").size(11.0).color(colors.text_muted),
-                    )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0));
-                    if ui.add(clear_btn).on_hover_text("Clear all ROIs").clicked() {
+                    self.render_roi_close_button(ui);
+
+                    if Self::roi_icon_button(ui, RoiToolbarIcon::Clear, "Clear all ROIs").clicked()
+                    {
                         self.roi_state.clear();
                     }
 
-                    ui.menu_button(
-                        egui::RichText::new("⚙").size(11.0).color(colors.text_muted),
-                        |ui| {
-                            ui.checkbox(
-                                &mut self.roi_state.debounce_updates,
-                                "Debounce spectrum updates",
-                            );
-                        },
-                    )
-                    .response
-                    .on_hover_text("ROI settings");
+                    self.render_roi_settings_menu(ui, &colors);
                 });
             });
 
         ui.add_space(8.0);
+    }
+
+    fn render_roi_mode_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+    ) -> RoiSelectionMode {
+        let mut selection_mode = self.roi_state.mode;
+        let menu_button = egui::Button::new("")
+            .min_size(egui::vec2(34.0, 22.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        let menu_response = egui::menu::menu_custom_button(ui, menu_button, |ui| {
+            ui.horizontal(|ui| {
+                Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Rectangle, colors.text_muted);
+                if ui
+                    .selectable_label(
+                        self.roi_state.mode == RoiSelectionMode::Rectangle,
+                        "Rectangle",
+                    )
+                    .clicked()
+                {
+                    selection_mode = RoiSelectionMode::Rectangle;
+                }
+            });
+            ui.horizontal(|ui| {
+                Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Polygon, colors.text_muted);
+                if ui
+                    .selectable_label(self.roi_state.mode == RoiSelectionMode::Polygon, "Polygon")
+                    .clicked()
+                {
+                    selection_mode = RoiSelectionMode::Polygon;
+                }
+            });
+        });
+        let icon_rect = menu_response.response.rect.shrink2(egui::vec2(4.0, 4.0));
+        let icon_rect = Rect::from_min_max(
+            icon_rect.min,
+            Pos2::new(icon_rect.center().x + 2.0, icon_rect.max.y),
+        );
+        let image = Self::roi_icon_image(
+            match self.roi_state.mode {
+                RoiSelectionMode::Rectangle => RoiToolbarIcon::Rectangle,
+                RoiSelectionMode::Polygon => RoiToolbarIcon::Polygon,
+            },
+            colors.text_muted,
+        );
+        image.paint_at(ui, icon_rect);
+        Self::paint_dropdown_caret(ui.painter(), menu_response.response.rect, colors.text_muted);
+        selection_mode
+    }
+
+    fn render_roi_close_button(&mut self, ui: &mut egui::Ui) {
+        if self.roi_state.mode == RoiSelectionMode::Polygon
+            && self.roi_state.polygon_draft.is_some()
+        {
+            let close_response =
+                Self::roi_icon_button(ui, RoiToolbarIcon::Close, "Close polygon (Enter)");
+            if close_response.clicked() {
+                let ctx = ui.ctx().clone();
+                self.commit_polygon_draft(&ctx);
+            }
+        }
+    }
+
+    fn render_roi_settings_menu(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let gear_button = egui::Button::new("")
+            .min_size(egui::vec2(28.0, 22.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        let gear_response = egui::menu::menu_custom_button(ui, gear_button, |ui| {
+            ui.checkbox(
+                &mut self.roi_state.debounce_updates,
+                "Debounce spectrum updates",
+            );
+        });
+        let image = Self::roi_icon_image(RoiToolbarIcon::Gear, colors.text_muted);
+        image.paint_at(ui, gear_response.response.rect.shrink(4.0));
+        gear_response.response.on_hover_text("ROI settings");
+    }
+
+    fn commit_polygon_draft(&mut self, ctx: &egui::Context) {
+        if let Err(err) = self.roi_state.commit_polygon(3) {
+            let message = match err {
+                crate::viewer::RoiCommitError::TooFewPoints => {
+                    "Polygon needs at least 3 points".to_string()
+                }
+                crate::viewer::RoiCommitError::SelfIntersecting => {
+                    "Polygon edges cannot self-intersect".to_string()
+                }
+            };
+            let expires_at = ctx.input(|i| i.time) + 2.5;
+            self.ui_state.roi_warning = Some((message, expires_at));
+            self.roi_state.cancel_draft();
+        }
     }
 
     /// Render the spectrum panel with toolbar.
@@ -1341,6 +1402,50 @@ impl RustpixApp {
             ui.painter().rect_filled(rect, Rounding::same(2.0), color);
             response
         }
+    }
+
+    fn roi_icon_button(ui: &mut egui::Ui, icon: RoiToolbarIcon, tooltip: &str) -> egui::Response {
+        let colors = ThemeColors::from_ui(ui);
+        let button = egui::Button::new("")
+            .min_size(egui::vec2(28.0, 22.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        let response = ui.add(button);
+        let image = Self::roi_icon_image(icon, colors.text_muted);
+        image.paint_at(ui, response.rect.shrink(4.0));
+        response.on_hover_text(tooltip)
+    }
+
+    fn paint_roi_icon_in_ui(ui: &mut egui::Ui, icon: RoiToolbarIcon, color: Color32) {
+        let image = Self::roi_icon_image(icon, color);
+        ui.add(image);
+    }
+
+    fn roi_icon_image(icon: RoiToolbarIcon, tint: Color32) -> egui::Image<'static> {
+        let source = match icon {
+            RoiToolbarIcon::Rectangle => {
+                egui::include_image!("../../assets/icons/roi-rectangle.svg")
+            }
+            RoiToolbarIcon::Polygon => egui::include_image!("../../assets/icons/roi-polygon.svg"),
+            RoiToolbarIcon::Clear => egui::include_image!("../../assets/icons/roi-clear.svg"),
+            RoiToolbarIcon::Gear => egui::include_image!("../../assets/icons/roi-gear.svg"),
+            RoiToolbarIcon::Close => egui::include_image!("../../assets/icons/roi-close.svg"),
+        };
+        egui::Image::new(source)
+            .tint(tint)
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+    }
+
+    fn paint_dropdown_caret(painter: &egui::Painter, rect: Rect, color: Color32) {
+        let center = rect.center();
+        let size = 3.5;
+        let points = vec![
+            Pos2::new(rect.right() - 8.0, center.y - size),
+            Pos2::new(rect.right() - 2.0, center.y - size),
+            Pos2::new(rect.right() - 5.0, center.y + size),
+        ];
+        painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
     }
 
     fn export_spectrum_csv(

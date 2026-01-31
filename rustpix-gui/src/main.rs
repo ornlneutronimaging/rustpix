@@ -26,6 +26,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             // Apply custom styling based on system theme preference
             ui::theme::configure_style(&cc.egui_ctx);
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(RustpixApp::default()))
         }),
     )
