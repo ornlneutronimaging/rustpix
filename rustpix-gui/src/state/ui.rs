@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use eframe::egui::Rect;
+use egui_plot::PlotBounds;
 /// Data source for the main viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -72,4 +74,8 @@ pub struct UiState {
     pub needs_plot_reset: bool,
     /// Transient ROI warning message (text, expires at time).
     pub roi_warning: Option<(String, f64)>,
+    /// Cached plot bounds for ROI hit-testing before plot interaction.
+    pub roi_last_plot_bounds: Option<PlotBounds>,
+    /// Cached plot rect for ROI hit-testing before plot interaction.
+    pub roi_last_plot_rect: Option<Rect>,
 }

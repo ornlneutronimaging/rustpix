@@ -203,12 +203,62 @@ impl RustpixApp {
                                     let should_reset = needs_plot_reset || reset_view_clicked;
                                     let plot_rect = ui.available_rect_before_wrap();
                                     let shift_down = ctx.input(|i| i.modifiers.shift);
+                                    let handle_radius = 3.0;
+                                    let pre_drag_hit = if !shift_down
+                                        && ctx.input(|i| {
+                                            i.pointer
+                                                .button_down(egui::PointerButton::Primary)
+                                        }) {
+                                        if let (Some(bounds), Some(rect), Some(pos)) = (
+                                            self.ui_state.roi_last_plot_bounds,
+                                            self.ui_state.roi_last_plot_rect,
+                                            ctx.input(|i| i.pointer.interact_pos()),
+                                        ) {
+                                            if rect.contains(pos) && rect.width() > 0.0 && rect.height() > 0.0 {
+                                                let x_frac = f64::from(pos.x - rect.left())
+                                                    / f64::from(rect.width());
+                                                let y_frac = f64::from(pos.y - rect.top())
+                                                    / f64::from(rect.height());
+                                                if (0.0..=1.0).contains(&x_frac)
+                                                    && (0.0..=1.0).contains(&y_frac)
+                                                {
+                                                    let plot_x = bounds.min()[0]
+                                                        + x_frac
+                                                            * (bounds.max()[0] - bounds.min()[0]);
+                                                    let plot_y = bounds.max()[1]
+                                                        - y_frac
+                                                            * (bounds.max()[1] - bounds.min()[1]);
+                                                    let point = PlotPoint::new(plot_x, plot_y);
+                                                    self.roi_state
+                                                        .hit_test_handle(point, handle_radius)
+                                                        .is_some()
+                                                        || self.roi_state
+                                                            .hit_test_vertex(point, handle_radius)
+                                                            .is_some()
+                                                        || self.roi_state
+                                                            .hit_test_edge(point, handle_radius)
+                                                            .is_some()
+                                                        || self.roi_state.hit_test(point).is_some()
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    };
                                     let roi_drag_active = self.roi_state.is_dragging()
                                         || self.roi_state.is_edit_dragging();
                                     let roi_drawing_active = self.roi_state.draft.is_some()
                                         || self.roi_state.polygon_draft.is_some();
-                                    let disable_plot_drag =
-                                        shift_down || roi_drag_active || roi_drawing_active;
+                                    let disable_plot_drag = shift_down
+                                        || roi_drag_active
+                                        || roi_drawing_active
+                                        || pre_drag_hit;
 
                                     // Build the base plot
                                     let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
@@ -230,7 +280,6 @@ impl RustpixApp {
 
                                     let roi_mode = self.roi_state.mode;
                                     let min_roi_size = 2.0;
-                                    let handle_radius = 3.0;
                                     plot.show(ui, |plot_ui| {
                                         // Set explicit bounds on reset or double-click
                                         if should_reset || plot_ui.response().double_clicked() {
@@ -545,6 +594,11 @@ impl RustpixApp {
 
                                         self.roi_state.draw(plot_ui);
                                         self.roi_state.draw_draft(plot_ui);
+
+                                        self.ui_state.roi_last_plot_bounds =
+                                            Some(plot_ui.plot_bounds());
+                                        self.ui_state.roi_last_plot_rect =
+                                            Some(plot_ui.response().rect);
                                     });
                                 } else {
                                     // "No Data" placeholder - use theme-aware background
