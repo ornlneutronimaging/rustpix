@@ -36,6 +36,7 @@ impl RustpixApp {
         let show_spectrum = self.ui_state.show_histogram;
         let n_bins = self.n_tof_bins();
         let needs_plot_reset = self.ui_state.needs_plot_reset;
+        let show_grid = self.ui_state.show_grid;
 
         // Get data bounds based on view mode
         // TODO: Neutron mode may have different bounds due to super-resolution
@@ -86,6 +87,34 @@ impl RustpixApp {
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 let colors = ThemeColors::from_ui(ui);
+                                                // Grid toggle
+                                                let grid_btn = egui::Button::new(
+                                                    egui::RichText::new("▦ Grid")
+                                                        .size(10.0)
+                                                        .color(if self.ui_state.show_grid {
+                                                            Color32::WHITE
+                                                        } else {
+                                                            colors.text_muted
+                                                        }),
+                                                )
+                                                .fill(if self.ui_state.show_grid {
+                                                    accent::BLUE
+                                                } else {
+                                                    Color32::TRANSPARENT
+                                                })
+                                                .stroke(Stroke::new(1.0, colors.border_light))
+                                                .rounding(Rounding::same(4.0));
+
+                                                if ui
+                                                    .add(grid_btn)
+                                                    .on_hover_text("Toggle grid")
+                                                    .clicked()
+                                                {
+                                                    self.ui_state.show_grid = !self.ui_state.show_grid;
+                                                }
+
+                                                ui.add_space(8.0);
+
                                                 // Reset View button
                                                 let reset_btn = egui::Button::new(
                                                     egui::RichText::new("↺ Reset View")
@@ -114,6 +143,7 @@ impl RustpixApp {
 
                                     // Determine if we need to reset the plot view
                                     let should_reset = needs_plot_reset || reset_view_clicked;
+                                    let plot_rect = ui.available_rect_before_wrap();
 
                                     // Build the base plot
                                     let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
@@ -123,6 +153,7 @@ impl RustpixApp {
                                         .include_x(data_size)
                                         .include_y(0.0)
                                         .include_y(data_size)
+                                        .show_grid(Vec2b::new(show_grid, show_grid))
                                         .x_axis_label("X (pixels)")
                                         .y_axis_label("Y (pixels)");
 
@@ -135,9 +166,26 @@ impl RustpixApp {
                                             // Set explicit bounds on reset or double-click
                                             if should_reset || plot_ui.response().double_clicked()
                                             {
+                                                let pad = (data_size * 0.05).max(16.0);
+
+                                                // Fit the full detector + padding to the current plot aspect.
+                                                let plot_w = plot_rect.width().max(1.0) as f64;
+                                                let plot_h = plot_rect.height().max(1.0) as f64;
+                                                let available_aspect = plot_w / plot_h;
+                                                let data_span = data_size + pad * 2.0;
+                                                let mut x_half = data_span / 2.0;
+                                                let mut y_half = data_span / 2.0;
+
+                                                if available_aspect >= 1.0 {
+                                                    x_half = y_half * available_aspect;
+                                                } else {
+                                                    y_half = x_half / available_aspect;
+                                                }
+
+                                                let center = data_size / 2.0;
                                                 plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                                    [0.0, 0.0],
-                                                    [data_size, data_size],
+                                                    [center - x_half, center - y_half],
+                                                    [center + x_half, center + y_half],
                                                 ));
                                             }
                                             plot_ui.image(PlotImage::new(

@@ -20,7 +20,7 @@ pub enum AlgorithmType {
 impl std::fmt::Display for AlgorithmType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AlgorithmType::Abs => write!(f, "ABS (Age-Based Spatial)"),
+            AlgorithmType::Abs => write!(f, "ABS (Adaptive Box Search)"),
             AlgorithmType::Dbscan => write!(f, "DBSCAN"),
             AlgorithmType::Grid => write!(f, "Grid (Spatial Partition)"),
         }

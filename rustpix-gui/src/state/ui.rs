@@ -71,6 +71,8 @@ pub struct UiState {
     pub show_app_settings: bool,
     /// Whether to show the spectrum settings window.
     pub show_spectrum_settings: bool,
+    /// Whether to show grid lines in the image viewer.
+    pub show_grid: bool,
     /// Flag to trigger plot bounds reset (auto-fit to data).
     pub needs_plot_reset: bool,
 }

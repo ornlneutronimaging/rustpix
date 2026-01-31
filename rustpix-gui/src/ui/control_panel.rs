@@ -253,55 +253,54 @@ impl RustpixApp {
                     .inner_margin(egui::Margin::ZERO),
             )
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Statistics section
-                    self.render_section(ui, "Statistics", true, |app, ui| {
-                        app.render_statistics(ui);
-                    });
-
-                    // Clustering section
-                    self.render_section(ui, "Clustering", true, |app, ui| {
-                        app.render_clustering_controls(ui);
-                    });
-
-                    // View section
-                    self.render_section(ui, "View", true, |app, ui| {
-                        app.render_view_options(ui);
-                    });
-
-                    // Pixel Health section (placeholder)
-                    self.render_section(ui, "Pixel Health", false, |_app, ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Coming soon...")
-                                .size(11.0)
-                                .color(colors.text_dim),
-                        );
-                    });
-
-                    // Export section (placeholder)
-                    self.render_section(ui, "Export", false, |_app, ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Coming soon...")
-                                .size(11.0)
-                                .color(colors.text_dim),
-                        );
-                    });
-                });
-
-                // Spacer to push Open File to bottom
-                ui.add_space(ui.available_height() - 60.0);
-
-                // Progress indicator (when active)
-                self.render_progress_status(ui);
-
-                // Open File button at bottom
-                ui.separator();
-                egui::Frame::none()
-                    .inner_margin(egui::Margin::symmetric(12.0, 12.0))
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.render_file_controls(ui);
+                        // Statistics section
+                        self.render_section(ui, "Statistics", true, |app, ui| {
+                            app.render_statistics(ui);
+                        });
+
+                        // Clustering section
+                        self.render_section(ui, "Clustering", true, |app, ui| {
+                            app.render_clustering_controls(ui);
+                        });
+
+                        // View section
+                        self.render_section(ui, "View", true, |app, ui| {
+                            app.render_view_options(ui);
+                        });
+
+                        // Pixel Health section (placeholder)
+                        self.render_section(ui, "Pixel Health", false, |_app, ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new("Coming soon...")
+                                    .size(11.0)
+                                    .color(colors.text_dim),
+                            );
+                        });
+
+                        // Export section (placeholder)
+                        self.render_section(ui, "Export", false, |_app, ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new("Coming soon...")
+                                    .size(11.0)
+                                    .color(colors.text_dim),
+                            );
+                        });
+
+                        // Progress indicator (when active)
+                        self.render_progress_status(ui);
+
+                        // Open File button
+                        ui.separator();
+                        egui::Frame::none()
+                            .inner_margin(egui::Margin::symmetric(12.0, 12.0))
+                            .show(ui, |ui| {
+                                self.render_file_controls(ui);
+                            });
                     });
             });
     }
