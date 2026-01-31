@@ -88,7 +88,19 @@ impl RustpixApp {
             self.roi_state.cancel_draft();
         }
         if commit_polygon {
-            let _ = self.roi_state.commit_polygon(3);
+            if let Err(err) = self.roi_state.commit_polygon(3) {
+                let message = match err {
+                    crate::viewer::RoiCommitError::TooFewPoints => {
+                        "Polygon needs at least 3 points".to_string()
+                    }
+                    crate::viewer::RoiCommitError::SelfIntersecting => {
+                        "Polygon edges cannot self-intersect".to_string()
+                    }
+                };
+                let expires_at = ctx.input(|i| i.time) + 2.5;
+                self.ui_state.roi_warning = Some((message, expires_at));
+                self.roi_state.cancel_draft();
+            }
         }
 
         egui::CentralPanel::default()
@@ -266,6 +278,58 @@ impl RustpixApp {
                                         let poly_drawing = roi_mode == RoiSelectionMode::Polygon
                                             && (shift_down
                                                 || self.roi_state.polygon_draft.is_some());
+                                        if response.hovered() {
+                                            if rect_drawing || poly_drawing {
+                                                plot_ui
+                                                    .ctx()
+                                                    .set_cursor_icon(egui::CursorIcon::Crosshair);
+                                            } else if let Some(pos) = pointer_pos {
+                                                if let Some((_, handle)) = self
+                                                    .roi_state
+                                                    .hit_test_handle(pos, handle_radius)
+                                                {
+                                                    let icon = match handle {
+                                                        crate::viewer::RoiHandle::North
+                                                        | crate::viewer::RoiHandle::South => {
+                                                            egui::CursorIcon::ResizeVertical
+                                                        }
+                                                        crate::viewer::RoiHandle::East
+                                                        | crate::viewer::RoiHandle::West => {
+                                                            egui::CursorIcon::ResizeHorizontal
+                                                        }
+                                                        crate::viewer::RoiHandle::NorthEast
+                                                        | crate::viewer::RoiHandle::SouthWest => {
+                                                            egui::CursorIcon::ResizeNeSw
+                                                        }
+                                                        crate::viewer::RoiHandle::NorthWest
+                                                        | crate::viewer::RoiHandle::SouthEast => {
+                                                            egui::CursorIcon::ResizeNwSe
+                                                        }
+                                                    };
+                                                    plot_ui.ctx().set_cursor_icon(icon);
+                                                } else if self
+                                                    .roi_state
+                                                    .hit_test_vertex(pos, handle_radius)
+                                                    .is_some()
+                                                {
+                                                    plot_ui.ctx().set_cursor_icon(
+                                                        egui::CursorIcon::Crosshair,
+                                                    );
+                                                } else if self
+                                                    .roi_state
+                                                    .hit_test_edge(pos, handle_radius)
+                                                    .is_some()
+                                                {
+                                                    plot_ui.ctx().set_cursor_icon(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                } else if self.roi_state.hit_test(pos).is_some() {
+                                                    plot_ui
+                                                        .ctx()
+                                                        .set_cursor_icon(egui::CursorIcon::Grab);
+                                                }
+                                            }
+                                        }
 
                                         if rect_drawing {
                                             if response.drag_started() {
@@ -333,7 +397,21 @@ impl RustpixApp {
                                                 }
                                             }
                                             if response.drag_stopped() {
-                                                self.roi_state.end_vertex_drag();
+                                                if let Err(err) =
+                                                    self.roi_state.end_vertex_drag()
+                                                {
+                                                    let message = match err {
+                                                        crate::viewer::RoiCommitError::TooFewPoints => {
+                                                            "Polygon needs at least 3 points".to_string()
+                                                        }
+                                                        crate::viewer::RoiCommitError::SelfIntersecting => {
+                                                            "Polygon edges cannot self-intersect".to_string()
+                                                        }
+                                                    };
+                                                    let expires_at = ctx.input(|i| i.time) + 2.5;
+                                                    self.ui_state.roi_warning =
+                                                        Some((message, expires_at));
+                                                }
                                                 self.roi_state.end_edit_drag();
                                                 self.roi_state.end_drag();
                                             }
@@ -387,14 +465,34 @@ impl RustpixApp {
                                             && !self.roi_state.is_edit_dragging()
                                         {
                                             if let Some(pos) = pointer_pos {
-                                                if self
+                                                match self
                                                     .roi_state
                                                     .insert_vertex_at(pos, handle_radius)
-                                                    || self.roi_state.hit_test(pos).is_some()
                                                 {
-                                                    self.roi_state.select_at(pos);
-                                                } else {
-                                                    self.roi_state.clear_edit_mode();
+                                                    Ok(true) => {
+                                                        self.roi_state.select_at(pos);
+                                                    }
+                                                    Ok(false) => {
+                                                        if self.roi_state.hit_test(pos).is_some() {
+                                                            self.roi_state.select_at(pos);
+                                                        } else {
+                                                            self.roi_state.clear_edit_mode();
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        let message = match err {
+                                                            crate::viewer::RoiCommitError::TooFewPoints => {
+                                                                "Polygon needs at least 3 points".to_string()
+                                                            }
+                                                            crate::viewer::RoiCommitError::SelfIntersecting => {
+                                                                "Polygon edges cannot self-intersect".to_string()
+                                                            }
+                                                        };
+                                                        let expires_at =
+                                                            ctx.input(|i| i.time) + 2.5;
+                                                        self.ui_state.roi_warning =
+                                                            Some((message, expires_at));
+                                                    }
                                                 }
                                             }
                                         }

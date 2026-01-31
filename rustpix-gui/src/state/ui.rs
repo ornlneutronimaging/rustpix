@@ -70,4 +70,6 @@ pub struct UiState {
     pub show_grid: bool,
     /// Flag to trigger plot bounds reset (auto-fit to data).
     pub needs_plot_reset: bool,
+    /// Transient ROI warning message (text, expires at time).
+    pub roi_warning: Option<(String, f64)>,
 }

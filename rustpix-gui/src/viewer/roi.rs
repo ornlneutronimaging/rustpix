@@ -81,6 +81,13 @@ pub struct RoiVertexDrag {
     pub index: usize,
     pub last: PlotPoint,
     pub bounds: PlotBounds,
+    pub previous: Vec<(f64, f64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoiCommitError {
+    TooFewPoints,
+    SelfIntersecting,
 }
 
 /// ROI session state.
@@ -265,13 +272,17 @@ impl RoiState {
     }
 
     /// Commit polygon draft into a ROI.
-    pub fn commit_polygon(&mut self, min_points: usize) -> bool {
-        let Some(draft) = self.polygon_draft.take() else {
-            return false;
+    pub fn commit_polygon(&mut self, min_points: usize) -> Result<(), RoiCommitError> {
+        let Some(draft) = self.polygon_draft.clone() else {
+            return Ok(());
         };
         if draft.vertices.len() < min_points {
-            return false;
+            return Err(RoiCommitError::TooFewPoints);
         }
+        if polygon_self_intersects(&draft.vertices) {
+            return Err(RoiCommitError::SelfIntersecting);
+        }
+        let _ = self.polygon_draft.take();
 
         let id = self.next_id.max(1);
         self.next_id = id + 1;
@@ -290,7 +301,7 @@ impl RoiState {
 
         self.rois.push(roi);
         self.set_selected(Some(id));
-        true
+        Ok(())
     }
 
     /// Select the topmost ROI containing the point.
@@ -410,11 +421,21 @@ impl RoiState {
         bounds: PlotBounds,
     ) {
         self.set_edit_mode(roi_id, true);
+        let previous = self
+            .rois
+            .iter()
+            .find(|roi| roi.id == roi_id)
+            .and_then(|roi| match &roi.shape {
+                RoiShape::Polygon { vertices } => Some(vertices.clone()),
+                RoiShape::Rectangle { .. } => None,
+            })
+            .unwrap_or_default();
         self.vertex_drag = Some(RoiVertexDrag {
             roi_id,
             index,
             last: start,
             bounds,
+            previous,
         });
     }
 
@@ -430,8 +451,19 @@ impl RoiState {
     }
 
     /// End vertex drag.
-    pub fn end_vertex_drag(&mut self) {
-        self.vertex_drag = None;
+    pub fn end_vertex_drag(&mut self) -> Result<(), RoiCommitError> {
+        let Some(drag) = self.vertex_drag.take() else {
+            return Ok(());
+        };
+        if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == drag.roi_id) {
+            if let RoiShape::Polygon { vertices } = &mut roi.shape {
+                if polygon_self_intersects(vertices) {
+                    *vertices = drag.previous;
+                    return Err(RoiCommitError::SelfIntersecting);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Bounds captured at vertex drag start (used to freeze pan).
@@ -450,14 +482,25 @@ impl RoiState {
     }
 
     /// Insert a polygon vertex on edge hit.
-    pub fn insert_vertex_at(&mut self, point: PlotPoint, threshold: f64) -> bool {
+    pub fn insert_vertex_at(
+        &mut self,
+        point: PlotPoint,
+        threshold: f64,
+    ) -> Result<bool, RoiCommitError> {
         if let Some((roi_id, edge_index)) = self.hit_test_edge(point, threshold) {
             if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == roi_id) {
-                roi.insert_vertex(edge_index, point);
-                return true;
+                if let RoiShape::Polygon { vertices } = &mut roi.shape {
+                    let insert_at = (edge_index + 1).min(vertices.len());
+                    vertices.insert(insert_at, (point.x, point.y));
+                    if polygon_self_intersects(vertices) {
+                        vertices.remove(insert_at);
+                        return Err(RoiCommitError::SelfIntersecting);
+                    }
+                    return Ok(true);
+                }
             }
         }
-        false
+        Ok(false)
     }
 
     /// Set the context menu target.
@@ -518,8 +561,40 @@ impl RoiState {
             let stroke_width = if roi.selected { 2.0 } else { 1.0 };
             let stroke = Stroke::new(stroke_width, roi.color);
             let fill = roi_fill_color(roi.color);
-            let points = roi.plot_points();
-            plot_ui.polygon(Polygon::new(points).stroke(stroke).fill_color(fill));
+
+            if let RoiShape::Polygon { vertices } = &roi.shape {
+                if polygon_is_convex(vertices) {
+                    let points = roi.plot_points();
+                    plot_ui.polygon(Polygon::new(points).stroke(stroke).fill_color(fill));
+                } else {
+                    let triangles = triangulate_polygon(vertices);
+                    if triangles.is_empty() {
+                        let line_points = roi.closed_line_points();
+                        plot_ui.line(
+                            Line::new(PlotPoints::new(line_points))
+                                .color(roi.color)
+                                .width(stroke_width),
+                        );
+                    } else {
+                        for tri in triangles {
+                            plot_ui.polygon(
+                                Polygon::new(vec![tri[0], tri[1], tri[2]])
+                                    .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
+                                    .fill_color(fill),
+                            );
+                        }
+                        let line_points = roi.closed_line_points();
+                        plot_ui.line(
+                            Line::new(PlotPoints::new(line_points))
+                                .color(roi.color)
+                                .width(stroke_width),
+                        );
+                    }
+                }
+            } else {
+                let points = roi.plot_points();
+                plot_ui.polygon(Polygon::new(points).stroke(stroke).fill_color(fill));
+            }
 
             let label_pos = roi.label_position();
             plot_ui.text(
@@ -829,6 +904,23 @@ impl Roi {
         }
     }
 
+    fn closed_line_points(&self) -> Vec<[f64; 2]> {
+        match &self.shape {
+            RoiShape::Polygon { vertices } => {
+                if vertices.len() < 2 {
+                    return Vec::new();
+                }
+                let mut points: Vec<[f64; 2]> = vertices.iter().map(|(x, y)| [*x, *y]).collect();
+                let first = points[0];
+                points.push(first);
+                points
+            }
+            RoiShape::Rectangle { x1, y1, x2, y2 } => {
+                vec![[*x1, *y1], [*x2, *y1], [*x2, *y2], [*x1, *y2], [*x1, *y1]]
+            }
+        }
+    }
+
     fn vertex_hit(&self, point: PlotPoint, threshold: f64) -> Option<usize> {
         let RoiShape::Polygon { vertices } = &self.shape else {
             return None;
@@ -877,14 +969,6 @@ impl Roi {
         }
     }
 
-    fn insert_vertex(&mut self, edge_index: usize, point: PlotPoint) {
-        let RoiShape::Polygon { vertices } = &mut self.shape else {
-            return;
-        };
-        let insert_at = (edge_index + 1).min(vertices.len());
-        vertices.insert(insert_at, (point.x, point.y));
-    }
-
     fn delete_vertex(&mut self, index: usize) -> bool {
         let RoiShape::Polygon { vertices } = &mut self.shape else {
             return false;
@@ -914,6 +998,193 @@ fn distance_point_to_segment(point: PlotPoint, a: (f64, f64), b: (f64, f64)) -> 
     let closest_x = ax + abx * t;
     let closest_y = ay + aby * t;
     ((px - closest_x).powi(2) + (py - closest_y).powi(2)).sqrt()
+}
+
+fn polygon_self_intersects(vertices: &[(f64, f64)]) -> bool {
+    let n = vertices.len();
+    if n < 4 {
+        return false;
+    }
+    for i in 0..n {
+        let a1 = vertices[i];
+        let a2 = vertices[(i + 1) % n];
+        for j in (i + 1)..n {
+            let b1 = vertices[j];
+            let b2 = vertices[(j + 1) % n];
+            if shares_endpoint(i, j, n) {
+                continue;
+            }
+            if segments_intersect(a1, a2, b1, b2) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn polygon_is_convex(vertices: &[(f64, f64)]) -> bool {
+    if vertices.len() < 4 {
+        return true;
+    }
+    let mut sign = 0.0;
+    let n = vertices.len();
+    for i in 0..n {
+        let (x1, y1) = vertices[i];
+        let (x2, y2) = vertices[(i + 1) % n];
+        let (x3, y3) = vertices[(i + 2) % n];
+        let cross = (x2 - x1) * (y3 - y2) - (y2 - y1) * (x3 - x2);
+        if cross.abs() <= f64::EPSILON {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross;
+        } else if sign * cross < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn triangulate_polygon(vertices: &[(f64, f64)]) -> Vec<[[f64; 2]; 3]> {
+    let n = vertices.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let area = polygon_area2(vertices);
+    if area.abs() <= f64::EPSILON {
+        return Vec::new();
+    }
+    let ccw = area > 0.0;
+    let mut indices: Vec<usize> = (0..n).collect();
+    let mut triangles = Vec::new();
+    let mut guard = 0;
+    while indices.len() > 2 && guard < n * n {
+        guard += 1;
+        let mut ear_found = false;
+        for i in 0..indices.len() {
+            let prev = indices[(i + indices.len() - 1) % indices.len()];
+            let curr = indices[i];
+            let next = indices[(i + 1) % indices.len()];
+            if !is_convex(vertices[prev], vertices[curr], vertices[next], ccw) {
+                continue;
+            }
+            if triangle_area2(vertices[prev], vertices[curr], vertices[next]).abs() <= f64::EPSILON
+            {
+                continue;
+            }
+            let mut contains = false;
+            for &idx in &indices {
+                if idx == prev || idx == curr || idx == next {
+                    continue;
+                }
+                if point_in_triangle(
+                    vertices[idx],
+                    vertices[prev],
+                    vertices[curr],
+                    vertices[next],
+                ) {
+                    contains = true;
+                    break;
+                }
+            }
+            if contains {
+                continue;
+            }
+            triangles.push([
+                [vertices[prev].0, vertices[prev].1],
+                [vertices[curr].0, vertices[curr].1],
+                [vertices[next].0, vertices[next].1],
+            ]);
+            indices.remove(i);
+            ear_found = true;
+            break;
+        }
+        if !ear_found {
+            break;
+        }
+    }
+    triangles
+}
+
+fn polygon_area2(vertices: &[(f64, f64)]) -> f64 {
+    let mut area = 0.0;
+    for i in 0..vertices.len() {
+        let (x1, y1) = vertices[i];
+        let (x2, y2) = vertices[(i + 1) % vertices.len()];
+        area += x1 * y2 - x2 * y1;
+    }
+    area
+}
+
+fn triangle_area2(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
+    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+}
+
+fn is_convex(a: (f64, f64), b: (f64, f64), c: (f64, f64), ccw: bool) -> bool {
+    let cross = triangle_area2(a, b, c);
+    if ccw {
+        cross > f64::EPSILON
+    } else {
+        cross < -f64::EPSILON
+    }
+}
+
+fn point_in_triangle(p: (f64, f64), a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> bool {
+    let area1 = triangle_area2(p, a, b);
+    let area2 = triangle_area2(p, b, c);
+    let area3 = triangle_area2(p, c, a);
+
+    let has_neg = area1 < -f64::EPSILON || area2 < -f64::EPSILON || area3 < -f64::EPSILON;
+    let has_pos = area1 > f64::EPSILON || area2 > f64::EPSILON || area3 > f64::EPSILON;
+    !(has_neg && has_pos)
+}
+
+fn shares_endpoint(i: usize, j: usize, n: usize) -> bool {
+    if i == j {
+        return true;
+    }
+    let next_i = (i + 1) % n;
+    let next_j = (j + 1) % n;
+    i == next_j || j == next_i
+}
+
+fn segments_intersect(a1: (f64, f64), a2: (f64, f64), b1: (f64, f64), b2: (f64, f64)) -> bool {
+    let d1 = direction(a1, a2, b1);
+    let d2 = direction(a1, a2, b2);
+    let d3 = direction(b1, b2, a1);
+    let d4 = direction(b1, b2, a2);
+
+    if (d1 > 0.0 && d2 < 0.0 || d1 < 0.0 && d2 > 0.0)
+        && (d3 > 0.0 && d4 < 0.0 || d3 < 0.0 && d4 > 0.0)
+    {
+        return true;
+    }
+
+    if d1.abs() <= f64::EPSILON && on_segment(a1, a2, b1) {
+        return true;
+    }
+    if d2.abs() <= f64::EPSILON && on_segment(a1, a2, b2) {
+        return true;
+    }
+    if d3.abs() <= f64::EPSILON && on_segment(b1, b2, a1) {
+        return true;
+    }
+    if d4.abs() <= f64::EPSILON && on_segment(b1, b2, a2) {
+        return true;
+    }
+    false
+}
+
+fn direction(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
+    (c.0 - a.0) * (b.1 - a.1) - (c.1 - a.1) * (b.0 - a.0)
+}
+
+fn on_segment(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> bool {
+    let min_x = a.0.min(b.0) - f64::EPSILON;
+    let max_x = a.0.max(b.0) + f64::EPSILON;
+    let min_y = a.1.min(b.1) - f64::EPSILON;
+    let max_y = a.1.max(b.1) + f64::EPSILON;
+    c.0 >= min_x && c.0 <= max_x && c.1 >= min_y && c.1 <= max_y
 }
 
 fn draft_plot_points(draft: &RoiDraft) -> Vec<[f64; 2]> {
