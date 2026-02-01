@@ -527,16 +527,13 @@ impl RustpixApp {
     }
 
     fn neutron_dimensions(&self, neutrons: &NeutronBatch) -> Option<(u32, u32)> {
-        if let Some(hyperstack) = &self.neutron_hyperstack {
-            let width = u32::try_from(hyperstack.width()).ok()?;
-            let height = u32::try_from(hyperstack.height()).ok()?;
-            return Some((width, height));
-        }
         let mut max_x = 0u32;
         let mut max_y = 0u32;
+        let mut saw_point = false;
         for (&x, &y) in neutrons.x.iter().zip(neutrons.y.iter()) {
             let x_u32 = f64_to_u32_checked(x)?;
             let y_u32 = f64_to_u32_checked(y)?;
+            saw_point = true;
             if x_u32 > max_x {
                 max_x = x_u32;
             }
@@ -544,7 +541,20 @@ impl RustpixApp {
                 max_y = y_u32;
             }
         }
-        Some((max_x.saturating_add(1), max_y.saturating_add(1)))
+        if !saw_point {
+            return None;
+        }
+        let mut x_size = max_x.saturating_add(1);
+        let mut y_size = max_y.saturating_add(1);
+        if let Some(hyperstack) = &self.neutron_hyperstack {
+            if let Ok(width) = u32::try_from(hyperstack.width()) {
+                x_size = x_size.max(width);
+            }
+            if let Ok(height) = u32::try_from(hyperstack.height()) {
+                y_size = y_size.max(height);
+            }
+        }
+        Some((x_size, y_size))
     }
 
     fn active_data_revision(&self) -> u64 {

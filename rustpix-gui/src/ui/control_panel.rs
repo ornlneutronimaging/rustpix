@@ -34,8 +34,38 @@ impl RustpixApp {
                     }),
             )
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.set_min_height(36.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     let colors = ThemeColors::from_ui(ui);
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+
+                    let separator = |ui: &mut egui::Ui| {
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
+                        ui.add_space(2.0);
+                    };
+
+                    let can_load = !self.processing.is_loading && !self.processing.is_processing;
+                    let can_export = self.hit_batch.is_some()
+                        || !self.neutrons.is_empty()
+                        || self.hyperstack.is_some()
+                        || self.neutron_hyperstack.is_some();
+
+                    let icon_button = |ui: &mut egui::Ui,
+                                       icon: FileToolbarIcon,
+                                       enabled: bool,
+                                       tooltip: &str| {
+                        let image = Self::file_icon_image(icon, colors.text_primary)
+                            .fit_to_exact_size(egui::vec2(16.0, 16.0));
+                        let btn = egui::ImageButton::new(image)
+                            .frame(true)
+                            .rounding(Rounding::same(4.0));
+                        let response = ui
+                            .add_enabled_ui(enabled, |ui| ui.add_sized(egui::vec2(30.0, 28.0), btn))
+                            .inner;
+                        response.on_hover_text(tooltip)
+                    };
+
                     // RUSTPIX branding
                     ui.label(
                         egui::RichText::new("RUSTPIX")
@@ -44,26 +74,9 @@ impl RustpixApp {
                             .color(accent::BLUE),
                     );
 
-                    ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
+                    separator(ui);
 
-                    let can_load = !self.processing.is_loading && !self.processing.is_processing;
-                    let can_export = self.hit_batch.is_some()
-                        || !self.neutrons.is_empty()
-                        || self.hyperstack.is_some()
-                        || self.neutron_hyperstack.is_some();
-
-                    if ui
-                        .add_enabled(
-                            can_load,
-                            egui::ImageButton::new(
-                                Self::file_icon_image(FileToolbarIcon::Open, colors.text_muted)
-                                    .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-                            )
-                            .frame(true),
-                        )
-                        .on_hover_text("Open file")
-                        .clicked()
-                    {
+                    if icon_button(ui, FileToolbarIcon::Open, can_load, "Open file").clicked() {
                         if let Some(path) =
                             FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file()
                         {
@@ -71,60 +84,48 @@ impl RustpixApp {
                         }
                     }
 
-                    if ui
-                        .add_enabled(
-                            can_export,
-                            egui::ImageButton::new(
-                                Self::file_icon_image(FileToolbarIcon::Export, colors.text_muted)
-                                    .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-                            )
-                            .frame(true),
-                        )
-                        .on_hover_text("Export HDF5")
-                        .clicked()
+                    if icon_button(ui, FileToolbarIcon::Export, can_export, "Export HDF5").clicked()
                     {
                         self.ui_state.show_export_dialog = true;
                     }
 
-                    ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
+                    separator(ui);
 
-                    let status_text = if let Some(p) = &self.selected_file {
-                        let name = p.file_name().unwrap_or_default().to_string_lossy();
-                        if self.statistics.hit_count > 0 {
-                            format!(
-                                "{} • {} hits",
-                                name,
-                                format_number(self.statistics.hit_count)
-                            )
+                    let (status_text, status_color, status_bold) =
+                        if let Some(p) = &self.selected_file {
+                            let name = p.file_name().unwrap_or_default().to_string_lossy();
+                            if self.statistics.hit_count > 0 {
+                                (
+                                    format!(
+                                        "{} • {} hits",
+                                        name,
+                                        format_number(self.statistics.hit_count)
+                                    ),
+                                    colors.text_muted,
+                                    false,
+                                )
+                            } else {
+                                (format!("{name}"), colors.text_muted, false)
+                            }
                         } else {
-                            format!("{name}")
-                        }
-                    } else {
-                        "No file loaded".to_string()
-                    };
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .size(11.0)
-                            .color(colors.text_muted),
-                    );
+                            ("No file loaded".to_string(), colors.text_primary, true)
+                        };
+                    let mut status_rich = egui::RichText::new(status_text)
+                        .size(13.0)
+                        .color(status_color);
+                    if status_bold {
+                        status_rich = status_rich.strong();
+                    }
+                    ui.label(status_rich);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        // Settings gear icon (hyperstack settings)
-                        if ui
-                            .add(
-                                egui::Button::new("⚙")
-                                    .fill(Color32::TRANSPARENT)
-                                    .stroke(Stroke::new(1.0, colors.border_light))
-                                    .rounding(Rounding::same(4.0)),
-                            )
-                            .on_hover_text("Hyperstack settings")
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+
+                        if icon_button(ui, FileToolbarIcon::Gear, true, "Hyperstack settings")
                             .clicked()
                         {
                             self.ui_state.show_app_settings = !self.ui_state.show_app_settings;
                         }
-
-                        ui.add_space(12.0);
 
                         // HITS/NEUTRONS toggle buttons
                         self.render_view_mode_toggle(ui);
@@ -368,18 +369,26 @@ impl RustpixApp {
         ui.push_id(title, |ui| {
             let colors = ThemeColors::from_ui(ui);
             // Header
-            let header_response = ui.add(
-                egui::Button::new(
-                    egui::RichText::new(title.to_uppercase())
-                        .size(11.0)
-                        .strong()
-                        .color(colors.text_primary),
-                )
-                .fill(Color32::TRANSPARENT)
-                .stroke(Stroke::NONE)
-                .rounding(Rounding::ZERO)
-                .min_size(egui::vec2(ui.available_width(), 0.0)),
-            );
+            let header_response = ui
+                .scope(|ui| {
+                    let old_padding = ui.spacing().button_padding;
+                    ui.spacing_mut().button_padding = egui::vec2(16.0, old_padding.y);
+                    let response = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(title.to_uppercase())
+                                .size(11.0)
+                                .strong()
+                                .color(colors.text_primary),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::ZERO)
+                        .min_size(egui::vec2(ui.available_width(), 0.0)),
+                    );
+                    ui.spacing_mut().button_padding = old_padding;
+                    response
+                })
+                .inner;
 
             // Get/toggle state
             let id = ui.make_persistent_id(format!("{title}_open"));
