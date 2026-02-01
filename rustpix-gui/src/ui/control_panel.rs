@@ -861,6 +861,7 @@ impl RustpixApp {
     }
 
     /// Render pixel health (dead/hot masks) summary and controls.
+    #[allow(clippy::too_many_lines)]
     fn render_pixel_health(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
         let (dead_count, hot_count, mean, std_dev, threshold) =
@@ -933,6 +934,16 @@ impl RustpixApp {
             &mut self.ui_state.show_hot_pixels,
             "Show hot pixels overlay",
         );
+        let mut exclude_masked = self.ui_state.exclude_masked_pixels;
+        let exclude_response = ui.checkbox(
+            &mut exclude_masked,
+            "Exclude masked pixels from spectra/stats",
+        );
+        if exclude_response.changed() {
+            self.ui_state.exclude_masked_pixels = exclude_masked;
+            self.update_masked_spectrum();
+            self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
+        }
 
         if self.ui_state.show_pixel_health_settings {
             ui.add_space(8.0);
@@ -952,6 +963,10 @@ impl RustpixApp {
                     self.update_pixel_masks();
                 }
             });
+            ui.add_space(6.0);
+            if ui.button("Recompute masks").clicked() {
+                self.update_pixel_masks();
+            }
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(format!(

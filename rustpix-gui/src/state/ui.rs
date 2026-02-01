@@ -132,6 +132,8 @@ pub struct UiState {
     pub show_pixel_health_settings: bool,
     /// Whether to show hot pixel overlay in the viewer.
     pub show_hot_pixels: bool,
+    /// Whether to exclude masked pixels from spectra/statistics.
+    pub exclude_masked_pixels: bool,
     /// Whether an HDF5 export is in progress.
     pub export_in_progress: bool,
     /// Export progress value from 0.0 to 1.0.

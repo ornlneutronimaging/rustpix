@@ -15,6 +15,8 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use eframe::egui;
 use hdf5::filters::deflate_available;
+use hdf5::filters::Filter;
+use hdf5::File;
 use sysinfo::{get_current_pid, Pid, System};
 
 use crate::histogram::Hyperstack3D;
@@ -133,6 +135,8 @@ pub struct RustpixApp {
     pub(crate) hit_counts: Option<Vec<u64>>,
     /// Cached TOF spectrum (sum over all pixels).
     pub(crate) tof_spectrum: Option<Vec<u64>>,
+    /// Cached TOF spectrum excluding masked pixels.
+    pub(crate) masked_tof_spectrum: Option<Vec<u64>>,
     /// Extracted neutron events.
     pub(crate) neutrons: Arc<NeutronBatch>,
     /// 3D hyperstack for neutron data.
@@ -199,6 +203,7 @@ impl Default for RustpixApp {
         let ui_state = UiState {
             full_fov_visible: true,
             show_hot_pixels: true,
+            exclude_masked_pixels: true,
             ..Default::default()
         };
         Self {
@@ -213,6 +218,7 @@ impl Default for RustpixApp {
             hyperstack: None,
             hit_counts: None,
             tof_spectrum: None,
+            masked_tof_spectrum: None,
             neutrons: Arc::new(NeutronBatch::default()),
             neutron_hyperstack: None,
             neutron_counts: None,
@@ -270,6 +276,7 @@ impl RustpixApp {
         self.hyperstack = None;
         self.hit_counts = None;
         self.tof_spectrum = None;
+        self.masked_tof_spectrum = None;
         self.neutrons = Arc::new(NeutronBatch::default());
         self.neutron_hyperstack = None;
         self.neutron_counts = None;
@@ -455,6 +462,27 @@ impl RustpixApp {
             hot_sigma: sigma,
             hot_threshold: threshold,
         });
+
+        self.update_masked_spectrum();
+        if self.ui_state.exclude_masked_pixels {
+            self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn update_masked_spectrum(&mut self) {
+        self.masked_tof_spectrum = None;
+        if !self.ui_state.exclude_masked_pixels {
+            return;
+        }
+        let Some(hyperstack) = self.hyperstack.as_deref() else {
+            return;
+        };
+        let Some(mask) = self.pixel_masks.as_ref() else {
+            return;
+        };
+        if let Some(spectrum) = compute_masked_spectrum(hyperstack, mask) {
+            self.masked_tof_spectrum = Some(spectrum);
+        }
     }
 
     pub(crate) fn memory_rss_bytes(&self) -> u64 {
@@ -489,6 +517,13 @@ impl RustpixApp {
             let bytes = slice_bytes(spectrum.as_slice());
             if bytes > 0 {
                 entries.push(("Hit spectrum".to_string(), bytes));
+            }
+        }
+
+        if let Some(spectrum) = self.masked_tof_spectrum.as_ref() {
+            let bytes = slice_bytes(spectrum.as_slice());
+            if bytes > 0 {
+                entries.push(("Hit spectrum (masked)".to_string(), bytes));
             }
         }
 
@@ -547,7 +582,15 @@ impl RustpixApp {
     /// Get the cached TOF spectrum (full detector integration).
     pub fn tof_spectrum(&self) -> Option<&[u64]> {
         match self.ui_state.view_mode {
-            ViewMode::Hits => self.tof_spectrum.as_deref(),
+            ViewMode::Hits => {
+                if self.ui_state.exclude_masked_pixels {
+                    self.masked_tof_spectrum
+                        .as_deref()
+                        .or(self.tof_spectrum.as_deref())
+                } else {
+                    self.tof_spectrum.as_deref()
+                }
+            }
             ViewMode::Neutrons => self.neutron_spectrum.as_deref(),
         }
     }
@@ -611,8 +654,8 @@ impl RustpixApp {
             );
 
             match result {
-                Ok(size) => {
-                    let _ = tx.send(AppMessage::ExportComplete(path, size));
+                Ok((size, warnings)) => {
+                    let _ = tx.send(AppMessage::ExportComplete(path, size, warnings));
                 }
                 Err(err) => {
                     let _ = tx.send(AppMessage::ExportError(err.to_string()));
@@ -787,6 +830,12 @@ impl RustpixApp {
         let width = hyperstack.width();
         let height = hyperstack.height();
         let n_bins = hyperstack.n_tof_bins();
+        let mask =
+            if self.ui_state.exclude_masked_pixels && self.ui_state.view_mode == ViewMode::Hits {
+                self.pixel_masks.as_ref()
+            } else {
+                None
+            };
         let mut spectra = HashMap::with_capacity(self.roi_state.rois.len());
 
         for roi in &self.roi_state.rois {
@@ -799,7 +848,8 @@ impl RustpixApp {
                     }
                 }
             }
-            let Some(data) = Self::compute_roi_spectrum(roi, hyperstack, width, height, n_bins)
+            let Some(data) =
+                Self::compute_roi_spectrum(roi, hyperstack, width, height, n_bins, mask)
             else {
                 continue;
             };
@@ -809,24 +859,70 @@ impl RustpixApp {
         spectra
     }
 
+    #[allow(clippy::too_many_lines)]
     fn compute_roi_spectrum(
         roi: &Roi,
         hyperstack: &Hyperstack3D,
         width: usize,
         height: usize,
         n_bins: usize,
+        mask: Option<&PixelMaskData>,
     ) -> Option<RoiSpectrumData> {
+        let mask_active = mask.is_some_and(|m| {
+            m.dead_mask.len() == width * height && m.hot_mask.len() == width * height
+        });
         match &roi.shape {
             RoiShape::Rectangle { x1, y1, x2, y2 } => {
                 let (x_start, x_end) = clamp_span(*x1, *x2, width);
                 let (y_start, y_end) = clamp_span(*y1, *y2, height);
                 let counts = if x_start < x_end && y_start < y_end {
-                    hyperstack.spectrum(x_start..x_end, y_start..y_end)
+                    if mask_active {
+                        let mut indices = Vec::new();
+                        let mask = mask?;
+                        for y in y_start..y_end {
+                            let row = y * width;
+                            for x in x_start..x_end {
+                                let idx = row + x;
+                                if mask.dead_mask[idx] == 0 && mask.hot_mask[idx] == 0 {
+                                    indices.push(idx);
+                                }
+                            }
+                        }
+                        let mut totals = vec![0u64; n_bins];
+                        for (tof_bin, total) in totals.iter_mut().enumerate() {
+                            let Some(slice) = hyperstack.slice_tof(tof_bin) else {
+                                continue;
+                            };
+                            let mut sum = 0u64;
+                            for idx in &indices {
+                                sum += slice[*idx];
+                            }
+                            *total = sum;
+                        }
+                        totals
+                    } else {
+                        hyperstack.spectrum(x_start..x_end, y_start..y_end)
+                    }
                 } else {
                     vec![0; n_bins]
                 };
                 let area = (x2 - x1).abs() * (y2 - y1).abs();
-                let pixel_count = (x_end - x_start) as u64 * (y_end - y_start) as u64;
+                let pixel_count = if mask_active {
+                    let mask = mask?;
+                    let mut count = 0u64;
+                    for y in y_start..y_end {
+                        let row = y * width;
+                        for x in x_start..x_end {
+                            let idx = row + x;
+                            if mask.dead_mask[idx] == 0 && mask.hot_mask[idx] == 0 {
+                                count += 1;
+                            }
+                        }
+                    }
+                    count
+                } else {
+                    (x_end - x_start) as u64 * (y_end - y_start) as u64
+                };
                 Some(RoiSpectrumData {
                     counts,
                     area,
@@ -847,24 +943,31 @@ impl RustpixApp {
                 }
                 let (x_start, x_end) = clamp_span(min_x, max_x, width);
                 let (y_start, y_end) = clamp_span(min_y, max_y, height);
-                let mut mask = Vec::new();
+                let mut roi_indices = Vec::new();
                 for y in y_start..y_end {
                     let py = usize_to_f64(y) + 0.5;
                     for x in x_start..x_end {
                         let px = usize_to_f64(x) + 0.5;
                         if point_in_polygon_xy(px, py, vertices) {
-                            mask.push(y * width + x);
+                            if mask_active {
+                                let mask = mask?;
+                                let idx = y * width + x;
+                                if mask.dead_mask[idx] == 1 || mask.hot_mask[idx] == 1 {
+                                    continue;
+                                }
+                            }
+                            roi_indices.push(y * width + x);
                         }
                     }
                 }
-                let pixel_count = mask.len() as u64;
+                let pixel_count = roi_indices.len() as u64;
                 let mut counts = vec![0; n_bins];
                 for (tof_bin, count) in counts.iter_mut().enumerate() {
                     let Some(slice) = hyperstack.slice_tof(tof_bin) else {
                         continue;
                     };
                     let mut sum = 0u64;
-                    for idx in &mask {
+                    for idx in &roi_indices {
                         sum += slice[*idx];
                     }
                     *count = sum;
@@ -927,6 +1030,7 @@ impl RustpixApp {
     }
 
     /// Handle pending messages from async workers.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -1006,15 +1110,34 @@ impl RustpixApp {
                     self.ui_state.export_progress = progress;
                     self.ui_state.export_status = status;
                 }
-                AppMessage::ExportComplete(path, size_bytes) => {
+                AppMessage::ExportComplete(path, size_bytes, warnings) => {
                     self.ui_state.export_in_progress = false;
                     self.ui_state.export_progress = 1.0;
-                    self.ui_state.export_status = "Export complete".to_string();
+                    self.ui_state.export_status = if warnings.is_empty() {
+                        "Export complete".to_string()
+                    } else {
+                        "Export complete (warnings)".to_string()
+                    };
                     let size_mb = u64_to_f64(size_bytes) / (1024.0 * 1024.0);
                     self.ui_state.roi_status = Some((
                         format!("Saved HDF5: {} ({size_mb:.1} MB)", path.display()),
                         ctx.input(|i| i.time + 4.0),
                     ));
+                    if !warnings.is_empty() {
+                        log::warn!("HDF5 export validation warnings:");
+                        for warning in &warnings {
+                            log::warn!(" - {warning}");
+                        }
+                        let summary = if warnings.len() == 1 {
+                            warnings[0].clone()
+                        } else {
+                            format!("{} (and {} more)", warnings[0], warnings.len() - 1)
+                        };
+                        self.ui_state.roi_warning = Some((
+                            format!("Export validation: {summary}"),
+                            ctx.input(|i| i.time + 6.0),
+                        ));
+                    }
                 }
                 AppMessage::ExportError(e) => {
                     self.ui_state.export_in_progress = false;
@@ -1047,7 +1170,7 @@ fn export_hdf5_worker(
     tof_offset_ns: f64,
     super_resolution_factor: f64,
     tx: &Sender<AppMessage>,
-) -> Result<u64> {
+) -> Result<(u64, Vec<String>)> {
     ensure_deflate_available()?;
 
     let send_progress = |progress: f32, status: &str| {
@@ -1191,9 +1314,15 @@ fn export_hdf5_worker(
         anyhow!("HDF5 export failed: {err}")
     })?;
 
+    send_progress(0.95, "Validating export");
+    let warnings = match validate_hdf5_export(path, &options) {
+        Ok(list) => list,
+        Err(err) => vec![format!("Validation failed: {err}")],
+    };
+
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     send_progress(1.0, "Export complete");
-    Ok(size)
+    Ok((size, warnings))
 }
 
 fn optional_positive(value: f64) -> Option<f64> {
@@ -1253,6 +1382,199 @@ fn remove_partial_file(path: &Path) {
             "Failed to remove partial HDF5 file {}: {err}",
             path.display()
         );
+    }
+}
+
+fn validate_hdf5_export(path: &Path, options: &Hdf5ExportOptions) -> Result<Vec<String>> {
+    let file = File::open(path)?;
+    let entry = file
+        .group("entry")
+        .map_err(|err| anyhow!("Missing entry group: {err}"))?;
+    let mut warnings = Vec::new();
+
+    if options.include_hits {
+        validate_hits_group(&entry, options, &mut warnings);
+    }
+    if options.include_neutrons {
+        validate_neutrons_group(&entry, options, &mut warnings);
+    }
+    if options.include_histogram {
+        validate_histogram_group(&entry, options, &mut warnings);
+    }
+    if options.include_pixel_masks {
+        validate_pixel_mask_group(&entry, options, &mut warnings);
+    }
+
+    Ok(warnings)
+}
+
+fn validate_hits_group(
+    entry: &hdf5::Group,
+    options: &Hdf5ExportOptions,
+    warnings: &mut Vec<String>,
+) {
+    let Ok(group) = entry.group("hits") else {
+        warnings.push("Missing group: entry/hits".to_string());
+        return;
+    };
+    let required = [
+        "event_id",
+        "event_time_offset",
+        "event_time_zero",
+        "event_index",
+    ];
+    for name in required {
+        if group.dataset(name).is_err() {
+            warnings.push(format!("Missing hits dataset: {name}"));
+        }
+    }
+    if options.include_tot && group.dataset("time_over_threshold").is_err() {
+        warnings.push("Missing hits dataset: time_over_threshold".to_string());
+    }
+    if options.include_chip_id && group.dataset("chip_id").is_err() {
+        warnings.push("Missing hits dataset: chip_id".to_string());
+    }
+    if options.include_cluster_id && group.dataset("cluster_id").is_err() {
+        warnings.push("Missing hits dataset: cluster_id".to_string());
+    }
+    if options.include_xy {
+        if group.dataset("x").is_err() {
+            warnings.push("Missing hits dataset: x".to_string());
+        }
+        if group.dataset("y").is_err() {
+            warnings.push("Missing hits dataset: y".to_string());
+        }
+    }
+
+    if let Ok(event_id) = group.dataset("event_id") {
+        if event_id.size() == 0 {
+            warnings.push("Hits dataset is empty".to_string());
+        }
+        check_dataset_filters(&event_id, "hits/event_id", options, warnings);
+    }
+    if let Ok(time_offset) = group.dataset("event_time_offset") {
+        check_dataset_filters(&time_offset, "hits/event_time_offset", options, warnings);
+    }
+}
+
+fn validate_neutrons_group(
+    entry: &hdf5::Group,
+    options: &Hdf5ExportOptions,
+    warnings: &mut Vec<String>,
+) {
+    let Ok(group) = entry.group("neutrons") else {
+        warnings.push("Missing group: entry/neutrons".to_string());
+        return;
+    };
+    let required = [
+        "event_id",
+        "event_time_offset",
+        "event_time_zero",
+        "event_index",
+    ];
+    for name in required {
+        if group.dataset(name).is_err() {
+            warnings.push(format!("Missing neutrons dataset: {name}"));
+        }
+    }
+    if options.include_tot && group.dataset("time_over_threshold").is_err() {
+        warnings.push("Missing neutrons dataset: time_over_threshold".to_string());
+    }
+    if options.include_chip_id && group.dataset("chip_id").is_err() {
+        warnings.push("Missing neutrons dataset: chip_id".to_string());
+    }
+    if options.include_n_hits && group.dataset("n_hits").is_err() {
+        warnings.push("Missing neutrons dataset: n_hits".to_string());
+    }
+    if options.include_xy {
+        if group.dataset("x").is_err() {
+            warnings.push("Missing neutrons dataset: x".to_string());
+        }
+        if group.dataset("y").is_err() {
+            warnings.push("Missing neutrons dataset: y".to_string());
+        }
+    }
+
+    if let Ok(event_id) = group.dataset("event_id") {
+        if event_id.size() == 0 {
+            warnings.push("Neutron dataset is empty".to_string());
+        }
+        check_dataset_filters(&event_id, "neutrons/event_id", options, warnings);
+    }
+    if let Ok(time_offset) = group.dataset("event_time_offset") {
+        check_dataset_filters(
+            &time_offset,
+            "neutrons/event_time_offset",
+            options,
+            warnings,
+        );
+    }
+}
+
+fn validate_histogram_group(
+    entry: &hdf5::Group,
+    options: &Hdf5ExportOptions,
+    warnings: &mut Vec<String>,
+) {
+    let Ok(group) = entry.group("histogram") else {
+        warnings.push("Missing group: entry/histogram".to_string());
+        return;
+    };
+    let Ok(counts) = group.dataset("counts") else {
+        warnings.push("Missing histogram dataset: counts".to_string());
+        return;
+    };
+    if counts.size() == 0 {
+        warnings.push("Histogram counts dataset is empty".to_string());
+    }
+    check_dataset_filters(&counts, "histogram/counts", options, warnings);
+}
+
+fn validate_pixel_mask_group(
+    entry: &hdf5::Group,
+    options: &Hdf5ExportOptions,
+    warnings: &mut Vec<String>,
+) {
+    let Ok(group) = entry.group("pixel_masks") else {
+        warnings.push("Missing group: entry/pixel_masks".to_string());
+        return;
+    };
+    if let Ok(dead) = group.dataset("dead") {
+        if dead.size() == 0 {
+            warnings.push("Pixel mask dataset dead is empty".to_string());
+        }
+        check_dataset_filters(&dead, "pixel_masks/dead", options, warnings);
+    } else {
+        warnings.push("Missing pixel mask dataset: dead".to_string());
+    }
+    if let Ok(hot) = group.dataset("hot") {
+        if hot.size() == 0 {
+            warnings.push("Pixel mask dataset hot is empty".to_string());
+        }
+        check_dataset_filters(&hot, "pixel_masks/hot", options, warnings);
+    } else {
+        warnings.push("Missing pixel mask dataset: hot".to_string());
+    }
+}
+
+fn check_dataset_filters(
+    dataset: &hdf5::Dataset,
+    label: &str,
+    options: &Hdf5ExportOptions,
+    warnings: &mut Vec<String>,
+) {
+    let filters = dataset.filters();
+    if options.compression_level > 0 {
+        let has_deflate = filters.iter().any(|f| matches!(f, Filter::Deflate(_)));
+        if !has_deflate {
+            warnings.push(format!("Missing deflate compression on {label}"));
+        }
+    }
+    if options.shuffle {
+        let has_shuffle = filters.iter().any(|f| matches!(f, Filter::Shuffle));
+        if !has_shuffle {
+            warnings.push(format!("Missing shuffle filter on {label}"));
+        }
     }
 }
 
@@ -1386,6 +1708,34 @@ fn point_in_polygon_xy(x: f64, y: f64, vertices: &[(f64, f64)]) -> bool {
         j = i;
     }
     inside
+}
+
+fn compute_masked_spectrum(hyperstack: &Hyperstack3D, mask: &PixelMaskData) -> Option<Vec<u64>> {
+    let width = hyperstack.width();
+    let height = hyperstack.height();
+    let expected = width.saturating_mul(height);
+    if mask.dead_mask.len() != expected || mask.hot_mask.len() != expected {
+        return None;
+    }
+    let mut active_indices = Vec::new();
+    for idx in 0..expected {
+        if mask.dead_mask[idx] == 0 && mask.hot_mask[idx] == 0 {
+            active_indices.push(idx);
+        }
+    }
+    let n_bins = hyperstack.n_tof_bins();
+    let mut counts = vec![0u64; n_bins];
+    for (tof_bin, total) in counts.iter_mut().enumerate() {
+        let Some(slice) = hyperstack.slice_tof(tof_bin) else {
+            continue;
+        };
+        let mut sum = 0u64;
+        for idx in &active_indices {
+            sum += slice[*idx];
+        }
+        *total = sum;
+    }
+    Some(counts)
 }
 
 fn vec_len_bytes<T>(len: usize) -> u64 {

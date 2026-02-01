@@ -44,8 +44,8 @@ pub enum AppMessage {
     /// Export progress update.
     ExportProgress(f32, String),
 
-    /// Export completed successfully (path, file size bytes).
-    ExportComplete(PathBuf, u64),
+    /// Export completed successfully (path, file size bytes, validation warnings).
+    ExportComplete(PathBuf, u64, Vec<String>),
 
     /// Export failed.
     ExportError(String),
