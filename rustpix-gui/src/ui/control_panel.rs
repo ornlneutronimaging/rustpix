@@ -50,6 +50,7 @@ impl RustpixApp {
                         || !self.neutrons.is_empty()
                         || self.hyperstack.is_some()
                         || self.neutron_hyperstack.is_some();
+                    let can_export = can_export && !self.ui_state.export_in_progress;
 
                     let icon_button = |ui: &mut egui::Ui,
                                        icon: FileToolbarIcon,
@@ -209,6 +210,7 @@ impl RustpixApp {
     }
 
     /// Render the bottom status bar.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_bottom_panel(&self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
@@ -287,10 +289,33 @@ impl RustpixApp {
                         }
                     }
 
+                    if self.ui_state.export_in_progress {
+                        ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
+                        ui.label(
+                            egui::RichText::new(&self.ui_state.export_status)
+                                .size(11.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.add(
+                            egui::ProgressBar::new(self.ui_state.export_progress)
+                                .desired_width(120.0)
+                                .show_percentage(),
+                        );
+                    }
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let colors = ThemeColors::from_ui(ui);
-                        // Hot pixel count (placeholder)
-                        ui.label(egui::RichText::new("0").size(11.0).color(accent::RED));
+                        let (dead_count, hot_count) = self
+                            .pixel_masks
+                            .as_ref()
+                            .map_or((0, 0), |mask| (mask.dead_count, mask.hot_count));
+
+                        // Hot pixel count
+                        ui.label(
+                            egui::RichText::new(format_number(hot_count))
+                                .size(11.0)
+                                .color(accent::RED),
+                        );
                         ui.label(
                             egui::RichText::new("Hot: ")
                                 .size(11.0)
@@ -299,8 +324,12 @@ impl RustpixApp {
 
                         ui.add_space(8.0);
 
-                        // Dead pixel count (placeholder)
-                        ui.label(egui::RichText::new("0").size(11.0).color(colors.text_dim));
+                        // Dead pixel count
+                        ui.label(
+                            egui::RichText::new(format_number(dead_count))
+                                .size(11.0)
+                                .color(colors.text_dim),
+                        );
                         ui.label(
                             egui::RichText::new("Dead: ")
                                 .size(11.0)
@@ -1085,45 +1114,19 @@ impl RustpixApp {
                 }
 
                 ui.add_space(10.0);
-                let any_selected =
-                    options.include_hits || options.include_neutrons || options.include_histogram;
-                let can_export = any_selected && deflate_ok;
+                let any_selected = options.include_hits
+                    || options.include_neutrons
+                    || options.include_histogram
+                    || options.include_pixel_masks;
+                let can_export = any_selected && deflate_ok && !self.ui_state.export_in_progress;
 
                 if ui
                     .add_enabled(can_export, egui::Button::new("Save HDF5..."))
                     .clicked()
                 {
                     if let Some(path) = FileDialog::new().set_file_name("rustpix.h5").save_file() {
-                        let now = ui.input(|i| i.time);
-                        let set_status = |ui_state: &mut crate::state::UiState,
-                                          message: String,
-                                          is_error: bool| {
-                            let expires_at = now + 2.5;
-                            if is_error {
-                                ui_state.roi_warning = Some((message, expires_at));
-                            } else {
-                                ui_state.roi_status = Some((message, expires_at));
-                            }
-                        };
-
-                        match self.export_hdf5_combined(&path) {
-                            Ok(()) => {
-                                set_status(
-                                    &mut self.ui_state,
-                                    "HDF5 export complete".to_string(),
-                                    false,
-                                );
-                                should_close = true;
-                            }
-                            Err(err) => {
-                                log::error!("Failed to export HDF5: {err}");
-                                set_status(
-                                    &mut self.ui_state,
-                                    "HDF5 export failed (see logs)".to_string(),
-                                    true,
-                                );
-                            }
-                        }
+                        self.start_export_hdf5(path);
+                        should_close = true;
                     }
                 }
             });

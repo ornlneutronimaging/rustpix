@@ -3,6 +3,7 @@
 //! Messages are sent from background worker threads to the main UI thread
 //! via channels to report progress, completion, and errors.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use rustpix_core::neutron::NeutronBatch;
@@ -39,4 +40,13 @@ pub enum AppMessage {
 
     /// Clustering failed.
     ProcessingError(String),
+
+    /// Export progress update.
+    ExportProgress(f32, String),
+
+    /// Export completed successfully (path, file size bytes).
+    ExportComplete(PathBuf, u64),
+
+    /// Export failed.
+    ExportError(String),
 }
