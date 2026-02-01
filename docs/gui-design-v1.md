@@ -46,7 +46,7 @@ based on real-world usage scenarios from beamline scientists and detector expert
 
 **Planned (Phase 5+ roadmap):**
 - Phase 5 (Telemetry + Diagnostics)
-  - Memory utilization indicator in status bar (per-process), hover breakdown by major buffers
+  - Memory utilization indicator in status bar (per-process), hover breakdown by major buffers **(Completed - 2026-02-01)**
   - Export validation utilities (basic file integrity + compression sanity checks)
   - Pixel mask controls: exclude from stats + recompute action
 - Phase 6 (Advanced Configuration)
