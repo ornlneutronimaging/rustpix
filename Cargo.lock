@@ -3830,6 +3830,7 @@ dependencies = [
  "rustpix-core",
  "rustpix-io",
  "rustpix-tpx",
+ "sysinfo",
 ]
 
 [[package]]

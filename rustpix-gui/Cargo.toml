@@ -26,6 +26,7 @@ egui_extras = { version = "0.29", features = ["svg"] }
 rfd = "0.15"
 image = "0.25"
 hdf5.workspace = true
+sysinfo.workspace = true
 
 # Utils
 anyhow = "1.0"

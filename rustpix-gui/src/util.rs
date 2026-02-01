@@ -88,6 +88,29 @@ pub fn format_number_si(n: usize) -> String {
     }
 }
 
+/// Format bytes as a human-readable string (base 1024).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const TB: f64 = 1024.0 * 1024.0 * 1024.0 * 1024.0;
+
+    let bytes_f64 = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes_f64 < MB {
+        format!("{:.1} KB", bytes_f64 / KB)
+    } else if bytes_f64 < GB {
+        format!("{:.1} MB", bytes_f64 / MB)
+    } else if bytes_f64 < TB {
+        format!("{:.2} GB", bytes_f64 / GB)
+    } else {
+        format!("{:.2} TB", bytes_f64 / TB)
+    }
+}
+
 /// Neutron mass in kilograms.
 const NEUTRON_MASS_KG: f64 = 1.674_927_498e-27;
 /// Elementary charge in joules per eV.

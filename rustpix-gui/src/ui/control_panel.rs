@@ -7,7 +7,7 @@ use super::theme::{accent, form_label, primary_button, ThemeColors};
 use crate::app::RustpixApp;
 use crate::pipeline::AlgorithmType;
 use crate::state::ViewMode;
-use crate::util::format_number;
+use crate::util::{format_bytes, format_number};
 use crate::viewer::Colormap;
 
 #[derive(Clone, Copy)]
@@ -340,6 +340,73 @@ impl RustpixApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let colors = ThemeColors::from_ui(ui);
+                        let memory_bytes = self.memory_rss_bytes();
+                        let memory_text = if memory_bytes > 0 {
+                            format!("RAM: {}", format_bytes(memory_bytes))
+                        } else {
+                            "RAM: --".to_string()
+                        };
+
+                        let memory_response = ui.label(
+                            egui::RichText::new(memory_text)
+                                .size(11.0)
+                                .color(colors.text_primary),
+                        );
+                        memory_response.on_hover_ui(|ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new("Memory (process)")
+                                    .size(12.0)
+                                    .strong(),
+                            );
+                            if memory_bytes > 0 {
+                                ui.label(format!("Process RSS: {}", format_bytes(memory_bytes)));
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Process memory unavailable")
+                                        .color(colors.text_muted),
+                                );
+                            }
+
+                            let breakdown = self.memory_breakdown();
+                            let estimated: u64 = breakdown.iter().map(|(_, bytes)| *bytes).sum();
+                            if estimated > 0 {
+                                ui.label(format!(
+                                    "Estimated buffers: {}",
+                                    format_bytes(estimated)
+                                ));
+                            }
+
+                            if !breakdown.is_empty() {
+                                ui.add_space(4.0);
+                                egui::Grid::new("memory_breakdown")
+                                    .num_columns(2)
+                                    .spacing(egui::vec2(8.0, 2.0))
+                                    .show(ui, |ui| {
+                                        for (label, bytes) in breakdown {
+                                            ui.label(
+                                                egui::RichText::new(label)
+                                                    .color(colors.text_muted),
+                                            );
+                                            ui.label(format_bytes(bytes));
+                                            ui.end_row();
+                                        }
+                                    });
+                            }
+
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Estimates exclude allocator overhead, textures, and OS caches.",
+                                )
+                                .size(10.0)
+                                .color(colors.text_muted),
+                            );
+                        });
+
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
+                        ui.add_space(8.0);
                         let (dead_count, hot_count) = self
                             .pixel_masks
                             .as_ref()

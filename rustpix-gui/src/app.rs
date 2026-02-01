@@ -5,6 +5,7 @@
 
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use eframe::egui;
 use hdf5::filters::deflate_available;
+use sysinfo::{get_current_pid, Pid, System};
 
 use crate::histogram::Hyperstack3D;
 use crate::message::AppMessage;
@@ -71,6 +73,40 @@ struct RoiSpectrumPending {
     roi_revision: u64,
     data_revision: u64,
     last_change: f64,
+}
+
+struct MemoryTelemetry {
+    system: System,
+    pid: Option<Pid>,
+    last_refresh: f64,
+    rss_bytes: u64,
+}
+
+impl MemoryTelemetry {
+    fn new() -> Self {
+        let system = System::new_all();
+        let pid = get_current_pid().ok();
+        Self {
+            system,
+            pid,
+            last_refresh: -1.0,
+            rss_bytes: 0,
+        }
+    }
+
+    fn refresh(&mut self, now: f64) {
+        const REFRESH_INTERVAL: f64 = 0.75;
+        if now - self.last_refresh < REFRESH_INTERVAL {
+            return;
+        }
+        self.last_refresh = now;
+        self.system.refresh_processes();
+        if let Some(pid) = self.pid {
+            if let Some(process) = self.system.process(pid) {
+                self.rss_bytes = process.memory();
+            }
+        }
+    }
 }
 
 /// Main application state.
@@ -153,6 +189,8 @@ pub struct RustpixApp {
     pub(crate) pixel_masks: Option<PixelMaskData>,
     /// Hot pixel sigma threshold.
     pub(crate) hot_pixel_sigma: f64,
+    /// Memory telemetry for status bar display.
+    memory_telemetry: MemoryTelemetry,
 }
 
 impl Default for RustpixApp {
@@ -204,6 +242,7 @@ impl Default for RustpixApp {
             colormap: Colormap::Grayscale,
             pixel_masks: None,
             hot_pixel_sigma: 5.0,
+            memory_telemetry: MemoryTelemetry::new(),
         }
     }
 }
@@ -416,6 +455,93 @@ impl RustpixApp {
             hot_sigma: sigma,
             hot_threshold: threshold,
         });
+    }
+
+    pub(crate) fn memory_rss_bytes(&self) -> u64 {
+        self.memory_telemetry.rss_bytes
+    }
+
+    pub(crate) fn memory_breakdown(&self) -> Vec<(String, u64)> {
+        let mut entries = Vec::new();
+
+        if let Some(batch) = self.hit_batch.as_deref() {
+            let bytes = hit_batch_bytes(batch);
+            if bytes > 0 {
+                entries.push(("Hits (SoA buffers)".to_string(), bytes));
+            }
+        }
+
+        if let Some(hyperstack) = self.hyperstack.as_deref() {
+            let bytes = slice_bytes(hyperstack.data());
+            if bytes > 0 {
+                entries.push(("Hit hyperstack".to_string(), bytes));
+            }
+        }
+
+        if let Some(counts) = self.hit_counts.as_ref() {
+            let bytes = slice_bytes(counts.as_slice());
+            if bytes > 0 {
+                entries.push(("Hit projection".to_string(), bytes));
+            }
+        }
+
+        if let Some(spectrum) = self.tof_spectrum.as_ref() {
+            let bytes = slice_bytes(spectrum.as_slice());
+            if bytes > 0 {
+                entries.push(("Hit spectrum".to_string(), bytes));
+            }
+        }
+
+        if !self.neutrons.is_empty() {
+            let bytes = neutron_batch_bytes(&self.neutrons);
+            if bytes > 0 {
+                entries.push(("Neutrons (SoA buffers)".to_string(), bytes));
+            }
+        }
+
+        if let Some(hyperstack) = self.neutron_hyperstack.as_deref() {
+            let bytes = slice_bytes(hyperstack.data());
+            if bytes > 0 {
+                entries.push(("Neutron hyperstack".to_string(), bytes));
+            }
+        }
+
+        if let Some(counts) = self.neutron_counts.as_ref() {
+            let bytes = slice_bytes(counts.as_slice());
+            if bytes > 0 {
+                entries.push(("Neutron projection".to_string(), bytes));
+            }
+        }
+
+        if let Some(spectrum) = self.neutron_spectrum.as_ref() {
+            let bytes = slice_bytes(spectrum.as_slice());
+            if bytes > 0 {
+                entries.push(("Neutron spectrum".to_string(), bytes));
+            }
+        }
+
+        let roi_hits_bytes = roi_spectra_bytes(&self.roi_spectra_hits);
+        if roi_hits_bytes > 0 {
+            entries.push(("ROI spectra (hits)".to_string(), roi_hits_bytes));
+        }
+
+        let roi_neutron_bytes = roi_spectra_bytes(&self.roi_spectra_neutrons);
+        if roi_neutron_bytes > 0 {
+            entries.push(("ROI spectra (neutrons)".to_string(), roi_neutron_bytes));
+        }
+
+        if let Some(mask) = self.pixel_masks.as_ref() {
+            let mut bytes = 0u64;
+            bytes += vec_len_bytes::<u8>(mask.dead_mask.len());
+            bytes += vec_len_bytes::<u8>(mask.hot_mask.len());
+            bytes += vec_len_bytes::<[f64; 2]>(mask.hot_points.len());
+            if bytes > 0 {
+                entries.push(("Pixel masks".to_string(), bytes));
+            }
+        }
+
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries
     }
 
     /// Get the cached TOF spectrum (full detector integration).
@@ -1262,12 +1388,52 @@ fn point_in_polygon_xy(x: f64, y: f64, vertices: &[(f64, f64)]) -> bool {
     inside
 }
 
+fn vec_len_bytes<T>(len: usize) -> u64 {
+    (len as u64).saturating_mul(size_of::<T>() as u64)
+}
+
+fn slice_bytes<T>(slice: &[T]) -> u64 {
+    vec_len_bytes::<T>(slice.len())
+}
+
+fn vec_capacity_bytes<T>(vec: &Vec<T>) -> u64 {
+    (vec.capacity() as u64).saturating_mul(size_of::<T>() as u64)
+}
+
+fn hit_batch_bytes(batch: &HitBatch) -> u64 {
+    vec_capacity_bytes(&batch.x)
+        + vec_capacity_bytes(&batch.y)
+        + vec_capacity_bytes(&batch.tof)
+        + vec_capacity_bytes(&batch.tot)
+        + vec_capacity_bytes(&batch.timestamp)
+        + vec_capacity_bytes(&batch.chip_id)
+        + vec_capacity_bytes(&batch.cluster_id)
+}
+
+fn neutron_batch_bytes(batch: &NeutronBatch) -> u64 {
+    vec_capacity_bytes(&batch.x)
+        + vec_capacity_bytes(&batch.y)
+        + vec_capacity_bytes(&batch.tof)
+        + vec_capacity_bytes(&batch.tot)
+        + vec_capacity_bytes(&batch.n_hits)
+        + vec_capacity_bytes(&batch.chip_id)
+}
+
+fn roi_spectra_bytes(cache: &RoiSpectraCache) -> u64 {
+    cache
+        .spectra
+        .values()
+        .map(|entry| vec_len_bytes::<u64>(entry.data.counts.len()))
+        .sum()
+}
+
 impl eframe::App for RustpixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Apply system theme (follows system light/dark preference)
         crate::ui::theme::apply_system_theme(ctx);
 
         self.handle_messages(ctx);
+        self.memory_telemetry.refresh(ctx.input(|i| i.time));
 
         // Render panels in order: top, bottom, side, central
         self.render_top_panel(ctx);
