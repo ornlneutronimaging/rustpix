@@ -35,6 +35,7 @@ use rustpix_io::hdf5::{
     PixelMaskWriteOptions,
 };
 use rustpix_io::EventBatch;
+use rustpix_tpx::DetectorConfig;
 
 #[derive(Clone)]
 pub(crate) struct RoiSpectrumData {
@@ -75,6 +76,47 @@ struct RoiSpectrumPending {
     roi_revision: u64,
     data_revision: u64,
     last_change: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DetectorProfileKind {
+    Venus,
+    Custom,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DetectorProfile {
+    pub(crate) kind: DetectorProfileKind,
+    pub(crate) custom_name: Option<String>,
+    pub(crate) custom_path: Option<PathBuf>,
+    pub(crate) custom_config: Option<DetectorConfig>,
+}
+
+impl Default for DetectorProfile {
+    fn default() -> Self {
+        Self {
+            kind: DetectorProfileKind::Venus,
+            custom_name: None,
+            custom_path: None,
+            custom_config: None,
+        }
+    }
+}
+
+impl DetectorProfile {
+    pub(crate) fn label(&self) -> String {
+        match self.kind {
+            DetectorProfileKind::Venus => "VENUS (SNS)".to_string(),
+            DetectorProfileKind::Custom => self
+                .custom_name
+                .clone()
+                .unwrap_or_else(|| "Custom".to_string()),
+        }
+    }
+
+    pub(crate) fn has_custom(&self) -> bool {
+        self.custom_config.is_some()
+    }
 }
 
 struct MemoryTelemetry {
@@ -124,8 +166,12 @@ pub struct RustpixApp {
     pub(crate) temporal_window_ns: f64,
     /// Minimum cluster size.
     pub(crate) min_cluster_size: u16,
+    /// Maximum cluster size (None = unlimited).
+    pub(crate) max_cluster_size: Option<u16>,
     /// DBSCAN minimum points parameter.
     pub(crate) dbscan_min_points: usize,
+    /// Grid cell size (pixels) for grid clustering.
+    pub(crate) grid_cell_size: usize,
 
     /// Loaded hit batch data.
     pub(crate) hit_batch: Option<Arc<HitBatch>>,
@@ -160,6 +206,10 @@ pub struct RustpixApp {
     pub(crate) neutron_tof_bins: usize,
     /// Super-resolution factor for clustering extraction.
     pub(crate) super_resolution_factor: f64,
+    /// Whether to weight extraction by TOT.
+    pub(crate) weighted_by_tot: bool,
+    /// Minimum TOT threshold for extraction.
+    pub(crate) min_tot_threshold: u16,
     /// UI display state.
     pub(crate) ui_state: UiState,
     /// ROI session state.
@@ -193,6 +243,8 @@ pub struct RustpixApp {
     pub(crate) pixel_masks: Option<PixelMaskData>,
     /// Hot pixel sigma threshold.
     pub(crate) hot_pixel_sigma: f64,
+    /// Detector configuration profile state.
+    pub(crate) detector_profile: DetectorProfile,
     /// Memory telemetry for status bar display.
     memory_telemetry: MemoryTelemetry,
 }
@@ -212,7 +264,9 @@ impl Default for RustpixApp {
             radius: 5.0,
             temporal_window_ns: 75.0,
             min_cluster_size: 1,
+            max_cluster_size: None,
             dbscan_min_points: 2,
+            grid_cell_size: 32,
 
             hit_batch: None,
             hyperstack: None,
@@ -231,6 +285,8 @@ impl Default for RustpixApp {
             hit_tof_bins: 200,
             neutron_tof_bins: 200,
             super_resolution_factor: 1.0,
+            weighted_by_tot: false,
+            min_tot_threshold: 0,
             ui_state,
             roi_state: RoiState::default(),
             roi_spectra_hits: RoiSpectraCache::default(),
@@ -248,6 +304,7 @@ impl Default for RustpixApp {
             colormap: Colormap::Grayscale,
             pixel_masks: None,
             hot_pixel_sigma: 5.0,
+            detector_profile: DetectorProfile::default(),
             memory_telemetry: MemoryTelemetry::new(),
         }
     }
@@ -259,9 +316,11 @@ impl RustpixApp {
         self.reset_load_state(path.as_path());
 
         let tx = self.tx.clone();
-        let tdc_frequency = self.tdc_frequency;
+        let detector_config = self.current_detector_config();
         let hit_tof_bins = self.hit_tof_bins;
-        thread::spawn(move || load_file_worker(path.as_path(), &tx, tdc_frequency, hit_tof_bins));
+        thread::spawn(move || {
+            load_file_worker(path.as_path(), &tx, detector_config, hit_tof_bins);
+        });
     }
 
     /// Reset application state for a new file load.
@@ -341,9 +400,13 @@ impl RustpixApp {
                 radius: self.radius,
                 temporal_window_ns: self.temporal_window_ns,
                 min_cluster_size: self.min_cluster_size,
+                max_cluster_size: self.max_cluster_size,
                 dbscan_min_points: self.dbscan_min_points,
-                tdc_frequency: self.tdc_frequency,
+                grid_cell_size: self.grid_cell_size,
+                detector_config: self.current_detector_config(),
                 super_resolution_factor: self.super_resolution_factor,
+                weighted_by_tot: self.weighted_by_tot,
+                min_tot_threshold: self.min_tot_threshold,
                 total_hits: self.hit_batch.as_ref().map_or(0, |batch| batch.len()),
             };
 
@@ -483,6 +546,19 @@ impl RustpixApp {
         if let Some(spectrum) = compute_masked_spectrum(hyperstack, mask) {
             self.masked_tof_spectrum = Some(spectrum);
         }
+    }
+
+    fn current_detector_config(&self) -> DetectorConfig {
+        let mut config = match self.detector_profile.kind {
+            DetectorProfileKind::Custom => self
+                .detector_profile
+                .custom_config
+                .clone()
+                .unwrap_or_else(DetectorConfig::venus_defaults),
+            DetectorProfileKind::Venus => DetectorConfig::venus_defaults(),
+        };
+        config.tdc_frequency_hz = self.tdc_frequency;
+        config
     }
 
     pub(crate) fn memory_rss_bytes(&self) -> u64 {

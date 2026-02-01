@@ -4,11 +4,12 @@ use eframe::egui::{self, Color32, FontFamily, FontId, Rounding, Stroke};
 use rfd::FileDialog;
 
 use super::theme::{accent, form_label, primary_button, ThemeColors};
-use crate::app::RustpixApp;
+use crate::app::{DetectorProfile, DetectorProfileKind, RustpixApp};
 use crate::pipeline::AlgorithmType;
 use crate::state::ViewMode;
 use crate::util::{format_bytes, format_number};
 use crate::viewer::Colormap;
+use rustpix_tpx::DetectorConfig;
 
 #[derive(Clone, Copy)]
 enum FileToolbarIcon {
@@ -697,6 +698,95 @@ impl RustpixApp {
                 .rounding(Rounding::same(4.0))
                 .inner_margin(egui::Margin::same(12.0))
                 .show(ui, |ui| {
+                    // Detector profile
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Detector")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = self.detector_profile.label();
+                            egui::ComboBox::from_id_salt("detector_profile")
+                                .selected_text(label)
+                                .width(160.0)
+                                .show_ui(ui, |ui| {
+                                    let mut kind = self.detector_profile.kind;
+                                    ui.selectable_value(
+                                        &mut kind,
+                                        DetectorProfileKind::Venus,
+                                        "VENUS (SNS)",
+                                    );
+                                    if self.detector_profile.has_custom() {
+                                        let custom_label = self
+                                            .detector_profile
+                                            .custom_name
+                                            .clone()
+                                            .unwrap_or_else(|| "Custom".to_string());
+                                        ui.selectable_value(
+                                            &mut kind,
+                                            DetectorProfileKind::Custom,
+                                            custom_label,
+                                        );
+                                    } else {
+                                        ui.add_enabled(
+                                            false,
+                                            egui::SelectableLabel::new(false, "Custom (load...)"),
+                                        );
+                                    }
+                                    if kind != self.detector_profile.kind {
+                                        self.detector_profile.kind = kind;
+                                    }
+                                });
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Load detector config…").clicked() {
+                            if let Some(path) = FileDialog::new()
+                                .add_filter("Detector config", &["json"])
+                                .pick_file()
+                            {
+                                match DetectorConfig::from_file(&path) {
+                                    Ok(config) => {
+                                        let name = path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string());
+                                        self.detector_profile.custom_config = Some(config);
+                                        self.detector_profile.custom_path = Some(path.clone());
+                                        self.detector_profile.custom_name = name;
+                                        self.detector_profile.kind = DetectorProfileKind::Custom;
+                                    }
+                                    Err(err) => {
+                                        self.ui_state.roi_warning = Some((
+                                            format!("Detector config load failed: {err}"),
+                                            ui.ctx().input(|i| i.time + 6.0),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Reset to VENUS").clicked() {
+                            self.detector_profile = DetectorProfile {
+                                kind: DetectorProfileKind::Venus,
+                                ..Default::default()
+                            };
+                        }
+                    });
+                    if let Some(path) = self.detector_profile.custom_path.as_ref() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Custom: {}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ))
+                            .size(10.0)
+                            .color(colors.text_dim),
+                        );
+                    }
+
+                    ui.add_space(6.0);
+
                     // TDC Frequency
                     ui.horizontal(|ui| {
                         let colors = ThemeColors::from_ui(ui);
@@ -706,17 +796,14 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new(format!("{:.0} Hz", self.tdc_frequency))
-                                    .size(10.0)
-                                    .color(colors.text_primary),
+                            ui.add(
+                                egui::DragValue::new(&mut self.tdc_frequency)
+                                    .range(1.0..=120.0)
+                                    .speed(1.0)
+                                    .suffix(" Hz"),
                             );
                         });
                     });
-                    ui.add(
-                        egui::Slider::new(&mut self.tdc_frequency, 1.0..=120.0).show_value(false),
-                    );
 
                     ui.add_space(4.0);
 
@@ -729,15 +816,14 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new(format!("{:.0} px", self.radius))
-                                    .size(10.0)
-                                    .color(colors.text_primary),
+                            ui.add(
+                                egui::DragValue::new(&mut self.radius)
+                                    .range(1.0..=50.0)
+                                    .speed(1.0)
+                                    .suffix(" px"),
                             );
                         });
                     });
-                    ui.add(egui::Slider::new(&mut self.radius, 1.0..=50.0).show_value(false));
 
                     ui.add_space(4.0);
 
@@ -750,18 +836,14 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new(format!("{:.0} ns", self.temporal_window_ns))
-                                    .size(10.0)
-                                    .color(colors.text_primary),
+                            ui.add(
+                                egui::DragValue::new(&mut self.temporal_window_ns)
+                                    .range(10.0..=500.0)
+                                    .speed(5.0)
+                                    .suffix(" ns"),
                             );
                         });
                     });
-                    ui.add(
-                        egui::Slider::new(&mut self.temporal_window_ns, 10.0..=500.0)
-                            .show_value(false),
-                    );
 
                     ui.add_space(4.0);
 
@@ -774,15 +856,49 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new(format!("{}", self.min_cluster_size))
-                                    .size(10.0)
-                                    .color(colors.text_primary),
+                            ui.add(
+                                egui::DragValue::new(&mut self.min_cluster_size)
+                                    .range(1..=10)
+                                    .speed(1),
                             );
                         });
                     });
-                    ui.add(egui::Slider::new(&mut self.min_cluster_size, 1..=10).show_value(false));
+
+                    ui.add_space(4.0);
+
+                    let mut limit_max = self.max_cluster_size.is_some();
+                    let mut max_value = self
+                        .max_cluster_size
+                        .unwrap_or(self.min_cluster_size.max(1));
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.checkbox(&mut limit_max, "");
+                        ui.label(
+                            egui::RichText::new("Max cluster")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if limit_max {
+                                ui.add(
+                                    egui::DragValue::new(&mut max_value).range(1..=256).speed(1),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("∞").size(10.0).color(colors.text_dim),
+                                );
+                            }
+                        });
+                    });
+                    if limit_max {
+                        let min_value = self.min_cluster_size.max(1);
+                        if max_value < min_value {
+                            max_value = min_value;
+                        }
+                        self.max_cluster_size = Some(max_value);
+                    } else {
+                        self.max_cluster_size = None;
+                    }
 
                     // DBSCAN-specific
                     if self.algo_type == AlgorithmType::Dbscan {
@@ -797,19 +913,37 @@ impl RustpixApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let colors = ThemeColors::from_ui(ui);
-                                    ui.label(
-                                        egui::RichText::new(format!("{}", self.dbscan_min_points))
-                                            .size(10.0)
-                                            .color(colors.text_primary),
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.dbscan_min_points)
+                                            .range(1..=10)
+                                            .speed(1),
                                     );
                                 },
                             );
                         });
-                        ui.add(
-                            egui::Slider::new(&mut self.dbscan_min_points, 1..=10)
-                                .show_value(false),
-                        );
+                    }
+
+                    if self.algo_type == AlgorithmType::Grid {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let colors = ThemeColors::from_ui(ui);
+                            ui.label(
+                                egui::RichText::new("Grid cell")
+                                    .size(10.0)
+                                    .color(colors.text_muted),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.grid_cell_size)
+                                            .range(4..=128)
+                                            .speed(1)
+                                            .suffix(" px"),
+                                    );
+                                },
+                            );
+                        });
                     }
 
                     ui.add_space(4.0);
@@ -823,21 +957,52 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{:.1}×",
-                                    self.super_resolution_factor
-                                ))
-                                .size(10.0)
-                                .color(colors.text_primary),
+                            ui.add(
+                                egui::DragValue::new(&mut self.super_resolution_factor)
+                                    .range(1.0..=16.0)
+                                    .speed(0.1)
+                                    .suffix("×"),
                             );
                         });
                     });
-                    ui.add(
-                        egui::Slider::new(&mut self.super_resolution_factor, 1.0..=16.0)
-                            .show_value(false),
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Extraction")
+                            .size(10.0)
+                            .color(colors.text_muted),
                     );
+                    ui.add_space(2.0);
+
+                    ui.checkbox(&mut self.weighted_by_tot, "Weighted by TOT");
+                    ui.horizontal(|ui| {
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.label(
+                            egui::RichText::new("Min TOT")
+                                .size(10.0)
+                                .color(colors.text_muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.min_tot_threshold)
+                                    .range(0..=200)
+                                    .speed(1),
+                            );
+                        });
+                    });
+
+                    ui.add_space(8.0);
+                    if ui.button("Reset to defaults").clicked() {
+                        self.radius = 5.0;
+                        self.temporal_window_ns = 75.0;
+                        self.min_cluster_size = 1;
+                        self.max_cluster_size = None;
+                        self.dbscan_min_points = 2;
+                        self.grid_cell_size = 32;
+                        self.super_resolution_factor = 1.0;
+                        self.weighted_by_tot = false;
+                        self.min_tot_threshold = 0;
+                    }
                 });
         }
 

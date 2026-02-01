@@ -26,12 +26,20 @@ pub struct ClusteringWorkerConfig {
     pub temporal_window_ns: f64,
     /// Minimum cluster size.
     pub min_cluster_size: u16,
+    /// Maximum cluster size (None = unlimited).
+    pub max_cluster_size: Option<u16>,
     /// Minimum points for DBSCAN.
     pub dbscan_min_points: usize,
-    /// TDC frequency in Hz.
-    pub tdc_frequency: f64,
+    /// Grid cell size in pixels (Grid algorithm).
+    pub grid_cell_size: usize,
+    /// Detector configuration (chip layout + timing).
+    pub detector_config: DetectorConfig,
     /// Super-resolution factor for extraction.
     pub super_resolution_factor: f64,
+    /// Whether to weight extraction by TOT.
+    pub weighted_by_tot: bool,
+    /// Minimum TOT threshold for extraction.
+    pub min_tot_threshold: u16,
     /// Total hits for progress calculation.
     pub total_hits: usize,
 }
@@ -48,10 +56,7 @@ pub fn run_clustering_worker(
 ) {
     let start = Instant::now();
 
-    let det_config = DetectorConfig {
-        tdc_frequency_hz: config.tdc_frequency,
-        ..DetectorConfig::venus_defaults()
-    };
+    let det_config = config.detector_config.clone();
 
     let reader = match Tpx3FileReader::open(path) {
         Ok(r) => r.with_config(det_config),
@@ -71,20 +76,19 @@ pub fn run_clustering_worker(
         radius: config.radius,
         temporal_window_ns: config.temporal_window_ns,
         min_cluster_size: config.min_cluster_size,
-        max_cluster_size: None,
+        max_cluster_size: config.max_cluster_size,
     };
 
     let params = AlgorithmParams {
         abs_scan_interval: 100,
         dbscan_min_points: config.dbscan_min_points,
-        grid_cell_size: 32,
+        grid_cell_size: config.grid_cell_size,
     };
 
-    // Preserve legacy GUI behavior: naive centroid, no TOT filtering, no super-res.
     let extraction = ExtractionConfig {
         super_resolution_factor: config.super_resolution_factor,
-        weighted_by_tot: false,
-        min_tot_threshold: 0,
+        weighted_by_tot: config.weighted_by_tot,
+        min_tot_threshold: config.min_tot_threshold,
     };
 
     let stream = match reader.stream_time_ordered() {

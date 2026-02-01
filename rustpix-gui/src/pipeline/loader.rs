@@ -31,7 +31,7 @@ const DETECTOR_HEIGHT: usize = 512;
 pub fn load_file_worker(
     path: &Path,
     tx: &Sender<AppMessage>,
-    tdc_frequency: f64,
+    detector_config: DetectorConfig,
     n_tof_bins: usize,
 ) {
     let start = Instant::now();
@@ -69,8 +69,7 @@ pub fn load_file_worker(
 
     let tpx_sections = build_tpx_sections(&mmap, io_sections);
 
-    let mut det_config = DetectorConfig::venus_defaults();
-    det_config.tdc_frequency_hz = tdc_frequency;
+    let det_config = detector_config;
     let tdc_correction = det_config.tdc_correction_25ns();
     let debug_str = build_debug_info(&mmap, &tpx_sections, tdc_correction);
 
