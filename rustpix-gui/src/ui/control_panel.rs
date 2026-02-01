@@ -259,6 +259,7 @@ impl RustpixApp {
     }
 
     /// Render the left control panel.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_side_panel(&mut self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
@@ -298,13 +299,122 @@ impl RustpixApp {
                             );
                         });
 
-                        // Export section (placeholder)
-                        self.render_section(ui, "Export", false, |_app, ui| {
+                        // Export section (HDF5)
+                        self.render_section(ui, "Export", false, |app, ui| {
                             let colors = ThemeColors::from_ui(ui);
+                            let now = ui.input(|i| i.time);
+                            let set_status =
+                                |ui_state: &mut crate::state::UiState,
+                                 message: String,
+                                 is_error: bool| {
+                                    let expires_at = now + 2.5;
+                                    if is_error {
+                                        ui_state.roi_warning = Some((message, expires_at));
+                                    } else {
+                                        ui_state.roi_status = Some((message, expires_at));
+                                    }
+                                };
+
+                            let hits_enabled =
+                                app.hit_batch.as_ref().is_some_and(|b| !b.is_empty());
+                            if ui
+                                .add_enabled(hits_enabled, egui::Button::new("Export Hits (HDF5)"))
+                                .clicked()
+                            {
+                                if let Some(path) =
+                                    FileDialog::new().set_file_name("hits.h5").save_file()
+                                {
+                                    match app.export_hits_hdf5(&path) {
+                                        Ok(()) => {
+                                            set_status(
+                                                &mut app.ui_state,
+                                                "HDF5 export complete".to_string(),
+                                                false,
+                                            );
+                                        }
+                                        Err(err) => {
+                                            log::error!("Failed to export hits HDF5: {err}");
+                                            set_status(
+                                                &mut app.ui_state,
+                                                "HDF5 export failed (see logs)".to_string(),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            let neutrons_enabled = !app.neutrons.is_empty();
+                            if ui
+                                .add_enabled(
+                                    neutrons_enabled,
+                                    egui::Button::new("Export Neutrons (HDF5)"),
+                                )
+                                .clicked()
+                            {
+                                if let Some(path) =
+                                    FileDialog::new().set_file_name("neutrons.h5").save_file()
+                                {
+                                    match app.export_neutrons_hdf5(&path) {
+                                        Ok(()) => {
+                                            set_status(
+                                                &mut app.ui_state,
+                                                "HDF5 export complete".to_string(),
+                                                false,
+                                            );
+                                        }
+                                        Err(err) => {
+                                            log::error!("Failed to export neutrons HDF5: {err}");
+                                            set_status(
+                                                &mut app.ui_state,
+                                                "HDF5 export failed (see logs)".to_string(),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            let hist_enabled = match app.ui_state.view_mode {
+                                ViewMode::Hits => app.hyperstack.is_some(),
+                                ViewMode::Neutrons => app.neutron_hyperstack.is_some(),
+                            };
+                            let hist_label =
+                                format!("Export Histogram (HDF5, {})", app.ui_state.view_mode);
+                            if ui
+                                .add_enabled(hist_enabled, egui::Button::new(hist_label))
+                                .clicked()
+                            {
+                                if let Some(path) =
+                                    FileDialog::new().set_file_name("histogram.h5").save_file()
+                                {
+                                    match app.export_histogram_hdf5(&path, app.ui_state.view_mode) {
+                                        Ok(()) => {
+                                            set_status(
+                                                &mut app.ui_state,
+                                                "HDF5 export complete".to_string(),
+                                                false,
+                                            );
+                                        }
+                                        Err(err) => {
+                                            log::error!("Failed to export histogram HDF5: {err}");
+                                            set_status(
+                                                &mut app.ui_state,
+                                                "HDF5 export failed (see logs)".to_string(),
+                                                true,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Coming soon...")
-                                    .size(11.0)
-                                    .color(colors.text_dim),
+                                egui::RichText::new(
+                                    "Exports include flight path + TOF offset metadata when set.",
+                                )
+                                .size(10.0)
+                                .color(colors.text_dim),
                             );
                         });
 

@@ -294,6 +294,12 @@ impl Hyperstack3D {
     pub fn bin_width(&self) -> f64 {
         self.bin_width
     }
+
+    /// Access the flattened counts array (`[tof, y, x]` order).
+    #[must_use]
+    pub fn data(&self) -> &[u64] {
+        &self.data
+    }
 }
 
 #[cfg(test)]

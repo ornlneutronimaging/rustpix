@@ -1649,12 +1649,12 @@ where
         builder = builder.chunk(chunk_shape);
     }
 
-    if let Some(level) = compression {
-        builder = builder.deflate(level);
-    }
-
     if shuffle {
         builder = builder.shuffle();
+    }
+
+    if let Some(level) = compression {
+        builder = builder.deflate(level);
     }
 
     Ok(builder.create(name)?)
@@ -1731,12 +1731,12 @@ fn create_extendable_dataset<T: H5Type>(
         .shape((0..,))
         .chunk((chunk_events,));
 
-    if let Some(level) = compression {
-        builder = builder.deflate(level);
-    }
-
     if shuffle {
         builder = builder.shuffle();
+    }
+
+    if let Some(level) = compression {
+        builder = builder.deflate(level);
     }
 
     Ok(builder.create(name)?)

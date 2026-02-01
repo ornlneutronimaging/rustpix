@@ -10,7 +10,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
 
+use anyhow::{anyhow, Result};
 use eframe::egui;
+use hdf5::filters::deflate_available;
 
 use crate::histogram::Hyperstack3D;
 use crate::message::AppMessage;
@@ -22,6 +24,11 @@ use crate::util::{f64_to_usize_bounded, usize_to_f64};
 use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
+use rustpix_io::hdf5::{
+    write_histogram_hdf5, write_hits_hdf5, write_neutrons_hdf5, HistogramShape, HistogramWriteData,
+    HistogramWriteOptions, HitWriteOptions, NeutronEventBatch, NeutronWriteOptions,
+};
+use rustpix_io::EventBatch;
 
 #[derive(Clone)]
 pub(crate) struct RoiSpectrumData {
@@ -325,6 +332,188 @@ impl RustpixApp {
         } else {
             self.active_counts()
         }
+    }
+
+    pub(crate) fn export_hits_hdf5(&self, path: &Path) -> Result<()> {
+        let batch = self
+            .hit_batch
+            .as_ref()
+            .ok_or_else(|| anyhow!("No hits loaded"))?;
+        if batch.is_empty() {
+            return Err(anyhow!("No hits to export"));
+        }
+        ensure_deflate_available()?;
+        let (x_size, y_size) = self
+            .hit_dimensions()
+            .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
+        let options = HitWriteOptions {
+            x_size,
+            y_size,
+            chunk_events: 100_000,
+            compression: Some(1),
+            shuffle: true,
+            flight_path_m: optional_positive(self.flight_path_m),
+            tof_offset_ns: optional_nonzero(self.tof_offset_ns),
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_cluster_id: true,
+        };
+        let build_batch = || EventBatch {
+            tdc_timestamp_25ns: 0,
+            hits: batch.clone(),
+        };
+        if let Err(err) = write_hits_hdf5(path, std::iter::once(build_batch()), &options) {
+            remove_partial_file(path);
+            return Err(anyhow!("HDF5 export failed: {err}"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn export_neutrons_hdf5(&self, path: &Path) -> Result<()> {
+        if self.neutrons.is_empty() {
+            return Err(anyhow!("No neutrons available"));
+        }
+        ensure_deflate_available()?;
+        let neutrons = self.scaled_neutrons_for_export()?;
+        let (x_size, y_size) = self
+            .neutron_dimensions(&neutrons)
+            .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
+        let options = NeutronWriteOptions {
+            x_size,
+            y_size,
+            chunk_events: 100_000,
+            compression: Some(1),
+            shuffle: true,
+            flight_path_m: optional_positive(self.flight_path_m),
+            tof_offset_ns: optional_nonzero(self.tof_offset_ns),
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_n_hits: true,
+        };
+        let build_batch = || NeutronEventBatch {
+            tdc_timestamp_25ns: 0,
+            neutrons: neutrons.clone(),
+        };
+        if let Err(err) = write_neutrons_hdf5(path, std::iter::once(build_batch()), &options) {
+            remove_partial_file(path);
+            return Err(anyhow!("HDF5 export failed: {err}"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn export_histogram_hdf5(&self, path: &Path, view: ViewMode) -> Result<()> {
+        let hyperstack = match view {
+            ViewMode::Hits => self.hyperstack.as_ref(),
+            ViewMode::Neutrons => self.neutron_hyperstack.as_ref(),
+        }
+        .ok_or_else(|| anyhow!("No histogram data available"))?;
+        ensure_deflate_available()?;
+
+        let width = hyperstack.width();
+        let height = hyperstack.height();
+        let n_bins = hyperstack.n_tof_bins();
+        let data = hyperstack.data();
+        let mut counts = Vec::with_capacity(width * height * n_bins);
+        for y in 0..height {
+            for x in 0..width {
+                let base = y * width + x;
+                for tof in 0..n_bins {
+                    let idx = tof * height * width + base;
+                    counts.push(data[idx]);
+                }
+            }
+        }
+
+        let rot_angle = vec![0.0];
+        let y_axis = (0..height).map(usize_to_f64).collect();
+        let x_axis = (0..width).map(usize_to_f64).collect();
+        let bin_width_ns = hyperstack.bin_width() * 25.0;
+        let time_of_flight_ns = (0..n_bins)
+            .map(|i| usize_to_f64(i) * bin_width_ns)
+            .collect();
+        let data = HistogramWriteData {
+            counts,
+            shape: HistogramShape {
+                rot_angle: 1,
+                y: height,
+                x: width,
+                time_of_flight: n_bins,
+            },
+            rot_angle,
+            y: y_axis,
+            x: x_axis,
+            time_of_flight_ns,
+        };
+        let options = HistogramWriteOptions {
+            flight_path_m: optional_positive(self.flight_path_m),
+            tof_offset_ns: optional_nonzero(self.tof_offset_ns),
+            ..Default::default()
+        };
+        if let Err(err) = write_histogram_hdf5(path, &data, &options) {
+            remove_partial_file(path);
+            return Err(anyhow!("HDF5 export failed: {err}"));
+        }
+        Ok(())
+    }
+
+    fn hit_dimensions(&self) -> Option<(u32, u32)> {
+        if let Some(hyperstack) = &self.hyperstack {
+            let width = u32::try_from(hyperstack.width()).ok()?;
+            let height = u32::try_from(hyperstack.height()).ok()?;
+            return Some((width, height));
+        }
+        let batch = self.hit_batch.as_ref()?;
+        let max_x = batch.x.iter().copied().max().unwrap_or(0);
+        let max_y = batch.y.iter().copied().max().unwrap_or(0);
+        Some((u32::from(max_x) + 1, u32::from(max_y) + 1))
+    }
+
+    fn scaled_neutrons_for_export(&self) -> Result<NeutronBatch> {
+        let count = self.neutrons.len();
+        if count == 0 {
+            return Err(anyhow!("No neutrons available"));
+        }
+        let factor =
+            if self.super_resolution_factor.is_finite() && self.super_resolution_factor > 0.0 {
+                self.super_resolution_factor
+            } else {
+                1.0
+            };
+        let mut batch = NeutronBatch::with_capacity(count);
+        for i in 0..count {
+            batch.x.push(self.neutrons.x[i] / factor);
+            batch.y.push(self.neutrons.y[i] / factor);
+            batch.tof.push(self.neutrons.tof[i]);
+            batch.tot.push(self.neutrons.tot[i]);
+            batch.n_hits.push(self.neutrons.n_hits[i]);
+            batch.chip_id.push(self.neutrons.chip_id[i]);
+        }
+        Ok(batch)
+    }
+
+    fn neutron_dimensions(&self, neutrons: &NeutronBatch) -> Option<(u32, u32)> {
+        if let Some(hyperstack) = &self.neutron_hyperstack {
+            let width = u32::try_from(hyperstack.width()).ok()?;
+            let height = u32::try_from(hyperstack.height()).ok()?;
+            return Some((width, height));
+        }
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        for (&x, &y) in neutrons.x.iter().zip(neutrons.y.iter()) {
+            let x_u32 = f64_to_u32_checked(x)?;
+            let y_u32 = f64_to_u32_checked(y)?;
+            if x_u32 > max_x {
+                max_x = x_u32;
+            }
+            if y_u32 > max_y {
+                max_y = y_u32;
+            }
+        }
+        Some((max_x.saturating_add(1), max_y.saturating_add(1)))
     }
 
     fn active_data_revision(&self) -> u64 {
@@ -669,6 +858,55 @@ impl RustpixApp {
                 }
             }
         }
+    }
+}
+
+fn optional_positive(value: f64) -> Option<f64> {
+    if value > 0.0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn optional_nonzero(value: f64) -> Option<f64> {
+    if value == 0.0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn ensure_deflate_available() -> Result<()> {
+    if deflate_available() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "HDF5 deflate (zlib) filter unavailable; rebuild with hdf5 zlib support"
+        ))
+    }
+}
+
+fn remove_partial_file(path: &Path) {
+    if let Err(err) = std::fs::remove_file(path) {
+        log::warn!(
+            "Failed to remove partial HDF5 file {}: {err}",
+            path.display()
+        );
+    }
+}
+
+fn f64_to_u32_checked(value: f64) -> Option<u32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded < 0.0 || rounded > f64::from(u32::MAX) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        Some(rounded as u32)
     }
 }
 

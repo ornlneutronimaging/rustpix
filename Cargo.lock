@@ -1956,6 +1956,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9f4d3e1f2a19838c64d33c32eb7354e5dd5bfe3ef600e1f530a1dc15b51d8ff"
 dependencies = [
  "cmake",
+ "libz-sys",
 ]
 
 [[package]]
@@ -1967,6 +1968,7 @@ dependencies = [
  "hdf5-metno-src",
  "libc",
  "libloading",
+ "libz-sys",
  "parking_lot",
  "pkg-config",
  "regex",
@@ -2352,6 +2354,18 @@ dependencies = [
  "bitflags 2.10.0",
  "libc",
  "redox_syscall 0.5.18",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15d118bbf3771060e7311cc7bb0545b01d08a8b4a7de949198dec1fa0ca1c0f7"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -3806,6 +3820,7 @@ dependencies = [
  "egui_extras",
  "egui_plot",
  "env_logger",
+ "hdf5-metno",
  "image",
  "log",
  "memmap2",
@@ -4555,6 +4570,12 @@ dependencies = [
  "num-traits",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
