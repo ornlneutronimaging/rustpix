@@ -3,7 +3,8 @@
 //! Contains the `RustpixApp` struct which manages the GUI state,
 //! data, and message handling.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -18,7 +19,7 @@ use crate::pipeline::{
 };
 use crate::state::{ProcessingState, Statistics, UiState, ViewMode, ZoomMode};
 use crate::util::{f64_to_usize_bounded, usize_to_f64};
-use crate::viewer::{generate_histogram_image, Colormap, RoiShape, RoiState};
+use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 
@@ -29,11 +30,17 @@ pub(crate) struct RoiSpectrumData {
     pub pixel_count: u64,
 }
 
+#[derive(Clone)]
+pub(crate) struct RoiSpectrumEntry {
+    pub data: RoiSpectrumData,
+    pub shape_hash: u64,
+}
+
 #[derive(Default)]
 struct RoiSpectraCache {
     roi_revision: u64,
     data_revision: u64,
-    spectra: HashMap<usize, RoiSpectrumData>,
+    spectra: HashMap<usize, RoiSpectrumEntry>,
 }
 
 struct RoiSpectrumPending {
@@ -342,10 +349,13 @@ impl RustpixApp {
     }
 
     pub(crate) fn roi_spectrum_data(&self, roi_id: usize) -> Option<&RoiSpectrumData> {
-        self.active_roi_cache().spectra.get(&roi_id)
+        self.active_roi_cache()
+            .spectra
+            .get(&roi_id)
+            .map(|entry| &entry.data)
     }
 
-    pub(crate) fn roi_spectra_map(&self) -> &HashMap<usize, RoiSpectrumData> {
+    pub(crate) fn roi_spectra_map(&self) -> &HashMap<usize, RoiSpectrumEntry> {
         &self.active_roi_cache().spectra
     }
 
@@ -392,7 +402,12 @@ impl RustpixApp {
         }
 
         let start = Instant::now();
-        let spectra = self.compute_roi_spectra();
+        let force_all = self.active_roi_cache().data_revision != data_revision;
+        let previous = {
+            let cache = self.active_roi_cache_mut();
+            std::mem::take(&mut cache.spectra)
+        };
+        let spectra = self.compute_roi_spectra_with_cache(&previous, force_all);
         let elapsed = start.elapsed().as_secs_f64();
         if elapsed > 0.05 {
             let expires_at = ctx.input(|i| i.time) + 1.5;
@@ -416,7 +431,12 @@ impl RustpixApp {
         if !needs_update {
             return;
         }
-        let spectra = self.compute_roi_spectra();
+        let force_all = self.active_roi_cache().data_revision != data_revision;
+        let previous = {
+            let cache = self.active_roi_cache_mut();
+            std::mem::take(&mut cache.spectra)
+        };
+        let spectra = self.compute_roi_spectra_with_cache(&previous, force_all);
         let cache = self.active_roi_cache_mut();
         cache.spectra = spectra;
         cache.roi_revision = roi_revision;
@@ -424,86 +444,107 @@ impl RustpixApp {
         self.roi_spectrum_pending = None;
     }
 
-    fn compute_roi_spectra(&self) -> HashMap<usize, RoiSpectrumData> {
+    fn compute_roi_spectra_with_cache(
+        &self,
+        previous: &HashMap<usize, RoiSpectrumEntry>,
+        force_all: bool,
+    ) -> HashMap<usize, RoiSpectrumEntry> {
         let Some(hyperstack) = self.active_hyperstack() else {
             return HashMap::new();
         };
         let width = hyperstack.width();
         let height = hyperstack.height();
         let n_bins = hyperstack.n_tof_bins();
-        let mut spectra = HashMap::new();
+        let mut spectra = HashMap::with_capacity(self.roi_state.rois.len());
 
         for roi in &self.roi_state.rois {
-            match &roi.shape {
-                RoiShape::Rectangle { x1, y1, x2, y2 } => {
-                    let (x_start, x_end) = clamp_span(*x1, *x2, width);
-                    let (y_start, y_end) = clamp_span(*y1, *y2, height);
-                    let counts = if x_start < x_end && y_start < y_end {
-                        hyperstack.spectrum(x_start..x_end, y_start..y_end)
-                    } else {
-                        vec![0; n_bins]
-                    };
-                    let area = (x2 - x1).abs() * (y2 - y1).abs();
-                    let pixel_count = (x_end - x_start) as u64 * (y_end - y_start) as u64;
-                    spectra.insert(
-                        roi.id,
-                        RoiSpectrumData {
-                            counts,
-                            area,
-                            pixel_count,
-                        },
-                    );
-                }
-                RoiShape::Polygon { vertices } => {
-                    if vertices.len() < 3 {
+            let shape_hash = hash_roi_shape(roi);
+            if !force_all {
+                if let Some(entry) = previous.get(&roi.id) {
+                    if entry.shape_hash == shape_hash {
+                        spectra.insert(roi.id, entry.clone());
                         continue;
                     }
-                    let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
-                    let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
-                    for (x, y) in vertices {
-                        min_x = min_x.min(*x);
-                        max_x = max_x.max(*x);
-                        min_y = min_y.min(*y);
-                        max_y = max_y.max(*y);
-                    }
-                    let (x_start, x_end) = clamp_span(min_x, max_x, width);
-                    let (y_start, y_end) = clamp_span(min_y, max_y, height);
-                    let mut mask = Vec::new();
-                    for y in y_start..y_end {
-                        let py = usize_to_f64(y) + 0.5;
-                        for x in x_start..x_end {
-                            let px = usize_to_f64(x) + 0.5;
-                            if point_in_polygon_xy(px, py, vertices) {
-                                mask.push(y * width + x);
-                            }
-                        }
-                    }
-                    let pixel_count = mask.len() as u64;
-                    let mut counts = vec![0; n_bins];
-                    for (tof_bin, count) in counts.iter_mut().enumerate() {
-                        let Some(slice) = hyperstack.slice_tof(tof_bin) else {
-                            continue;
-                        };
-                        let mut sum = 0u64;
-                        for idx in &mask {
-                            sum += slice[*idx];
-                        }
-                        *count = sum;
-                    }
-                    let area = polygon_area(vertices).abs();
-                    spectra.insert(
-                        roi.id,
-                        RoiSpectrumData {
-                            counts,
-                            area,
-                            pixel_count,
-                        },
-                    );
                 }
             }
+            let Some(data) = Self::compute_roi_spectrum(roi, hyperstack, width, height, n_bins)
+            else {
+                continue;
+            };
+            spectra.insert(roi.id, RoiSpectrumEntry { data, shape_hash });
         }
 
         spectra
+    }
+
+    fn compute_roi_spectrum(
+        roi: &Roi,
+        hyperstack: &Hyperstack3D,
+        width: usize,
+        height: usize,
+        n_bins: usize,
+    ) -> Option<RoiSpectrumData> {
+        match &roi.shape {
+            RoiShape::Rectangle { x1, y1, x2, y2 } => {
+                let (x_start, x_end) = clamp_span(*x1, *x2, width);
+                let (y_start, y_end) = clamp_span(*y1, *y2, height);
+                let counts = if x_start < x_end && y_start < y_end {
+                    hyperstack.spectrum(x_start..x_end, y_start..y_end)
+                } else {
+                    vec![0; n_bins]
+                };
+                let area = (x2 - x1).abs() * (y2 - y1).abs();
+                let pixel_count = (x_end - x_start) as u64 * (y_end - y_start) as u64;
+                Some(RoiSpectrumData {
+                    counts,
+                    area,
+                    pixel_count,
+                })
+            }
+            RoiShape::Polygon { vertices } => {
+                if vertices.len() < 3 {
+                    return None;
+                }
+                let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+                let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+                for (x, y) in vertices {
+                    min_x = min_x.min(*x);
+                    max_x = max_x.max(*x);
+                    min_y = min_y.min(*y);
+                    max_y = max_y.max(*y);
+                }
+                let (x_start, x_end) = clamp_span(min_x, max_x, width);
+                let (y_start, y_end) = clamp_span(min_y, max_y, height);
+                let mut mask = Vec::new();
+                for y in y_start..y_end {
+                    let py = usize_to_f64(y) + 0.5;
+                    for x in x_start..x_end {
+                        let px = usize_to_f64(x) + 0.5;
+                        if point_in_polygon_xy(px, py, vertices) {
+                            mask.push(y * width + x);
+                        }
+                    }
+                }
+                let pixel_count = mask.len() as u64;
+                let mut counts = vec![0; n_bins];
+                for (tof_bin, count) in counts.iter_mut().enumerate() {
+                    let Some(slice) = hyperstack.slice_tof(tof_bin) else {
+                        continue;
+                    };
+                    let mut sum = 0u64;
+                    for idx in &mask {
+                        sum += slice[*idx];
+                    }
+                    *count = sum;
+                }
+                let area = polygon_area(vertices).abs();
+                Some(RoiSpectrumData {
+                    counts,
+                    area,
+                    pixel_count,
+                })
+            }
+        }
     }
 
     /// Check if neutron data is available.
@@ -629,6 +670,32 @@ impl RustpixApp {
             }
         }
     }
+}
+
+fn hash_roi_shape(roi: &Roi) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match &roi.shape {
+        RoiShape::Rectangle { x1, y1, x2, y2 } => {
+            0u8.hash(&mut hasher);
+            hash_f64(*x1, &mut hasher);
+            hash_f64(*y1, &mut hasher);
+            hash_f64(*x2, &mut hasher);
+            hash_f64(*y2, &mut hasher);
+        }
+        RoiShape::Polygon { vertices } => {
+            1u8.hash(&mut hasher);
+            vertices.len().hash(&mut hasher);
+            for (x, y) in vertices {
+                hash_f64(*x, &mut hasher);
+                hash_f64(*y, &mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_f64(value: f64, hasher: &mut DefaultHasher) {
+    value.to_bits().hash(hasher);
 }
 
 fn clamp_span(a: f64, b: f64, limit: usize) -> (usize, usize) {

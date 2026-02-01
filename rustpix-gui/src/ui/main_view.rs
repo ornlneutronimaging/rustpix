@@ -10,7 +10,7 @@ use image::{Rgba, RgbaImage};
 use rfd::FileDialog;
 
 use super::theme::{accent, ThemeColors};
-use crate::app::{RoiSpectrumData, RustpixApp};
+use crate::app::{RoiSpectrumEntry, RustpixApp};
 use crate::state::{SpectrumXAxis, ViewMode, ZoomMode};
 use crate::util::{
     energy_ev_to_tof_ms, f64_to_usize_bounded, tof_ms_to_energy_ev, u64_to_f64, usize_to_f64,
@@ -2210,7 +2210,7 @@ impl RustpixApp {
     fn export_spectrum_csv(
         full: Option<&[u64]>,
         rois: &[Roi],
-        roi_spectra: &HashMap<usize, RoiSpectrumData>,
+        roi_spectra: &HashMap<usize, RoiSpectrumEntry>,
         full_visible: bool,
         bin_width_ms: f64,
         axis_config: SpectrumAxisConfig,
@@ -2231,10 +2231,10 @@ impl RustpixApp {
             if !roi.spectrum_visible {
                 continue;
             }
-            let Some(data) = roi_spectra.get(&roi.id) else {
+            let Some(entry) = roi_spectra.get(&roi.id) else {
                 continue;
             };
-            visible_rois.push((roi, data));
+            visible_rois.push((roi, &entry.data));
         }
 
         let mut header_cols = Vec::new();
