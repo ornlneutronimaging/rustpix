@@ -796,12 +796,33 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let step = 1.0;
+                            let min = 1.0;
+                            let max = 120.0;
+                            if ui
+                                .add_enabled(
+                                    self.tdc_frequency < max,
+                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.tdc_frequency = (self.tdc_frequency + step).min(max);
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut self.tdc_frequency)
-                                    .range(1.0..=120.0)
-                                    .speed(1.0)
+                                    .range(min..=max)
+                                    .speed(step)
                                     .suffix(" Hz"),
                             );
+                            if ui
+                                .add_enabled(
+                                    self.tdc_frequency > min,
+                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.tdc_frequency = (self.tdc_frequency - step).max(min);
+                            }
                         });
                     });
 
@@ -816,12 +837,33 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let step = 0.5;
+                            let min = 1.0;
+                            let max = 50.0;
+                            if ui
+                                .add_enabled(
+                                    self.radius < max,
+                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.radius = (self.radius + step).min(max);
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut self.radius)
-                                    .range(1.0..=50.0)
-                                    .speed(1.0)
+                                    .range(min..=max)
+                                    .speed(step)
                                     .suffix(" px"),
                             );
+                            if ui
+                                .add_enabled(
+                                    self.radius > min,
+                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.radius = (self.radius - step).max(min);
+                            }
                         });
                     });
 
@@ -836,12 +878,33 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let step = 1.0;
+                            let min = 10.0;
+                            let max = 500.0;
+                            if ui
+                                .add_enabled(
+                                    self.temporal_window_ns < max,
+                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.temporal_window_ns = (self.temporal_window_ns + step).min(max);
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut self.temporal_window_ns)
-                                    .range(10.0..=500.0)
-                                    .speed(5.0)
+                                    .range(min..=max)
+                                    .speed(step)
                                     .suffix(" ns"),
                             );
+                            if ui
+                                .add_enabled(
+                                    self.temporal_window_ns > min,
+                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.temporal_window_ns = (self.temporal_window_ns - step).max(min);
+                            }
                         });
                     });
 
@@ -856,13 +919,38 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let min = 1;
+                            let max = 10;
+                            if ui
+                                .add_enabled(
+                                    self.min_cluster_size < max,
+                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.min_cluster_size = (self.min_cluster_size + 1).min(max);
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut self.min_cluster_size)
-                                    .range(1..=10)
+                                    .range(min..=max)
                                     .speed(1),
                             );
+                            if ui
+                                .add_enabled(
+                                    self.min_cluster_size > min,
+                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.min_cluster_size = (self.min_cluster_size - 1).max(min);
+                            }
                         });
                     });
+                    if let Some(max_value) = self.max_cluster_size {
+                        if self.min_cluster_size > max_value {
+                            self.max_cluster_size = Some(self.min_cluster_size);
+                        }
+                    }
 
                     ui.add_space(4.0);
 
@@ -880,9 +968,31 @@ impl RustpixApp {
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if limit_max {
+                                let min = 1;
+                                let max = 256;
+                                if ui
+                                    .add_enabled(
+                                        max_value < max,
+                                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    max_value = (max_value + 1).min(max);
+                                }
                                 ui.add(
-                                    egui::DragValue::new(&mut max_value).range(1..=256).speed(1),
+                                    egui::DragValue::new(&mut max_value)
+                                        .range(min..=max)
+                                        .speed(1),
                                 );
+                                if ui
+                                    .add_enabled(
+                                        max_value > min,
+                                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    max_value = (max_value - 1).max(min);
+                                }
                             } else {
                                 ui.label(
                                     egui::RichText::new("∞").size(10.0).color(colors.text_dim),
@@ -913,11 +1023,33 @@ impl RustpixApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let min = 1;
+                                    let max = 10;
+                                    if ui
+                                        .add_enabled(
+                                            self.dbscan_min_points < max,
+                                            egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.dbscan_min_points =
+                                            (self.dbscan_min_points + 1).min(max);
+                                    }
                                     ui.add(
                                         egui::DragValue::new(&mut self.dbscan_min_points)
-                                            .range(1..=10)
+                                            .range(min..=max)
                                             .speed(1),
                                     );
+                                    if ui
+                                        .add_enabled(
+                                            self.dbscan_min_points > min,
+                                            egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.dbscan_min_points =
+                                            (self.dbscan_min_points - 1).max(min);
+                                    }
                                 },
                             );
                         });
@@ -935,12 +1067,32 @@ impl RustpixApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let min = 4;
+                                    let max = 128;
+                                    if ui
+                                        .add_enabled(
+                                            self.grid_cell_size < max,
+                                            egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.grid_cell_size = (self.grid_cell_size + 1).min(max);
+                                    }
                                     ui.add(
                                         egui::DragValue::new(&mut self.grid_cell_size)
-                                            .range(4..=128)
+                                            .range(min..=max)
                                             .speed(1)
                                             .suffix(" px"),
                                     );
+                                    if ui
+                                        .add_enabled(
+                                            self.grid_cell_size > min,
+                                            egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.grid_cell_size = (self.grid_cell_size - 1).max(min);
+                                    }
                                 },
                             );
                         });
@@ -957,12 +1109,35 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let step = 0.1;
+                            let min = 1.0;
+                            let max = 16.0;
+                            if ui
+                                .add_enabled(
+                                    self.super_resolution_factor < max,
+                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.super_resolution_factor =
+                                    (self.super_resolution_factor + step).min(max);
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut self.super_resolution_factor)
-                                    .range(1.0..=16.0)
-                                    .speed(0.1)
+                                    .range(min..=max)
+                                    .speed(step)
                                     .suffix("×"),
                             );
+                            if ui
+                                .add_enabled(
+                                    self.super_resolution_factor > min,
+                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.super_resolution_factor =
+                                    (self.super_resolution_factor - step).max(min);
+                            }
                         });
                     });
 
@@ -983,11 +1158,31 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let min = 0;
+                            let max = 200;
+                            if ui
+                                .add_enabled(
+                                    self.min_tot_threshold < max,
+                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.min_tot_threshold = (self.min_tot_threshold + 1).min(max);
+                            }
                             ui.add(
                                 egui::DragValue::new(&mut self.min_tot_threshold)
-                                    .range(0..=200)
+                                    .range(min..=max)
                                     .speed(1),
                             );
+                            if ui
+                                .add_enabled(
+                                    self.min_tot_threshold > min,
+                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                                )
+                                .clicked()
+                            {
+                                self.min_tot_threshold = (self.min_tot_threshold - 1).max(min);
+                            }
                         });
                     });
 
