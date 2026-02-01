@@ -5,7 +5,7 @@ use crate::reader::EventBatch;
 use crate::{Error, Result};
 use hdf5::types::{H5Type, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
-use ndarray::{s, Array4, ArrayView, ArrayView1, ArrayView4, Zip};
+use ndarray::{s, Array4, ArrayView, ArrayView1, ArrayView2, ArrayView4, Zip};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_tpx::DetectorConfig;
 use std::collections::{HashMap, HashSet};
@@ -216,6 +216,45 @@ impl NeutronWriteOptions {
             include_n_hits: true,
         }
     }
+}
+
+/// Pixel mask write configuration.
+#[derive(Clone, Debug)]
+pub struct PixelMaskWriteOptions {
+    /// Optional gzip compression level (0-9).
+    pub compression: Option<u8>,
+    /// Enable shuffle filter before compression.
+    pub shuffle: bool,
+}
+
+impl Default for PixelMaskWriteOptions {
+    fn default() -> Self {
+        Self {
+            compression: Some(1),
+            shuffle: true,
+        }
+    }
+}
+
+/// Pixel mask data (dead/hot) for export.
+#[derive(Clone, Debug)]
+pub struct PixelMaskWriteData {
+    /// Detector X size in pixels.
+    pub width: usize,
+    /// Detector Y size in pixels.
+    pub height: usize,
+    /// Dead pixel mask (1 = dead, 0 = ok), row-major [y * width + x].
+    pub dead_mask: Vec<u8>,
+    /// Hot pixel mask (1 = hot, 0 = ok), row-major [y * width + x].
+    pub hot_mask: Vec<u8>,
+    /// Sigma threshold used for hot pixel detection.
+    pub hot_sigma: f64,
+    /// Absolute threshold used for hot pixel detection.
+    pub hot_threshold: f64,
+    /// Mean count used for thresholding.
+    pub mean: f64,
+    /// Standard deviation used for thresholding.
+    pub std_dev: f64,
 }
 
 /// Event data loaded from an `NXevent_data` group (hits).
@@ -543,8 +582,9 @@ pub fn write_combined_hdf5<P: AsRef<Path>>(
     hits: Option<(&EventBatch, &HitWriteOptions)>,
     neutrons: Option<(&NeutronEventBatch, &NeutronWriteOptions)>,
     histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
+    pixel_masks: Option<(&PixelMaskWriteData, &PixelMaskWriteOptions)>,
 ) -> Result<()> {
-    if hits.is_none() && neutrons.is_none() && histogram.is_none() {
+    if hits.is_none() && neutrons.is_none() && histogram.is_none() && pixel_masks.is_none() {
         return Err(Error::InvalidFormat(
             "no HDF5 payloads selected".to_string(),
         ));
@@ -595,6 +635,10 @@ pub fn write_combined_hdf5<P: AsRef<Path>>(
     if let Some((data, options)) = histogram {
         let histogram_group = create_histogram_group(&entry, options)?;
         write_histogram_datasets(&histogram_group, data, options)?;
+    }
+
+    if let Some((data, options)) = pixel_masks {
+        write_pixel_masks(&entry, data, options)?;
     }
 
     Ok(())
@@ -1683,6 +1727,102 @@ fn write_histogram_axes(
     }
 
     Ok(())
+}
+
+fn write_pixel_masks(
+    entry: &Group,
+    data: &PixelMaskWriteData,
+    options: &PixelMaskWriteOptions,
+) -> Result<()> {
+    let expected = data.width.saturating_mul(data.height);
+    if data.dead_mask.len() != expected || data.hot_mask.len() != expected {
+        return Err(Error::InvalidFormat(
+            "pixel mask size does not match width/height".to_string(),
+        ));
+    }
+
+    let group = entry.create_group("pixel_masks")?;
+    set_attr_str_group(&group, "NX_class", "NXdata")?;
+    let width_u32 = u32::try_from(data.width)
+        .map_err(|_| Error::InvalidFormat("pixel mask width exceeds u32 range".to_string()))?;
+    let height_u32 = u32::try_from(data.height)
+        .map_err(|_| Error::InvalidFormat("pixel mask height exceeds u32 range".to_string()))?;
+    group
+        .new_attr::<u32>()
+        .create("x_size")?
+        .write_scalar(&width_u32)?;
+    group
+        .new_attr::<u32>()
+        .create("y_size")?
+        .write_scalar(&height_u32)?;
+    group
+        .new_attr::<f64>()
+        .create("hot_sigma")?
+        .write_scalar(&data.hot_sigma)?;
+    group
+        .new_attr::<f64>()
+        .create("hot_threshold")?
+        .write_scalar(&data.hot_threshold)?;
+    group
+        .new_attr::<f64>()
+        .create("mean")?
+        .write_scalar(&data.mean)?;
+    group
+        .new_attr::<f64>()
+        .create("std_dev")?
+        .write_scalar(&data.std_dev)?;
+
+    let chunk_y = data.height.clamp(1, 256);
+    let chunk_x = data.width.clamp(1, 256);
+
+    let dead_ds = create_mask_dataset(
+        &group,
+        "dead",
+        data.height,
+        data.width,
+        chunk_y,
+        chunk_x,
+        options,
+    )?;
+    let hot_ds = create_mask_dataset(
+        &group,
+        "hot",
+        data.height,
+        data.width,
+        chunk_y,
+        chunk_x,
+        options,
+    )?;
+
+    let dead_view = ArrayView2::from_shape((data.height, data.width), data.dead_mask.as_slice())
+        .map_err(|e| Error::InvalidFormat(format!("dead mask shape mismatch: {e}")))?;
+    dead_ds.write(dead_view)?;
+
+    let hot_view = ArrayView2::from_shape((data.height, data.width), data.hot_mask.as_slice())
+        .map_err(|e| Error::InvalidFormat(format!("hot mask shape mismatch: {e}")))?;
+    hot_ds.write(hot_view)?;
+
+    Ok(())
+}
+
+fn create_mask_dataset(
+    group: &Group,
+    name: &str,
+    height: usize,
+    width: usize,
+    chunk_y: usize,
+    chunk_x: usize,
+    options: &PixelMaskWriteOptions,
+) -> Result<Dataset> {
+    let mut builder = group.new_dataset::<u8>().shape((height, width));
+    builder = builder.chunk((chunk_y, chunk_x));
+    if options.shuffle {
+        builder = builder.shuffle();
+    }
+    if let Some(level) = options.compression {
+        builder = builder.deflate(level);
+    }
+    Ok(builder.create(name)?)
 }
 
 fn create_histogram_counts_dataset(

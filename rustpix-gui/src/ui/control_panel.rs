@@ -342,14 +342,9 @@ impl RustpixApp {
                             app.render_view_options(ui);
                         });
 
-                        // Pixel Health section (placeholder)
-                        self.render_section(ui, "Pixel Health", false, |_app, ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new("Coming soon...")
-                                    .size(11.0)
-                                    .color(colors.text_dim),
-                            );
+                        // Pixel Health section
+                        self.render_section(ui, "Pixel Health", false, |app, ui| {
+                            app.render_pixel_health(ui);
                         });
 
                         // Progress indicator (when active)
@@ -734,6 +729,109 @@ impl RustpixApp {
         }
     }
 
+    /// Render pixel health (dead/hot masks) summary and controls.
+    fn render_pixel_health(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let (dead_count, hot_count, mean, std_dev, threshold) =
+            if let Some(mask) = self.pixel_masks.as_ref() {
+                (
+                    mask.dead_count,
+                    mask.hot_count,
+                    mask.mean,
+                    mask.std_dev,
+                    mask.hot_threshold,
+                )
+            } else {
+                ui.label(
+                    egui::RichText::new("Load data to analyze pixel health")
+                        .size(11.0)
+                        .color(colors.text_muted),
+                );
+                return;
+            };
+
+        ui.horizontal(|ui| {
+            ui.label(form_label("Hot pixels"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let gear = Self::file_icon_image(FileToolbarIcon::Gear, colors.text_muted)
+                    .fit_to_exact_size(egui::vec2(14.0, 14.0));
+                if ui
+                    .add(egui::ImageButton::new(gear).frame(true))
+                    .on_hover_text("Pixel mask settings")
+                    .clicked()
+                {
+                    self.ui_state.show_pixel_health_settings =
+                        !self.ui_state.show_pixel_health_settings;
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Dead")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format_number(dead_count))
+                        .size(11.0)
+                        .color(colors.text_primary),
+                );
+            });
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Hot")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format_number(hot_count))
+                        .size(11.0)
+                        .color(accent::RED),
+                );
+            });
+        });
+
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut self.ui_state.show_hot_pixels,
+            "Show hot pixels overlay",
+        );
+
+        if self.ui_state.show_pixel_health_settings {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Sigma threshold")
+                        .size(11.0)
+                        .color(colors.text_muted),
+                );
+                let mut sigma = self.hot_pixel_sigma;
+                let response = ui.add(egui::DragValue::new(&mut sigma).range(1.0..=10.0));
+                if response.changed() {
+                    self.hot_pixel_sigma = sigma;
+                    self.update_pixel_masks();
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "mean {mean:.2} • σ {std_dev:.2} • threshold {threshold:.2}"
+                ))
+                .size(10.0)
+                .color(colors.text_dim),
+            );
+        }
+    }
+
     /// Render floating settings windows (app + spectrum).
     pub(crate) fn render_settings_windows(&mut self, ctx: &egui::Context) {
         if self.ui_state.show_app_settings {
@@ -841,6 +939,7 @@ impl RustpixApp {
                     ViewMode::Hits => self.hyperstack.is_some(),
                     ViewMode::Neutrons => self.neutron_hyperstack.is_some(),
                 };
+                let masks_available = self.pixel_masks.is_some();
 
                 if !hits_available {
                     options.include_hits = false;
@@ -850,6 +949,9 @@ impl RustpixApp {
                 }
                 if !hist_available {
                     options.include_histogram = false;
+                }
+                if !masks_available {
+                    options.include_pixel_masks = false;
                 }
 
                 ui.horizontal(|ui| {
@@ -901,10 +1003,9 @@ impl RustpixApp {
                     egui::Checkbox::new(&mut options.include_histogram, hist_label),
                 );
 
-                let mut mask_placeholder = false;
                 ui.add_enabled(
-                    false,
-                    egui::Checkbox::new(&mut mask_placeholder, "Pixel masks (coming soon)"),
+                    masks_available,
+                    egui::Checkbox::new(&mut options.include_pixel_masks, "Pixel masks"),
                 );
 
                 let deflate_ok = hdf5::filters::deflate_available();

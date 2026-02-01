@@ -20,13 +20,14 @@ use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
 use crate::state::{ProcessingState, Statistics, UiState, ViewMode, ZoomMode};
-use crate::util::{f64_to_usize_bounded, usize_to_f64};
+use crate::util::{f64_to_usize_bounded, u64_to_f64, usize_to_f64};
 use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::hdf5::{
     write_combined_hdf5, HistogramShape, HistogramWriteData, HistogramWriteOptions,
-    HitWriteOptions, NeutronEventBatch, NeutronWriteOptions,
+    HitWriteOptions, NeutronEventBatch, NeutronWriteOptions, PixelMaskWriteData,
+    PixelMaskWriteOptions,
 };
 use rustpix_io::EventBatch;
 
@@ -35,6 +36,21 @@ pub(crate) struct RoiSpectrumData {
     pub counts: Vec<u64>,
     pub area: f64,
     pub pixel_count: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct PixelMaskData {
+    pub width: usize,
+    pub height: usize,
+    pub dead_mask: Vec<u8>,
+    pub hot_mask: Vec<u8>,
+    pub hot_points: Vec<[f64; 2]>,
+    pub dead_count: usize,
+    pub hot_count: usize,
+    pub mean: f64,
+    pub std_dev: f64,
+    pub hot_sigma: f64,
+    pub hot_threshold: f64,
 }
 
 #[derive(Clone)]
@@ -132,6 +148,10 @@ pub struct RustpixApp {
     pub(crate) texture: Option<egui::TextureHandle>,
     /// Current colormap selection.
     pub(crate) colormap: Colormap,
+    /// Cached dead/hot pixel masks for hits view.
+    pub(crate) pixel_masks: Option<PixelMaskData>,
+    /// Hot pixel sigma threshold.
+    pub(crate) hot_pixel_sigma: f64,
 }
 
 impl Default for RustpixApp {
@@ -139,6 +159,7 @@ impl Default for RustpixApp {
         let (tx, rx) = channel();
         let ui_state = UiState {
             full_fov_visible: true,
+            show_hot_pixels: true,
             ..Default::default()
         };
         Self {
@@ -180,6 +201,8 @@ impl Default for RustpixApp {
 
             texture: None,
             colormap: Colormap::Grayscale,
+            pixel_masks: None,
+            hot_pixel_sigma: 5.0,
         }
     }
 }
@@ -238,6 +261,7 @@ impl RustpixApp {
         self.neutron_data_revision = self.neutron_data_revision.wrapping_add(1);
         self.texture = None;
         self.statistics.clear();
+        self.pixel_masks = None;
     }
 
     /// Cancel the current loading or processing operation.
@@ -308,6 +332,86 @@ impl RustpixApp {
             return egui::ColorImage::new([512, 512], egui::Color32::BLACK);
         };
         generate_histogram_image(counts, self.colormap, self.ui_state.log_scale)
+    }
+
+    pub(crate) fn update_pixel_masks(&mut self) {
+        let Some(counts) = self.hit_counts.as_ref() else {
+            self.pixel_masks = None;
+            return;
+        };
+        let Some(hyperstack) = self.hyperstack.as_ref() else {
+            self.pixel_masks = None;
+            return;
+        };
+        let width = hyperstack.width();
+        let height = hyperstack.height();
+        if counts.len() != width * height {
+            self.pixel_masks = None;
+            return;
+        }
+
+        let sigma = self.hot_pixel_sigma.max(0.0);
+        let mut sum = 0.0f64;
+        let mut sumsq = 0.0f64;
+        let mut n = 0.0f64;
+        for &count in counts {
+            if count > 0 {
+                let value = u64_to_f64(count);
+                sum += value;
+                sumsq += value * value;
+                n += 1.0;
+            }
+        }
+
+        let mean = if n > 0.0 { sum / n } else { 0.0 };
+        let variance = if n > 0.0 {
+            (sumsq / n) - mean * mean
+        } else {
+            0.0
+        };
+        let std_dev = variance.max(0.0).sqrt();
+        let threshold = mean + sigma * std_dev;
+
+        let mut dead_mask = Vec::with_capacity(counts.len());
+        let mut hot_mask = Vec::with_capacity(counts.len());
+        let mut hot_points = Vec::new();
+        let mut dead_count = 0usize;
+        let mut hot_count = 0usize;
+
+        for (idx, &count) in counts.iter().enumerate() {
+            if count == 0 {
+                dead_mask.push(1);
+                hot_mask.push(0);
+                dead_count += 1;
+                continue;
+            }
+
+            dead_mask.push(0);
+            let is_hot = u64_to_f64(count) > threshold;
+            if is_hot {
+                hot_mask.push(1);
+                hot_count += 1;
+                let x = usize_to_f64(idx % width) + 0.5;
+                let y = usize_to_f64(idx / width) + 0.5;
+                hot_points.push([x, y]);
+            } else {
+                hot_mask.push(0);
+            }
+        }
+
+        self.pixel_masks = Some(PixelMaskData {
+            width,
+            height,
+            dead_mask,
+            hot_mask,
+            hot_points,
+            dead_count,
+            hot_count,
+            mean,
+            std_dev,
+            hot_sigma: sigma,
+            hot_threshold: threshold,
+        });
     }
 
     /// Get the cached TOF spectrum (full detector integration).
@@ -435,7 +539,35 @@ impl RustpixApp {
             histogram_options = Some(histogram_opts);
         }
 
-        if hit_batch.is_none() && neutron_batch.is_none() && histogram_data.is_none() {
+        let mut mask_data: Option<PixelMaskWriteData> = None;
+        let mut mask_options: Option<PixelMaskWriteOptions> = None;
+        if options.include_pixel_masks {
+            let masks = self
+                .pixel_masks
+                .as_ref()
+                .ok_or_else(|| anyhow!("No pixel masks available"))?;
+            let compression_level = options.compression_level.min(9);
+            mask_data = Some(PixelMaskWriteData {
+                width: masks.width,
+                height: masks.height,
+                dead_mask: masks.dead_mask.clone(),
+                hot_mask: masks.hot_mask.clone(),
+                hot_sigma: masks.hot_sigma,
+                hot_threshold: masks.hot_threshold,
+                mean: masks.mean,
+                std_dev: masks.std_dev,
+            });
+            mask_options = Some(PixelMaskWriteOptions {
+                compression: Some(compression_level),
+                shuffle: options.shuffle,
+            });
+        }
+
+        if hit_batch.is_none()
+            && neutron_batch.is_none()
+            && histogram_data.is_none()
+            && mask_data.is_none()
+        {
             return Err(anyhow!("No data selected for export"));
         }
 
@@ -444,6 +576,7 @@ impl RustpixApp {
             hit_batch.as_ref().zip(hit_options.as_ref()),
             neutron_batch.as_ref().zip(neutron_options.as_ref()),
             histogram_data.as_ref().zip(histogram_options.as_ref()),
+            mask_data.as_ref().zip(mask_options.as_ref()),
         )
         .map_err(|err| {
             remove_partial_file(path);
@@ -793,6 +926,7 @@ impl RustpixApp {
         self.hit_counts = Some(hyperstack.project_xy());
         self.tof_spectrum = Some(hyperstack.full_spectrum());
         self.hyperstack = Some(hyperstack);
+        self.update_pixel_masks();
         self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
         self.ui_state.current_tof_bin = 0;
         self.ui_state.needs_plot_reset = true;
@@ -846,6 +980,7 @@ impl RustpixApp {
                     self.tof_spectrum = Some(hyperstack.full_spectrum());
                     self.hyperstack = Some(*hyperstack);
                     self.hit_batch = Some(*batch);
+                    self.update_pixel_masks();
                     self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
 
                     // Trigger auto-fit of plot view

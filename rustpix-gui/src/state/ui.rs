@@ -128,6 +128,10 @@ pub struct UiState {
     pub show_export_dialog: bool,
     /// HDF5 export configuration.
     pub export_options: Hdf5ExportOptions,
+    /// Whether to show advanced pixel health settings.
+    pub show_pixel_health_settings: bool,
+    /// Whether to show hot pixel overlay in the viewer.
+    pub show_hot_pixels: bool,
 }
 
 #[derive(Clone)]
@@ -136,6 +140,7 @@ pub struct Hdf5ExportOptions {
     pub include_hits: bool,
     pub include_neutrons: bool,
     pub include_histogram: bool,
+    pub include_pixel_masks: bool,
     pub advanced: bool,
     pub compression_level: u8,
     pub shuffle: bool,
@@ -158,6 +163,7 @@ impl Default for Hdf5ExportOptions {
             include_hits: true,
             include_neutrons: true,
             include_histogram: true,
+            include_pixel_masks: true,
             advanced: false,
             compression_level: 1,
             shuffle: true,

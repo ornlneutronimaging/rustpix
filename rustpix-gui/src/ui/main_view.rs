@@ -5,7 +5,9 @@ use std::fs::File;
 use std::io::Write;
 
 use eframe::egui::{self, Color32, LayerId, Order, Pos2, Rect, Rounding, Stroke, Vec2, Vec2b};
-use egui_plot::{Line, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, VLine};
+use egui_plot::{
+    Line, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, Points, VLine,
+};
 use image::{Rgba, RgbaImage};
 use rfd::FileDialog;
 
@@ -374,6 +376,23 @@ impl RustpixApp {
                                             PlotPoint::new(half, half),
                                             [data_size_f32, data_size_f32],
                                         ));
+
+                                        if self.ui_state.view_mode == ViewMode::Hits
+                                            && self.ui_state.show_hot_pixels
+                                        {
+                                            if let Some(mask) = &self.pixel_masks {
+                                                if !mask.hot_points.is_empty() {
+                                                    let hot_points = Points::new(
+                                                        PlotPoints::new(mask.hot_points.clone()),
+                                                    )
+                                                    .shape(MarkerShape::Square)
+                                                    .radius(2.0)
+                                                    .color(accent::RED)
+                                                    .allow_hover(false);
+                                                    plot_ui.points(hot_points);
+                                                }
+                                            }
+                                        }
 
                                         let clamp_point = |point: PlotPoint| {
                                             PlotPoint::new(
