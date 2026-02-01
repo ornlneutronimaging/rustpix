@@ -7,6 +7,7 @@
 | 2025-01-30 | v1.0    | Initial design document based on beamline scientist workflow |
 | 2026-01-31 | v1.1    | Refactor progress update (TOF ms axis, settings dialogs, grid toggle, scrollable sidebar, spectrum export) |
 | 2026-02-01 | v1.2    | Phase 4 closed (HDF5 export + pixel masks + async export); Phase 5+ roadmap added |
+| 2026-02-01 | v1.3    | Phase 6 closed (advanced clustering/extraction controls + detector profiles); precision inputs added |
 
 ---
 
@@ -47,11 +48,11 @@ based on real-world usage scenarios from beamline scientists and detector expert
 **Planned (Phase 5+ roadmap):**
 - Phase 5 (Telemetry + Diagnostics)
   - Memory utilization indicator in status bar (per-process), hover breakdown by major buffers **(Completed - 2026-02-01)**
-  - Export validation utilities (basic file integrity + compression sanity checks)
-  - Pixel mask controls: exclude from stats + recompute action
+  - Export validation utilities (basic file integrity + compression sanity checks) **(Completed - 2026-02-01)**
+  - Pixel mask controls: exclude from stats + recompute action **(Completed - 2026-02-01)**
 - Phase 6 (Advanced Configuration)
-  - Clustering/extraction advanced settings (missing fields + reset defaults)
-  - Detector configuration profiles (presets + per-file overrides)
+  - Clustering/extraction advanced settings (missing fields + reset defaults) **(Completed - 2026-02-01)**
+  - Detector configuration profiles (presets + per-file overrides) **(Completed - 2026-02-01)**
   - Export options dialog expansion (compression level, chunk sizing, include fields)
 - Phase 7 (Streaming + Resilience)
   - Full streaming pipeline + cancel flows for end-to-end large files
