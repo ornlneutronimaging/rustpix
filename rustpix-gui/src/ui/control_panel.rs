@@ -10,6 +10,13 @@ use crate::state::ViewMode;
 use crate::util::format_number;
 use crate::viewer::Colormap;
 
+#[derive(Clone, Copy)]
+enum FileToolbarIcon {
+    Open,
+    Export,
+    Gear,
+}
+
 impl RustpixApp {
     /// Render the top panel with RUSTPIX branding, file info, and view mode toggle.
     pub(crate) fn render_top_panel(&mut self, ctx: &egui::Context) {
@@ -39,22 +46,67 @@ impl RustpixApp {
 
                     ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
 
-                    // File name
-                    if let Some(p) = &self.selected_file {
-                        ui.label(
-                            egui::RichText::new(
-                                p.file_name().unwrap_or_default().to_string_lossy(),
+                    let can_load = !self.processing.is_loading && !self.processing.is_processing;
+                    let can_export = self.hit_batch.is_some()
+                        || !self.neutrons.is_empty()
+                        || self.hyperstack.is_some()
+                        || self.neutron_hyperstack.is_some();
+
+                    if ui
+                        .add_enabled(
+                            can_load,
+                            egui::ImageButton::new(
+                                Self::file_icon_image(FileToolbarIcon::Open, colors.text_muted)
+                                    .fit_to_exact_size(egui::vec2(16.0, 16.0)),
                             )
+                            .frame(true),
+                        )
+                        .on_hover_text("Open file")
+                        .clicked()
+                    {
+                        if let Some(path) =
+                            FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file()
+                        {
+                            self.load_file(path);
+                        }
+                    }
+
+                    if ui
+                        .add_enabled(
+                            can_export,
+                            egui::ImageButton::new(
+                                Self::file_icon_image(FileToolbarIcon::Export, colors.text_muted)
+                                    .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                            )
+                            .frame(true),
+                        )
+                        .on_hover_text("Export HDF5")
+                        .clicked()
+                    {
+                        self.ui_state.show_export_dialog = true;
+                    }
+
+                    ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
+
+                    let status_text = if let Some(p) = &self.selected_file {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy();
+                        if self.statistics.hit_count > 0 {
+                            format!(
+                                "{} • {} hits",
+                                name,
+                                format_number(self.statistics.hit_count)
+                            )
+                        } else {
+                            format!("{name}")
+                        }
+                    } else {
+                        "No file loaded".to_string()
+                    };
+                    ui.label(
+                        egui::RichText::new(status_text)
                             .size(11.0)
                             .color(colors.text_muted),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("No file loaded")
-                                .size(11.0)
-                                .color(colors.text_dim),
-                        );
-                    }
+                    );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let colors = ThemeColors::from_ui(ui);
@@ -299,135 +351,10 @@ impl RustpixApp {
                             );
                         });
 
-                        // Export section (HDF5)
-                        self.render_section(ui, "Export", false, |app, ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            let now = ui.input(|i| i.time);
-                            let set_status =
-                                |ui_state: &mut crate::state::UiState,
-                                 message: String,
-                                 is_error: bool| {
-                                    let expires_at = now + 2.5;
-                                    if is_error {
-                                        ui_state.roi_warning = Some((message, expires_at));
-                                    } else {
-                                        ui_state.roi_status = Some((message, expires_at));
-                                    }
-                                };
-
-                            let hits_enabled =
-                                app.hit_batch.as_ref().is_some_and(|b| !b.is_empty());
-                            if ui
-                                .add_enabled(hits_enabled, egui::Button::new("Export Hits (HDF5)"))
-                                .clicked()
-                            {
-                                if let Some(path) =
-                                    FileDialog::new().set_file_name("hits.h5").save_file()
-                                {
-                                    match app.export_hits_hdf5(&path) {
-                                        Ok(()) => {
-                                            set_status(
-                                                &mut app.ui_state,
-                                                "HDF5 export complete".to_string(),
-                                                false,
-                                            );
-                                        }
-                                        Err(err) => {
-                                            log::error!("Failed to export hits HDF5: {err}");
-                                            set_status(
-                                                &mut app.ui_state,
-                                                "HDF5 export failed (see logs)".to_string(),
-                                                true,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            let neutrons_enabled = !app.neutrons.is_empty();
-                            if ui
-                                .add_enabled(
-                                    neutrons_enabled,
-                                    egui::Button::new("Export Neutrons (HDF5)"),
-                                )
-                                .clicked()
-                            {
-                                if let Some(path) =
-                                    FileDialog::new().set_file_name("neutrons.h5").save_file()
-                                {
-                                    match app.export_neutrons_hdf5(&path) {
-                                        Ok(()) => {
-                                            set_status(
-                                                &mut app.ui_state,
-                                                "HDF5 export complete".to_string(),
-                                                false,
-                                            );
-                                        }
-                                        Err(err) => {
-                                            log::error!("Failed to export neutrons HDF5: {err}");
-                                            set_status(
-                                                &mut app.ui_state,
-                                                "HDF5 export failed (see logs)".to_string(),
-                                                true,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            let hist_enabled = match app.ui_state.view_mode {
-                                ViewMode::Hits => app.hyperstack.is_some(),
-                                ViewMode::Neutrons => app.neutron_hyperstack.is_some(),
-                            };
-                            let hist_label =
-                                format!("Export Histogram (HDF5, {})", app.ui_state.view_mode);
-                            if ui
-                                .add_enabled(hist_enabled, egui::Button::new(hist_label))
-                                .clicked()
-                            {
-                                if let Some(path) =
-                                    FileDialog::new().set_file_name("histogram.h5").save_file()
-                                {
-                                    match app.export_histogram_hdf5(&path, app.ui_state.view_mode) {
-                                        Ok(()) => {
-                                            set_status(
-                                                &mut app.ui_state,
-                                                "HDF5 export complete".to_string(),
-                                                false,
-                                            );
-                                        }
-                                        Err(err) => {
-                                            log::error!("Failed to export histogram HDF5: {err}");
-                                            set_status(
-                                                &mut app.ui_state,
-                                                "HDF5 export failed (see logs)".to_string(),
-                                                true,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(
-                                    "Exports include flight path + TOF offset metadata when set.",
-                                )
-                                .size(10.0)
-                                .color(colors.text_dim),
-                            );
-                        });
-
                         // Progress indicator (when active)
                         self.render_progress_status(ui);
 
-                        // Open File button
-                        ui.separator();
-                        egui::Frame::none()
-                            .inner_margin(egui::Margin::symmetric(12.0, 12.0))
-                            .show(ui, |ui| {
-                                self.render_file_controls(ui);
-                            });
+                        ui.add_space(12.0);
                     });
             });
     }
@@ -508,24 +435,6 @@ impl RustpixApp {
                 Stroke::new(1.0, colors.border),
             );
         });
-    }
-
-    fn render_file_controls(&mut self, ui: &mut egui::Ui) {
-        let colors = ThemeColors::from_ui(ui);
-        let can_load = !self.processing.is_loading && !self.processing.is_processing;
-
-        // Theme-aware secondary button
-        let btn = egui::Button::new(egui::RichText::new("Open File...").color(colors.text_primary))
-            .fill(colors.button_bg)
-            .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0))
-            .min_size(egui::vec2(ui.available_width(), 0.0));
-
-        if ui.add_enabled(can_load, btn).clicked() {
-            if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
-                self.load_file(path);
-            }
-        }
     }
 
     fn render_progress_status(&mut self, ui: &mut egui::Ui) {
@@ -900,5 +809,228 @@ impl RustpixApp {
                 });
             self.ui_state.show_spectrum_settings = show_spectrum_settings;
         }
+
+        if self.ui_state.show_export_dialog {
+            self.render_export_dialog(ctx);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_export_dialog(&mut self, ctx: &egui::Context) {
+        let mut open = self.ui_state.show_export_dialog;
+        let mut should_close = false;
+        egui::Window::new("Export HDF5")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let colors = ThemeColors::from_ui(ui);
+                let options = &mut self.ui_state.export_options;
+                let hits_available = self.hit_batch.as_ref().is_some_and(|b| !b.is_empty());
+                let neutrons_available = !self.neutrons.is_empty();
+                let hist_available = match self.ui_state.view_mode {
+                    ViewMode::Hits => self.hyperstack.is_some(),
+                    ViewMode::Neutrons => self.neutron_hyperstack.is_some(),
+                };
+
+                if !hits_available {
+                    options.include_hits = false;
+                }
+                if !neutrons_available {
+                    options.include_neutrons = false;
+                }
+                if !hist_available {
+                    options.include_histogram = false;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Select data to export")
+                            .size(11.0)
+                            .color(colors.text_primary),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let gear = Self::file_icon_image(FileToolbarIcon::Gear, colors.text_muted);
+                        if ui
+                            .add(egui::ImageButton::new(gear).frame(true))
+                            .on_hover_text("Advanced export options")
+                            .clicked()
+                        {
+                            options.advanced = !options.advanced;
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+
+                let hits_label = if self.statistics.hit_count > 0 {
+                    format!("Hits ({})", format_number(self.statistics.hit_count))
+                } else {
+                    "Hits".to_string()
+                };
+                ui.add_enabled(
+                    hits_available,
+                    egui::Checkbox::new(&mut options.include_hits, hits_label),
+                );
+
+                let neutrons_label = if self.statistics.neutron_count > 0 {
+                    format!(
+                        "Neutrons ({})",
+                        format_number(self.statistics.neutron_count)
+                    )
+                } else {
+                    "Neutrons".to_string()
+                };
+                ui.add_enabled(
+                    neutrons_available,
+                    egui::Checkbox::new(&mut options.include_neutrons, neutrons_label),
+                );
+
+                let hist_label = format!("Histogram ({})", self.ui_state.view_mode);
+                ui.add_enabled(
+                    hist_available,
+                    egui::Checkbox::new(&mut options.include_histogram, hist_label),
+                );
+
+                let mut mask_placeholder = false;
+                ui.add_enabled(
+                    false,
+                    egui::Checkbox::new(&mut mask_placeholder, "Pixel masks (coming soon)"),
+                );
+
+                let deflate_ok = hdf5::filters::deflate_available();
+                if !deflate_ok {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Deflate compression unavailable. Rebuild with HDF5 zlib support.",
+                        )
+                        .size(10.0)
+                        .color(accent::RED),
+                    );
+                }
+
+                if options.advanced {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    ui.label(
+                        egui::RichText::new("Compression")
+                            .size(11.0)
+                            .color(colors.text_primary),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Level");
+                        ui.add(egui::DragValue::new(&mut options.compression_level).range(0..=9));
+                        ui.checkbox(&mut options.shuffle, "Shuffle");
+                    });
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Chunking")
+                            .size(11.0)
+                            .color(colors.text_primary),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Event chunk");
+                        ui.add(
+                            egui::DragValue::new(&mut options.chunk_events)
+                                .range(1_000..=5_000_000),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut options.hist_chunk_override, "Histogram chunk override");
+                    });
+
+                    if options.hist_chunk_override {
+                        ui.horizontal(|ui| {
+                            ui.label("rot");
+                            ui.add(egui::DragValue::new(&mut options.hist_chunk_rot).range(1..=16));
+                            ui.label("y");
+                            ui.add(egui::DragValue::new(&mut options.hist_chunk_y).range(8..=512));
+                            ui.label("x");
+                            ui.add(egui::DragValue::new(&mut options.hist_chunk_x).range(8..=512));
+                            ui.label("tof");
+                            ui.add(
+                                egui::DragValue::new(&mut options.hist_chunk_tof).range(4..=512),
+                            );
+                        });
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Include fields")
+                            .size(11.0)
+                            .color(colors.text_primary),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut options.include_xy, "x/y");
+                        ui.checkbox(&mut options.include_tot, "tot");
+                        ui.checkbox(&mut options.include_chip_id, "chip id");
+                        ui.checkbox(&mut options.include_cluster_id, "cluster id");
+                        ui.checkbox(&mut options.include_n_hits, "n_hits");
+                    });
+                }
+
+                ui.add_space(10.0);
+                let any_selected =
+                    options.include_hits || options.include_neutrons || options.include_histogram;
+                let can_export = any_selected && deflate_ok;
+
+                if ui
+                    .add_enabled(can_export, egui::Button::new("Save HDF5..."))
+                    .clicked()
+                {
+                    if let Some(path) = FileDialog::new().set_file_name("rustpix.h5").save_file() {
+                        let now = ui.input(|i| i.time);
+                        let set_status = |ui_state: &mut crate::state::UiState,
+                                          message: String,
+                                          is_error: bool| {
+                            let expires_at = now + 2.5;
+                            if is_error {
+                                ui_state.roi_warning = Some((message, expires_at));
+                            } else {
+                                ui_state.roi_status = Some((message, expires_at));
+                            }
+                        };
+
+                        match self.export_hdf5_combined(&path) {
+                            Ok(()) => {
+                                set_status(
+                                    &mut self.ui_state,
+                                    "HDF5 export complete".to_string(),
+                                    false,
+                                );
+                                should_close = true;
+                            }
+                            Err(err) => {
+                                log::error!("Failed to export HDF5: {err}");
+                                set_status(
+                                    &mut self.ui_state,
+                                    "HDF5 export failed (see logs)".to_string(),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        if should_close {
+            open = false;
+        }
+        self.ui_state.show_export_dialog = open;
+    }
+
+    fn file_icon_image(icon: FileToolbarIcon, tint: Color32) -> egui::Image<'static> {
+        let source = match icon {
+            FileToolbarIcon::Open => egui::include_image!("../../assets/icons/file-open.svg"),
+            FileToolbarIcon::Export => egui::include_image!("../../assets/icons/file-save.svg"),
+            FileToolbarIcon::Gear => egui::include_image!("../../assets/icons/roi-gear.svg"),
+        };
+        egui::Image::new(source)
+            .tint(tint)
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
     }
 }

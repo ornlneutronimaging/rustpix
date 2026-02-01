@@ -331,6 +331,98 @@ fn create_entry(
     Ok(entry)
 }
 
+#[derive(Clone, Debug, Default)]
+struct EntryMeta {
+    flight_path_m: Option<f64>,
+    tof_offset_ns: Option<f64>,
+    energy_axis_kind: Option<String>,
+}
+
+fn merge_entry_meta(
+    hits: Option<&HitWriteOptions>,
+    neutrons: Option<&NeutronWriteOptions>,
+    histogram: Option<&HistogramWriteOptions>,
+) -> Result<EntryMeta> {
+    let mut meta = EntryMeta::default();
+
+    if let Some(opts) = hits {
+        merge_meta_from(
+            &mut meta,
+            opts.flight_path_m,
+            opts.tof_offset_ns,
+            opts.energy_axis_kind.as_deref(),
+        )?;
+    }
+    if let Some(opts) = neutrons {
+        merge_meta_from(
+            &mut meta,
+            opts.flight_path_m,
+            opts.tof_offset_ns,
+            opts.energy_axis_kind.as_deref(),
+        )?;
+    }
+    if let Some(opts) = histogram {
+        merge_meta_from(
+            &mut meta,
+            opts.flight_path_m,
+            opts.tof_offset_ns,
+            opts.energy_axis_kind.as_deref(),
+        )?;
+    }
+
+    Ok(meta)
+}
+
+fn merge_meta_from(
+    meta: &mut EntryMeta,
+    flight_path_m: Option<f64>,
+    tof_offset_ns: Option<f64>,
+    energy_axis_kind: Option<&str>,
+) -> Result<()> {
+    fn floats_differ(a: f64, b: f64) -> bool {
+        (a - b).abs() > f64::EPSILON
+    }
+
+    if let Some(value) = flight_path_m {
+        if meta
+            .flight_path_m
+            .is_some_and(|existing| floats_differ(existing, value))
+        {
+            return Err(Error::InvalidFormat(
+                "conflicting flight path metadata".to_string(),
+            ));
+        }
+        meta.flight_path_m = Some(value);
+    }
+
+    if let Some(value) = tof_offset_ns {
+        if meta
+            .tof_offset_ns
+            .is_some_and(|existing| floats_differ(existing, value))
+        {
+            return Err(Error::InvalidFormat(
+                "conflicting TOF offset metadata".to_string(),
+            ));
+        }
+        meta.tof_offset_ns = Some(value);
+    }
+
+    if let Some(value) = energy_axis_kind {
+        if meta
+            .energy_axis_kind
+            .as_deref()
+            .is_some_and(|existing| existing != value)
+        {
+            return Err(Error::InvalidFormat(
+                "conflicting energy axis metadata".to_string(),
+            ));
+        }
+        meta.energy_axis_kind = Some(value.to_string());
+    }
+
+    Ok(())
+}
+
 fn create_event_group(
     entry: &Group,
     name: &str,
@@ -439,6 +531,72 @@ where
     for batch in batches {
         writer.append_batch(&batch, options)?;
     }
+    Ok(())
+}
+
+/// Writes hits, neutrons, and/or histogram data into a single HDF5/NeXus file.
+///
+/// # Errors
+/// Returns an error if HDF5 I/O fails or metadata options conflict.
+pub fn write_combined_hdf5<P: AsRef<Path>>(
+    path: P,
+    hits: Option<(&EventBatch, &HitWriteOptions)>,
+    neutrons: Option<(&NeutronEventBatch, &NeutronWriteOptions)>,
+    histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
+) -> Result<()> {
+    if hits.is_none() && neutrons.is_none() && histogram.is_none() {
+        return Err(Error::InvalidFormat(
+            "no HDF5 payloads selected".to_string(),
+        ));
+    }
+    let meta = merge_entry_meta(
+        hits.map(|(_, opts)| opts),
+        neutrons.map(|(_, opts)| opts),
+        histogram.map(|(_, opts)| opts),
+    )?;
+
+    let file = File::create(path)?;
+    set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
+    let entry = create_entry(
+        &file,
+        meta.flight_path_m,
+        meta.tof_offset_ns,
+        meta.energy_axis_kind.as_deref(),
+    )?;
+
+    if let Some((batch, options)) = hits {
+        let hits_group = create_event_group(
+            &entry,
+            "hits",
+            options.x_size,
+            options.y_size,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+        let mut writer = HitEventWriter::new(&hits_group, options)?;
+        writer.append_batch(batch, options)?;
+    }
+
+    if let Some((batch, options)) = neutrons {
+        let neutrons_group = create_event_group(
+            &entry,
+            "neutrons",
+            options.x_size,
+            options.y_size,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+        let mut writer = NeutronEventWriter::new(&neutrons_group, options)?;
+        writer.append_batch(batch, options)?;
+    }
+
+    if let Some((data, options)) = histogram {
+        let histogram_group = create_histogram_group(&entry, options)?;
+        write_histogram_datasets(&histogram_group, data, options)?;
+    }
+
     Ok(())
 }
 

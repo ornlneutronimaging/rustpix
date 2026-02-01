@@ -25,8 +25,8 @@ use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState}
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::hdf5::{
-    write_histogram_hdf5, write_hits_hdf5, write_neutrons_hdf5, HistogramShape, HistogramWriteData,
-    HistogramWriteOptions, HitWriteOptions, NeutronEventBatch, NeutronWriteOptions,
+    write_combined_hdf5, HistogramShape, HistogramWriteData, HistogramWriteOptions,
+    HitWriteOptions, NeutronEventBatch, NeutronWriteOptions,
 };
 use rustpix_io::EventBatch;
 
@@ -334,85 +334,126 @@ impl RustpixApp {
         }
     }
 
-    pub(crate) fn export_hits_hdf5(&self, path: &Path) -> Result<()> {
-        let batch = self
-            .hit_batch
-            .as_ref()
-            .ok_or_else(|| anyhow!("No hits loaded"))?;
-        if batch.is_empty() {
-            return Err(anyhow!("No hits to export"));
-        }
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn export_hdf5_combined(&self, path: &Path) -> Result<()> {
         ensure_deflate_available()?;
-        let (x_size, y_size) = self
-            .hit_dimensions()
-            .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
-        let options = HitWriteOptions {
-            x_size,
-            y_size,
-            chunk_events: 100_000,
-            compression: Some(1),
-            shuffle: true,
-            flight_path_m: optional_positive(self.flight_path_m),
-            tof_offset_ns: optional_nonzero(self.tof_offset_ns),
-            energy_axis_kind: Some("tof".to_string()),
-            include_xy: true,
-            include_tot: true,
-            include_chip_id: true,
-            include_cluster_id: true,
-        };
-        let build_batch = || EventBatch {
-            tdc_timestamp_25ns: 0,
-            hits: batch.clone(),
-        };
-        if let Err(err) = write_hits_hdf5(path, std::iter::once(build_batch()), &options) {
-            remove_partial_file(path);
-            return Err(anyhow!("HDF5 export failed: {err}"));
+        let options = &self.ui_state.export_options;
+
+        let mut hit_batch: Option<EventBatch> = None;
+        let mut hit_options: Option<HitWriteOptions> = None;
+        if options.include_hits {
+            let batch = self
+                .hit_batch
+                .as_ref()
+                .ok_or_else(|| anyhow!("No hits loaded"))?;
+            if batch.is_empty() {
+                return Err(anyhow!("No hits to export"));
+            }
+            let (x_size, y_size) = self
+                .hit_dimensions()
+                .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
+            let compression_level = options.compression_level.min(9);
+            hit_options = Some(HitWriteOptions {
+                x_size,
+                y_size,
+                chunk_events: options.chunk_events.max(1),
+                compression: Some(compression_level),
+                shuffle: options.shuffle,
+                flight_path_m: optional_positive(self.flight_path_m),
+                tof_offset_ns: optional_nonzero(self.tof_offset_ns),
+                energy_axis_kind: Some("tof".to_string()),
+                include_xy: options.include_xy,
+                include_tot: options.include_tot,
+                include_chip_id: options.include_chip_id,
+                include_cluster_id: options.include_cluster_id,
+            });
+            hit_batch = Some(EventBatch {
+                tdc_timestamp_25ns: 0,
+                hits: batch.clone(),
+            });
         }
+
+        let mut neutron_batch: Option<NeutronEventBatch> = None;
+        let mut neutron_options: Option<NeutronWriteOptions> = None;
+        if options.include_neutrons {
+            if self.neutrons.is_empty() {
+                return Err(anyhow!("No neutrons available"));
+            }
+            let neutrons = self.scaled_neutrons_for_export()?;
+            let (x_size, y_size) = self
+                .neutron_dimensions(&neutrons)
+                .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
+            let compression_level = options.compression_level.min(9);
+            neutron_options = Some(NeutronWriteOptions {
+                x_size,
+                y_size,
+                chunk_events: options.chunk_events.max(1),
+                compression: Some(compression_level),
+                shuffle: options.shuffle,
+                flight_path_m: optional_positive(self.flight_path_m),
+                tof_offset_ns: optional_nonzero(self.tof_offset_ns),
+                energy_axis_kind: Some("tof".to_string()),
+                include_xy: options.include_xy,
+                include_tot: options.include_tot,
+                include_chip_id: options.include_chip_id,
+                include_n_hits: options.include_n_hits,
+            });
+            neutron_batch = Some(NeutronEventBatch {
+                tdc_timestamp_25ns: 0,
+                neutrons,
+            });
+        }
+
+        let mut histogram_data: Option<HistogramWriteData> = None;
+        let mut histogram_options: Option<HistogramWriteOptions> = None;
+        if options.include_histogram {
+            let hyperstack = match self.ui_state.view_mode {
+                ViewMode::Hits => self.hyperstack.as_ref(),
+                ViewMode::Neutrons => self.neutron_hyperstack.as_ref(),
+            }
+            .ok_or_else(|| anyhow!("No histogram data available"))?;
+            let width = hyperstack.width();
+            let height = hyperstack.height();
+            let n_bins = hyperstack.n_tof_bins();
+            histogram_data = Some(Self::build_histogram_write_data(hyperstack));
+            let compression_level = options.compression_level.min(9);
+            let mut histogram_opts = HistogramWriteOptions {
+                compression: Some(compression_level),
+                shuffle: options.shuffle,
+                flight_path_m: optional_positive(self.flight_path_m),
+                tof_offset_ns: optional_nonzero(self.tof_offset_ns),
+                ..Default::default()
+            };
+            if options.hist_chunk_override {
+                histogram_opts.chunk_counts = Some([
+                    options.hist_chunk_rot.clamp(1, 1),
+                    options.hist_chunk_y.clamp(1, height),
+                    options.hist_chunk_x.clamp(1, width),
+                    options.hist_chunk_tof.clamp(1, n_bins),
+                ]);
+            }
+            histogram_options = Some(histogram_opts);
+        }
+
+        if hit_batch.is_none() && neutron_batch.is_none() && histogram_data.is_none() {
+            return Err(anyhow!("No data selected for export"));
+        }
+
+        write_combined_hdf5(
+            path,
+            hit_batch.as_ref().zip(hit_options.as_ref()),
+            neutron_batch.as_ref().zip(neutron_options.as_ref()),
+            histogram_data.as_ref().zip(histogram_options.as_ref()),
+        )
+        .map_err(|err| {
+            remove_partial_file(path);
+            anyhow!("HDF5 export failed: {err}")
+        })?;
+
         Ok(())
     }
 
-    pub(crate) fn export_neutrons_hdf5(&self, path: &Path) -> Result<()> {
-        if self.neutrons.is_empty() {
-            return Err(anyhow!("No neutrons available"));
-        }
-        ensure_deflate_available()?;
-        let neutrons = self.scaled_neutrons_for_export()?;
-        let (x_size, y_size) = self
-            .neutron_dimensions(&neutrons)
-            .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
-        let options = NeutronWriteOptions {
-            x_size,
-            y_size,
-            chunk_events: 100_000,
-            compression: Some(1),
-            shuffle: true,
-            flight_path_m: optional_positive(self.flight_path_m),
-            tof_offset_ns: optional_nonzero(self.tof_offset_ns),
-            energy_axis_kind: Some("tof".to_string()),
-            include_xy: true,
-            include_tot: true,
-            include_chip_id: true,
-            include_n_hits: true,
-        };
-        let build_batch = || NeutronEventBatch {
-            tdc_timestamp_25ns: 0,
-            neutrons: neutrons.clone(),
-        };
-        if let Err(err) = write_neutrons_hdf5(path, std::iter::once(build_batch()), &options) {
-            remove_partial_file(path);
-            return Err(anyhow!("HDF5 export failed: {err}"));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn export_histogram_hdf5(&self, path: &Path, view: ViewMode) -> Result<()> {
-        let hyperstack = match view {
-            ViewMode::Hits => self.hyperstack.as_ref(),
-            ViewMode::Neutrons => self.neutron_hyperstack.as_ref(),
-        }
-        .ok_or_else(|| anyhow!("No histogram data available"))?;
-        ensure_deflate_available()?;
-
+    fn build_histogram_write_data(hyperstack: &Hyperstack3D) -> HistogramWriteData {
         let width = hyperstack.width();
         let height = hyperstack.height();
         let n_bins = hyperstack.n_tof_bins();
@@ -435,7 +476,7 @@ impl RustpixApp {
         let time_of_flight_ns = (0..n_bins)
             .map(|i| usize_to_f64(i) * bin_width_ns)
             .collect();
-        let data = HistogramWriteData {
+        HistogramWriteData {
             counts,
             shape: HistogramShape {
                 rot_angle: 1,
@@ -447,17 +488,7 @@ impl RustpixApp {
             y: y_axis,
             x: x_axis,
             time_of_flight_ns,
-        };
-        let options = HistogramWriteOptions {
-            flight_path_m: optional_positive(self.flight_path_m),
-            tof_offset_ns: optional_nonzero(self.tof_offset_ns),
-            ..Default::default()
-        };
-        if let Err(err) = write_histogram_hdf5(path, &data, &options) {
-            remove_partial_file(path);
-            return Err(anyhow!("HDF5 export failed: {err}"));
         }
-        Ok(())
     }
 
     fn hit_dimensions(&self) -> Option<(u32, u32)> {

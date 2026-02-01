@@ -124,4 +124,54 @@ pub struct UiState {
     pub roi_rename_id: Option<usize>,
     /// Editable name buffer for ROI renaming.
     pub roi_rename_text: String,
+    /// Whether the HDF5 export dialog is open.
+    pub show_export_dialog: bool,
+    /// HDF5 export configuration.
+    pub export_options: Hdf5ExportOptions,
+}
+
+#[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Hdf5ExportOptions {
+    pub include_hits: bool,
+    pub include_neutrons: bool,
+    pub include_histogram: bool,
+    pub advanced: bool,
+    pub compression_level: u8,
+    pub shuffle: bool,
+    pub chunk_events: usize,
+    pub include_xy: bool,
+    pub include_tot: bool,
+    pub include_chip_id: bool,
+    pub include_cluster_id: bool,
+    pub include_n_hits: bool,
+    pub hist_chunk_override: bool,
+    pub hist_chunk_rot: usize,
+    pub hist_chunk_y: usize,
+    pub hist_chunk_x: usize,
+    pub hist_chunk_tof: usize,
+}
+
+impl Default for Hdf5ExportOptions {
+    fn default() -> Self {
+        Self {
+            include_hits: true,
+            include_neutrons: true,
+            include_histogram: true,
+            advanced: false,
+            compression_level: 1,
+            shuffle: true,
+            chunk_events: 100_000,
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_cluster_id: true,
+            include_n_hits: true,
+            hist_chunk_override: false,
+            hist_chunk_rot: 1,
+            hist_chunk_y: 128,
+            hist_chunk_x: 128,
+            hist_chunk_tof: 64,
+        }
+    }
 }
