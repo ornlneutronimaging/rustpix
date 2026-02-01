@@ -6,6 +6,7 @@
 |------------|---------|--------------------------------------------------------------|
 | 2025-01-30 | v1.0    | Initial design document based on beamline scientist workflow |
 | 2026-01-31 | v1.1    | Refactor progress update (TOF ms axis, settings dialogs, grid toggle, scrollable sidebar, spectrum export) |
+| 2026-02-01 | v1.2    | Phase 4 closed (HDF5 export + pixel masks + async export); Phase 5+ roadmap added |
 
 ---
 
@@ -25,7 +26,7 @@ based on real-world usage scenarios from beamline scientists and detector expert
 
 ---
 
-## Implementation Status (as of 2026-01-31)
+## Implementation Status (as of 2026-02-01)
 
 **Implemented (GUI refactor branch):**
 - TOF axis uses **milliseconds** by default (consistent with 1/60 Hz = 16.67 ms)
@@ -37,11 +38,24 @@ based on real-world usage scenarios from beamline scientists and detector expert
 - Viewer grid toggle button next to Reset View (default OFF)
 - TOF slicer row spans full width (visual alignment with mock)
 
-**In Progress / Next (Phase 3):**
-- ROI spectrum integration (multi-curve, data selection panel, legend, CSV metadata export)
-- HDF5 export pipeline (Hits/Neutrons, metadata, masks)
-- Dead/Hot pixel mask workflow and visualization
-- Full streaming pipeline + cancel flows
+**Completed (Phase 4 - 2026-02-01, closed):**
+- HDF5 export pipeline (single file, hits/neutrons/histogram, metadata)
+- Pixel mask workflow (dead/hot detection, overlay, export to HDF5)
+- Export dialog with data selection + advanced options
+- Async HDF5 export with progress indication (UI remains responsive)
+
+**Planned (Phase 5+ roadmap):**
+- Phase 5 (Telemetry + Diagnostics)
+  - Memory utilization indicator in status bar (per-process), hover breakdown by major buffers
+  - Export validation utilities (basic file integrity + compression sanity checks)
+  - Pixel mask controls: exclude from stats + recompute action
+- Phase 6 (Advanced Configuration)
+  - Clustering/extraction advanced settings (missing fields + reset defaults)
+  - Detector configuration profiles (presets + per-file overrides)
+  - Export options dialog expansion (compression level, chunk sizing, include fields)
+- Phase 7 (Streaming + Resilience)
+  - Full streaming pipeline + cancel flows for end-to-end large files
+  - Progressive loading indicators + background task management
 
 **Implemented (Phase 2 ROI foundation):**
 - Multi-ROI drawing (rectangle + polygon) with shift-to-draw and edit mode
@@ -50,6 +64,13 @@ based on real-world usage scenarios from beamline scientists and detector expert
 - Concave polygon fill via triangulation (consistent filled overlay)
 - ROI persistence across Hits ↔ Neutrons view switches
 - ROI tool group icons (SVG) and settings (debounce toggle)
+
+**Implemented (Phase 3 ROI spectrum integration):**
+- Data Selection panel (show/hide Full FOV + ROIs, quick actions, rename)
+- Multi-curve spectrum display with ROI-matched colors
+- Separate legend panel
+- CSV export for visible spectra with ROI metadata + energy column
+- Spectrum range panel, zoom tools, and PNG export parity with viewer
 
 ---
 
@@ -109,12 +130,14 @@ After loading, the user enters **Hits Analysis Mode** with these tools:
     - Requires user input: flight path (m), TOF offset (ns)
     - Per-file setting, saved to HDF5 metadata per NeXus format
   - **Plot style:** Line plot (default)
-  - **Toolbar:** Log X, Log Y toggles
-  - **Export:** Save PNG, Export CSV
-  - **Reset:** Rescale axes to visible data range
+- **Toolbar:** Log X, Log Y toggles
+- **Export:** Save PNG, Export CSV
+- **Reset:** Rescale axes to visible data range
 - **ROI Integration:**
   - Each ROI in histogram view adds a curve to spectrum
-  - Legend with toggleable visibility per ROI
+  - Data Selection panel: show/hide + rename ROIs
+  - Legend panel (separate from toolbar)
+  - CSV/PNG export matches visible curves
 
 #### 1.3 ROI Tools
 
