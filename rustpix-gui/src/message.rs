@@ -19,11 +19,18 @@ pub enum AppMessage {
     /// File loading completed successfully.
     ///
     /// Contains:
-    /// - `HitBatch`: Parsed detector hits
+    /// - `usize`: Total hits processed
+    /// - `Option<HitBatch>`: Parsed detector hits (optional, may be skipped in streaming mode)
     /// - `Hyperstack3D`: 3D histogram data (TOF × Y × X)
     /// - `Duration`: Time taken to load
     /// - `String`: Debug information
-    LoadComplete(Box<HitBatch>, Box<Hyperstack3D>, Duration, String),
+    LoadComplete(
+        usize,
+        Option<Box<HitBatch>>,
+        Box<Hyperstack3D>,
+        Duration,
+        String,
+    ),
 
     /// File loading failed.
     LoadError(String),

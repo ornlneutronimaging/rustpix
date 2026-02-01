@@ -1206,7 +1206,8 @@ impl RustpixApp {
         // Run Clustering button
         let can_cluster = !self.processing.is_loading
             && !self.processing.is_processing
-            && self.hit_batch.is_some();
+            && self.selected_file.is_some()
+            && self.statistics.hit_count > 0;
 
         if ui
             .add_enabled(
@@ -1347,6 +1348,7 @@ impl RustpixApp {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
+                    let colors = ThemeColors::from_ui(ui);
                     ui.label("Adjust TOF binning for hits and neutrons.");
                     ui.add_space(8.0);
 
@@ -1359,6 +1361,16 @@ impl RustpixApp {
                                     egui::DragValue::new(&mut self.hit_tof_bins).range(10..=2000),
                                 );
                             });
+                            ui.add_space(4.0);
+                            ui.checkbox(
+                                &mut self.ui_state.cache_hits_in_memory,
+                                "Cache hits in memory",
+                            );
+                            ui.label(
+                                egui::RichText::new("Applies on next file load.")
+                                    .size(10.0)
+                                    .color(colors.text_dim),
+                            );
 
                             let can_rebuild = self.hit_batch.is_some();
                             if ui

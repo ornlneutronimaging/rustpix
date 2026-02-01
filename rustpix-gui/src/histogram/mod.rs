@@ -85,27 +85,7 @@ impl Hyperstack3D {
         height: usize,
     ) -> Self {
         let mut hyperstack = Self::new(n_tof_bins, width, height, tof_max);
-
-        for i in 0..batch.len() {
-            let x = usize::from(batch.x[i]);
-            let y = usize::from(batch.y[i]);
-            let tof = batch.tof[i];
-
-            // Calculate TOF bin
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let tof_bin = if hyperstack.bin_width > 0.0 {
-                let bin = (f64::from(tof) / hyperstack.bin_width) as usize;
-                bin.min(n_tof_bins.saturating_sub(1))
-            } else {
-                0
-            };
-
-            // Bounds check and increment
-            if x < width && y < height && tof_bin < n_tof_bins {
-                let idx = tof_bin * height * width + y * width + x;
-                hyperstack.data[idx] += 1;
-            }
-        }
+        hyperstack.accumulate_hits(batch);
 
         hyperstack
     }
@@ -189,6 +169,37 @@ impl Hyperstack3D {
         if tof_bin < self.n_tof_bins && y < self.height && x < self.width {
             let idx = tof_bin * self.height * self.width + y * self.width + x;
             self.data[idx] += 1;
+        }
+    }
+
+    /// Accumulate a batch of hits into the hyperstack.
+    pub fn accumulate_hits(&mut self, batch: &HitBatch) {
+        if self.n_tof_bins == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        let width = self.width;
+        let height = self.height;
+        let n_bins = self.n_tof_bins;
+        let bin_width = self.bin_width;
+
+        for i in 0..batch.len() {
+            let x = usize::from(batch.x[i]);
+            let y = usize::from(batch.y[i]);
+            let tof = batch.tof[i];
+
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let tof_bin = if bin_width > 0.0 {
+                let bin = (f64::from(tof) / bin_width) as usize;
+                bin.min(n_bins.saturating_sub(1))
+            } else {
+                0
+            };
+
+            if x < width && y < height && tof_bin < n_bins {
+                let idx = tof_bin * height * width + y * width + x;
+                self.data[idx] += 1;
+            }
         }
     }
 

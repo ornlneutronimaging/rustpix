@@ -134,6 +134,8 @@ pub struct UiState {
     pub show_hot_pixels: bool,
     /// Whether to exclude masked pixels from spectra/statistics.
     pub exclude_masked_pixels: bool,
+    /// Whether to cache raw hits in memory (enables rebuild/export).
+    pub cache_hits_in_memory: bool,
     /// Whether an HDF5 export is in progress.
     pub export_in_progress: bool,
     /// Export progress value from 0.0 to 1.0.

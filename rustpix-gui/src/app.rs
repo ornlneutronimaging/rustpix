@@ -256,6 +256,7 @@ impl Default for RustpixApp {
             full_fov_visible: true,
             show_hot_pixels: true,
             exclude_masked_pixels: true,
+            cache_hits_in_memory: true,
             ..Default::default()
         };
         Self {
@@ -318,8 +319,17 @@ impl RustpixApp {
         let tx = self.tx.clone();
         let detector_config = self.current_detector_config();
         let hit_tof_bins = self.hit_tof_bins;
+        let cache_hits = self.ui_state.cache_hits_in_memory;
+        let cancel_flag = self.processing.cancel_flag_clone();
         thread::spawn(move || {
-            load_file_worker(path.as_path(), &tx, detector_config, hit_tof_bins);
+            load_file_worker(
+                path.as_path(),
+                &tx,
+                detector_config,
+                hit_tof_bins,
+                cache_hits,
+                &cancel_flag,
+            );
         });
     }
 
@@ -407,7 +417,11 @@ impl RustpixApp {
                 super_resolution_factor: self.super_resolution_factor,
                 weighted_by_tot: self.weighted_by_tot,
                 min_tot_threshold: self.min_tot_threshold,
-                total_hits: self.hit_batch.as_ref().map_or(0, |batch| batch.len()),
+                total_hits: self
+                    .hit_batch
+                    .as_ref()
+                    .map_or(self.statistics.hit_count, |batch| batch.len()),
+                cancel_flag: self.processing.cancel_flag_clone(),
             };
 
             thread::spawn(move || run_clustering_worker(&path, &tx, algo_type, &config));
@@ -1110,17 +1124,28 @@ impl RustpixApp {
     pub fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                AppMessage::LoadProgress(p, s) | AppMessage::ProcessingProgress(p, s) => {
-                    self.processing.progress = p;
-                    self.processing.status_text = s;
+                AppMessage::LoadProgress(p, s) => {
+                    if self.processing.is_loading {
+                        self.processing.progress = p;
+                        self.processing.status_text = s;
+                    }
                 }
-                AppMessage::LoadComplete(batch, hyperstack, dur, _dbg) => {
+                AppMessage::ProcessingProgress(p, s) => {
+                    if self.processing.is_processing {
+                        self.processing.progress = p;
+                        self.processing.status_text = s;
+                    }
+                }
+                AppMessage::LoadComplete(hit_count, batch, hyperstack, dur, _dbg) => {
+                    if !self.processing.is_loading {
+                        continue;
+                    }
                     self.processing.is_loading = false;
                     self.processing.progress = 1.0;
                     self.processing.status_text = "Ready".to_string();
 
                     // Update statistics
-                    self.statistics.hit_count = batch.len();
+                    self.statistics.hit_count = hit_count;
                     self.statistics.load_duration = Some(dur);
                     self.statistics.tof_max = hyperstack.tof_max();
 
@@ -1128,7 +1153,7 @@ impl RustpixApp {
                     self.hit_counts = Some(hyperstack.project_xy());
                     self.tof_spectrum = Some(hyperstack.full_spectrum());
                     self.hyperstack = Some(Arc::new(*hyperstack));
-                    self.hit_batch = Some(Arc::new(*batch));
+                    self.hit_batch = batch.map(|batch| Arc::new(*batch));
                     self.update_pixel_masks();
                     self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
 
@@ -1144,6 +1169,9 @@ impl RustpixApp {
                     self.processing.status_text = format!("Error: {e}");
                 }
                 AppMessage::ProcessingComplete(neutrons, dur) => {
+                    if !self.processing.is_processing {
+                        continue;
+                    }
                     self.processing.is_processing = false;
                     self.processing.progress = 1.0;
                     self.processing.status_text = "Ready".to_string();

@@ -42,6 +42,8 @@ pub struct ClusteringWorkerConfig {
     pub min_tot_threshold: u16,
     /// Total hits for progress calculation.
     pub total_hits: usize,
+    /// Cancellation flag shared with the UI.
+    pub cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Run clustering in a background thread.
@@ -55,6 +57,11 @@ pub fn run_clustering_worker(
     config: &ClusteringWorkerConfig,
 ) {
     let start = Instant::now();
+    let cancel_flag = &config.cancel_flag;
+
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
 
     let det_config = config.detector_config.clone();
 
@@ -105,6 +112,9 @@ pub fn run_clustering_worker(
     let total_hits = config.total_hits;
 
     for mut batch in stream {
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         processed_hits = processed_hits.saturating_add(batch.len());
         let res = cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params);
 
@@ -126,5 +136,8 @@ pub fn run_clustering_worker(
         }
     }
 
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let _ = tx.send(AppMessage::ProcessingComplete(neutrons, start.elapsed()));
 }

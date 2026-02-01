@@ -7,7 +7,7 @@ use std::collections::BinaryHeap;
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::mpsc::{sync_channel, Sender};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustpix_core::soa::HitBatch;
 use rustpix_io::scanner::PacketScanner;
@@ -33,8 +33,13 @@ pub fn load_file_worker(
     tx: &Sender<AppMessage>,
     detector_config: DetectorConfig,
     n_tof_bins: usize,
+    cache_hits: bool,
+    cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let start = Instant::now();
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
@@ -60,7 +65,10 @@ pub fn load_file_worker(
         "Scanning sections...".to_string(),
     ));
 
-    let io_sections = scan_sections_with_progress(&mmap, tx);
+    let io_sections = scan_sections_with_progress(&mmap, tx, cancel_flag.as_ref());
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let total_sections = io_sections.len();
     let _ = tx.send(AppMessage::LoadProgress(
         0.15,
@@ -78,24 +86,28 @@ pub fn load_file_worker(
         "Processing hits...".to_string(),
     ));
 
-    let full_batch = process_sections_to_batch(&mmap, &tpx_sections, &det_config, tx);
-
-    let _ = tx.send(AppMessage::LoadProgress(
-        0.95,
-        "Building hyperstack...".to_string(),
-    ));
-
-    // Build 3D hyperstack
-    let hyperstack = Hyperstack3D::from_hits(
-        &full_batch,
+    let mut hyperstack = Hyperstack3D::new(
         n_tof_bins.max(1),
-        tdc_correction,
         DETECTOR_WIDTH,
         DETECTOR_HEIGHT,
+        tdc_correction,
     );
+    let (full_batch, hit_count) = process_sections_to_batch(
+        &mmap,
+        &tpx_sections,
+        &det_config,
+        tx,
+        cancel_flag.as_ref(),
+        &mut hyperstack,
+        cache_hits,
+    );
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
 
     let _ = tx.send(AppMessage::LoadComplete(
-        Box::new(full_batch),
+        hit_count,
+        full_batch.map(Box::new),
         Box::new(hyperstack),
         start.elapsed(),
         debug_str,
@@ -109,6 +121,7 @@ pub fn load_file_worker(
 fn scan_sections_with_progress(
     mmap: &memmap2::Mmap,
     tx: &Sender<AppMessage>,
+    cancel_flag: &std::sync::atomic::AtomicBool,
 ) -> Vec<rustpix_io::scanner::Section> {
     let mut io_sections = Vec::new();
     let mut offset = 0;
@@ -116,6 +129,9 @@ fn scan_sections_with_progress(
     let total_bytes = mmap.len().max(1);
 
     while offset < total_bytes {
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         let end = (offset + chunk_size).min(total_bytes);
         let is_eof = end == total_bytes;
         let data = &mmap[offset..end];
@@ -221,14 +237,18 @@ fn build_debug_info(mmap: &memmap2::Mmap, sections: &[Tpx3Section], tdc_correcti
 ///
 /// Uses parallel processing per chip with synchronized merging
 /// to produce a globally time-ordered `HitBatch`.
+#[allow(clippy::too_many_lines)]
 fn process_sections_to_batch(
     mmap: &memmap2::Mmap,
     sections: &[Tpx3Section],
     det_config: &DetectorConfig,
     tx: &Sender<AppMessage>,
-) -> HitBatch {
+    cancel_flag: &std::sync::atomic::AtomicBool,
+    hyperstack: &mut Hyperstack3D,
+    cache_hits: bool,
+) -> (Option<HitBatch>, usize) {
     let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
-    let mut full_batch = HitBatch::with_capacity(num_packets);
+    let mut full_batch = cache_hits.then(|| HitBatch::with_capacity(num_packets));
     let tdc_correction = det_config.tdc_correction_25ns();
 
     let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0) as usize;
@@ -238,6 +258,8 @@ fn process_sections_to_batch(
     }
 
     let total_hits = num_packets.max(1);
+    let mut processed_hits = 0usize;
+    let mut last_update = Instant::now();
     let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
         Vec::with_capacity(max_chip + 1);
     receivers.resize_with(max_chip + 1, || None);
@@ -258,12 +280,14 @@ fn process_sections_to_batch(
                 .get(chip_id)
                 .cloned()
                 .unwrap_or_else(ChipTransform::identity);
-
             scope.spawn(move || {
                 let transform_closure = move |_cid, x, y| transform.apply(x, y);
                 let mut reader =
                     PulseReader::new(mmap, &chip_sections, tdc_correction, transform_closure);
                 while let Some(batch) = reader.next_pulse() {
+                    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
                     if tx_batch.send(batch).is_err() {
                         break;
                     }
@@ -272,12 +296,25 @@ fn process_sections_to_batch(
         }
 
         for rx_opt in receivers.iter().flatten() {
-            if let Ok(batch) = rx_opt.recv() {
-                heap.push(batch);
+            loop {
+                if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                match rx_opt.recv_timeout(Duration::from_millis(50)) {
+                    Ok(batch) => {
+                        heap.push(batch);
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
         }
 
         while let Some(head) = heap.peek() {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             let min_tdc = head.extended_tdc();
             let mut merged = HitBatch::default();
 
@@ -291,8 +328,18 @@ fn process_sections_to_batch(
                     .get(batch.chip_id as usize)
                     .and_then(|opt| opt.as_ref())
                 {
-                    if let Ok(next) = rx.recv() {
-                        heap.push(next);
+                    loop {
+                        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        match rx.recv_timeout(Duration::from_millis(50)) {
+                            Ok(next) => {
+                                heap.push(next);
+                                break;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
                     }
                 }
 
@@ -302,17 +349,26 @@ fn process_sections_to_batch(
             if merged.is_empty() {
                 continue;
             }
-            merged.sort_by_tof();
-            full_batch.append(&merged);
+            if cache_hits {
+                merged.sort_by_tof();
+                if let Some(full_batch) = full_batch.as_mut() {
+                    full_batch.append(&merged);
+                }
+            }
+            processed_hits = processed_hits.saturating_add(merged.len());
+            hyperstack.accumulate_hits(&merged);
 
-            let progress =
-                0.25 + 0.75 * (usize_to_f32(full_batch.len()) / usize_to_f32(total_hits));
-            let _ = tx.send(AppMessage::LoadProgress(
-                progress,
-                format!("Processed {}/{} hits...", full_batch.len(), num_packets),
-            ));
+            if last_update.elapsed() > Duration::from_millis(200) {
+                let progress =
+                    0.25 + 0.75 * (usize_to_f32(processed_hits) / usize_to_f32(total_hits));
+                let _ = tx.send(AppMessage::LoadProgress(
+                    progress.min(0.99),
+                    format!("Processed {processed_hits}/{num_packets} hits..."),
+                ));
+                last_update = Instant::now();
+            }
         }
     });
 
-    full_batch
+    (full_batch, processed_hits)
 }
