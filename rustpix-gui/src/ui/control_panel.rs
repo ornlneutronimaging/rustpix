@@ -1,6 +1,6 @@
 //! Control panel (left sidebar) and top/bottom bars rendering.
 
-use eframe::egui::{self, Color32, Rounding, Stroke};
+use eframe::egui::{self, Color32, FontFamily, FontId, Rounding, Stroke};
 use rfd::FileDialog;
 
 use super::theme::{accent, form_label, primary_button, ThemeColors};
@@ -19,6 +19,7 @@ enum FileToolbarIcon {
 
 impl RustpixApp {
     /// Render the top panel with RUSTPIX branding, file info, and view mode toggle.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_top_panel(&mut self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
@@ -111,13 +112,47 @@ impl RustpixApp {
                         } else {
                             ("No file loaded".to_string(), colors.text_primary, true)
                         };
-                    let mut status_rich = egui::RichText::new(status_text)
-                        .size(13.0)
-                        .color(status_color);
-                    if status_bold {
-                        status_rich = status_rich.strong();
+
+                    let right_reserve = 220.0;
+                    let status_width = (ui.available_width() - right_reserve).max(120.0);
+                    let status_height = ui.spacing().interact_size.y.max(24.0);
+                    let (status_rect, status_response) = ui.allocate_exact_size(
+                        egui::vec2(status_width, status_height),
+                        egui::Sense::hover(),
+                    );
+                    let status_font = if status_bold {
+                        FontId::new(13.0, FontFamily::Monospace)
+                    } else {
+                        FontId::new(12.0, FontFamily::Monospace)
+                    };
+                    let galley = ui.fonts(|fonts| {
+                        fonts.layout_no_wrap(status_text.clone(), status_font, status_color)
+                    });
+                    let text_width = galley.size().x;
+                    let text_y = status_rect.center().y - galley.size().y / 2.0;
+                    let painter = ui.painter().with_clip_rect(status_rect);
+
+                    if text_width <= status_rect.width() || !status_response.hovered() {
+                        let x = status_rect.left();
+                        painter.galley(egui::pos2(x, text_y), galley.clone(), status_color);
+                    } else {
+                        let speed = 30.0;
+                        let gap = 24.0;
+                        let scroll_len = text_width + gap;
+                        let t = ui.input(|i| i.time);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let offset = ((t as f32) * speed) % scroll_len;
+                        let x1 = status_rect.left() - offset;
+                        painter.galley(egui::pos2(x1, text_y), galley.clone(), status_color);
+                        painter.galley(
+                            egui::pos2(x1 + scroll_len, text_y),
+                            galley.clone(),
+                            status_color,
+                        );
+                        ui.ctx().request_repaint();
                     }
-                    ui.label(status_rich);
+
+                    status_response.on_hover_text(status_text.clone());
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
