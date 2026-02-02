@@ -55,8 +55,8 @@ based on real-world usage scenarios from beamline scientists and detector expert
   - Detector configuration profiles (presets + per-file overrides) **(Completed - 2026-02-01)**
   - Export options dialog expansion (compression level, chunk sizing, include fields)
 - Phase 7 (Streaming + Resilience)
-  - Full streaming pipeline + cancel flows for end-to-end large files
-  - Progressive loading indicators + background task management
+  - Full streaming pipeline + cancel flows for end-to-end large files **(Completed - 2026-02-02)**
+  - Progressive loading indicators + background task management **(Completed - 2026-02-02)**
 
 **Implemented (Phase 2 ROI foundation):**
 - Multi-ROI drawing (rectangle + polygon) with shift-to-draw and edit mode
