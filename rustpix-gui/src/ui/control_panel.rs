@@ -114,7 +114,7 @@ impl RustpixApp {
                             ("No file loaded".to_string(), colors.text_primary, true)
                         };
 
-                    let right_reserve = 220.0;
+                    let right_reserve = 330.0;
                     let status_width = (ui.available_width() - right_reserve).max(120.0);
                     let status_height = ui.spacing().interact_size.y.max(24.0);
                     let (status_rect, status_response) = ui.allocate_exact_size(
@@ -166,6 +166,7 @@ impl RustpixApp {
 
                         // HITS/NEUTRONS toggle buttons
                         self.render_view_mode_toggle(ui);
+                        self.render_cache_toggle(ui);
                     });
                 });
             });
@@ -439,6 +440,70 @@ impl RustpixApp {
                                 .color(colors.text_muted),
                         );
                     });
+                });
+            });
+    }
+
+    /// Render cache vs streaming toggle in the top bar.
+    fn render_cache_toggle(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let cache_on = self.ui_state.cache_hits_in_memory;
+        let on_tint = if cache_on {
+            Color32::WHITE
+        } else {
+            colors.text_muted
+        };
+        let off_tint = if cache_on {
+            colors.text_muted
+        } else {
+            Color32::WHITE
+        };
+
+        let on_icon = Self::cache_icon_image(CacheModeIcon::Memory, on_tint)
+            .fit_to_exact_size(egui::vec2(14.0, 14.0));
+        let off_icon = Self::cache_icon_image(CacheModeIcon::Stream, off_tint)
+            .fit_to_exact_size(egui::vec2(14.0, 14.0));
+
+        let cache_tooltip =
+            "Cache hits in RAM (supports rebuild/export, slower load). Applies on next load.";
+        let stream_tooltip = "Stream only (faster load, lower memory). Applies on next load.";
+
+        egui::Frame::none()
+            .fill(colors.bg_dark)
+            .stroke(Stroke::new(1.0, colors.border))
+            .rounding(Rounding::same(4.0))
+            .inner_margin(egui::Margin::same(2.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+
+                    let cache_btn = egui::Button::image(on_icon)
+                        .fill(if cache_on {
+                            accent::BLUE
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(3.0))
+                        .min_size(egui::vec2(28.0, 0.0));
+
+                    if ui.add(cache_btn).on_hover_text(cache_tooltip).clicked() {
+                        self.ui_state.cache_hits_in_memory = true;
+                    }
+
+                    let stream_btn = egui::Button::image(off_icon)
+                        .fill(if cache_on {
+                            Color32::TRANSPARENT
+                        } else {
+                            accent::BLUE
+                        })
+                        .stroke(Stroke::NONE)
+                        .rounding(Rounding::same(3.0))
+                        .min_size(egui::vec2(28.0, 0.0));
+
+                    if ui.add(stream_btn).on_hover_text(stream_tooltip).clicked() {
+                        self.ui_state.cache_hits_in_memory = false;
+                    }
                 });
             });
     }
@@ -1635,4 +1700,20 @@ impl RustpixApp {
             .tint(tint)
             .fit_to_exact_size(egui::vec2(16.0, 16.0))
     }
+
+    fn cache_icon_image(icon: CacheModeIcon, tint: Color32) -> egui::Image<'static> {
+        let source = match icon {
+            CacheModeIcon::Memory => egui::include_image!("../../assets/icons/cache-ram.svg"),
+            CacheModeIcon::Stream => egui::include_image!("../../assets/icons/cache-stream.svg"),
+        };
+        egui::Image::new(source)
+            .tint(tint)
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CacheModeIcon {
+    Memory,
+    Stream,
 }
