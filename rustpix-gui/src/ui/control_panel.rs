@@ -6,7 +6,7 @@ use rfd::FileDialog;
 use super::theme::{accent, form_label, primary_button, ThemeColors};
 use crate::app::{DetectorProfile, DetectorProfileKind, RustpixApp};
 use crate::pipeline::AlgorithmType;
-use crate::state::ViewMode;
+use crate::state::{Hdf5ExportOptions, ViewMode};
 use crate::util::{format_bytes, format_number};
 use crate::viewer::Colormap;
 use rustpix_tpx::DetectorConfig;
@@ -536,7 +536,6 @@ impl RustpixApp {
     }
 
     /// Render the left control panel.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_side_panel(&mut self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
@@ -743,11 +742,19 @@ impl RustpixApp {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_clustering_controls(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
 
-        // Algorithm selection
+        self.render_clustering_algorithm(ui);
+
+        if self.ui_state.show_clustering_params {
+            self.render_clustering_params(ui, &colors);
+        }
+
+        self.render_run_clustering_button(ui);
+    }
+
+    fn render_clustering_algorithm(&mut self, ui: &mut egui::Ui) {
         ui.label(form_label("Algorithm"));
         ui.add_space(4.0);
 
@@ -766,7 +773,6 @@ impl RustpixApp {
                     ui.selectable_value(&mut self.algo_type, AlgorithmType::Grid, "Grid");
                 });
 
-            // Settings button for advanced options
             if ui
                 .add(
                     egui::Button::new("⚙")
@@ -780,522 +786,531 @@ impl RustpixApp {
                 self.ui_state.show_clustering_params = !self.ui_state.show_clustering_params;
             }
         });
+    }
 
-        // Advanced parameters (collapsible)
-        if self.ui_state.show_clustering_params {
-            ui.add_space(8.0);
-            egui::Frame::none()
-                .fill(colors.bg_header)
-                .stroke(Stroke::new(1.0, colors.border))
-                .rounding(Rounding::same(4.0))
-                .inner_margin(egui::Margin::same(12.0))
-                .show(ui, |ui| {
-                    // Detector profile
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Detector")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let label = self.detector_profile.label();
-                            egui::ComboBox::from_id_salt("detector_profile")
-                                .selected_text(label)
-                                .width(160.0)
-                                .show_ui(ui, |ui| {
-                                    let mut kind = self.detector_profile.kind;
-                                    ui.selectable_value(
-                                        &mut kind,
-                                        DetectorProfileKind::Venus,
-                                        "VENUS (SNS)",
-                                    );
-                                    if self.detector_profile.has_custom() {
-                                        let custom_label = self
-                                            .detector_profile
-                                            .custom_name
-                                            .clone()
-                                            .unwrap_or_else(|| "Custom".to_string());
-                                        ui.selectable_value(
-                                            &mut kind,
-                                            DetectorProfileKind::Custom,
-                                            custom_label,
-                                        );
-                                    } else {
-                                        ui.add_enabled(
-                                            false,
-                                            egui::SelectableLabel::new(false, "Custom (load...)"),
-                                        );
-                                    }
-                                    if kind != self.detector_profile.kind {
-                                        self.detector_profile.kind = kind;
-                                    }
-                                });
-                        });
-                    });
+    fn render_clustering_params(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        ui.add_space(8.0);
+        egui::Frame::none()
+            .fill(colors.bg_header)
+            .stroke(Stroke::new(1.0, colors.border))
+            .rounding(Rounding::same(4.0))
+            .inner_margin(egui::Margin::same(12.0))
+            .show(ui, |ui| {
+                self.render_detector_profile_controls(ui);
+                ui.add_space(6.0);
+                self.render_tdc_frequency_control(ui);
+                ui.add_space(4.0);
+                self.render_radius_control(ui);
+                ui.add_space(4.0);
+                self.render_time_window_control(ui);
+                ui.add_space(4.0);
+                self.render_min_cluster_control(ui);
+                ui.add_space(4.0);
+                self.render_max_cluster_control(ui);
 
-                    ui.horizontal(|ui| {
-                        if ui.button("Load detector config…").clicked() {
-                            if let Some(path) = FileDialog::new()
-                                .add_filter("Detector config", &["json"])
-                                .pick_file()
-                            {
-                                match DetectorConfig::from_file(&path) {
-                                    Ok(config) => {
-                                        let name = path
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string());
-                                        self.detector_profile.custom_config = Some(config);
-                                        self.detector_profile.custom_path = Some(path.clone());
-                                        self.detector_profile.custom_name = name;
-                                        self.detector_profile.kind = DetectorProfileKind::Custom;
-                                    }
-                                    Err(err) => {
-                                        self.ui_state.roi_warning = Some((
-                                            format!("Detector config load failed: {err}"),
-                                            ui.ctx().input(|i| i.time + 6.0),
-                                        ));
-                                    }
-                                }
-                            }
+                if self.algo_type == AlgorithmType::Dbscan {
+                    ui.add_space(4.0);
+                    self.render_dbscan_control(ui);
+                }
+
+                if self.algo_type == AlgorithmType::Grid {
+                    ui.add_space(4.0);
+                    self.render_grid_control(ui);
+                }
+
+                ui.add_space(4.0);
+                self.render_super_resolution_control(ui);
+                ui.add_space(6.0);
+                self.render_extraction_controls(ui);
+                ui.add_space(8.0);
+                self.render_clustering_reset(ui);
+            });
+    }
+
+    fn render_detector_profile_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let colors = ThemeColors::from_ui(ui);
+            ui.label(
+                egui::RichText::new("Detector")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = self.detector_profile.label();
+                egui::ComboBox::from_id_salt("detector_profile")
+                    .selected_text(label)
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        let mut kind = self.detector_profile.kind;
+                        ui.selectable_value(&mut kind, DetectorProfileKind::Venus, "VENUS (SNS)");
+                        if self.detector_profile.has_custom() {
+                            let custom_label = self
+                                .detector_profile
+                                .custom_name
+                                .clone()
+                                .unwrap_or_else(|| "Custom".to_string());
+                            ui.selectable_value(
+                                &mut kind,
+                                DetectorProfileKind::Custom,
+                                custom_label,
+                            );
+                        } else {
+                            ui.add_enabled(
+                                false,
+                                egui::SelectableLabel::new(false, "Custom (load...)"),
+                            );
                         }
-                        if ui.button("Reset to VENUS").clicked() {
-                            self.detector_profile = DetectorProfile {
-                                kind: DetectorProfileKind::Venus,
-                                ..Default::default()
-                            };
+                        if kind != self.detector_profile.kind {
+                            self.detector_profile.kind = kind;
                         }
                     });
-                    if let Some(path) = self.detector_profile.custom_path.as_ref() {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Custom: {}",
-                                path.file_name().unwrap_or_default().to_string_lossy()
-                            ))
-                            .size(10.0)
-                            .color(colors.text_dim),
-                        );
-                    }
+            });
+        });
 
-                    ui.add_space(6.0);
-
-                    // TDC Frequency
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("TDC Freq")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let step = 1.0;
-                            let min = 1.0;
-                            let max = 120.0;
-                            if ui
-                                .add_enabled(
-                                    self.tdc_frequency < max,
-                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.tdc_frequency = (self.tdc_frequency + step).min(max);
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.tdc_frequency)
-                                    .range(min..=max)
-                                    .speed(step)
-                                    .suffix(" Hz"),
-                            );
-                            if ui
-                                .add_enabled(
-                                    self.tdc_frequency > min,
-                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.tdc_frequency = (self.tdc_frequency - step).max(min);
-                            }
-                        });
-                    });
-
-                    ui.add_space(4.0);
-
-                    // Radius
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Radius")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let step = 0.5;
-                            let min = 1.0;
-                            let max = 50.0;
-                            if ui
-                                .add_enabled(
-                                    self.radius < max,
-                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.radius = (self.radius + step).min(max);
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.radius)
-                                    .range(min..=max)
-                                    .speed(step)
-                                    .suffix(" px"),
-                            );
-                            if ui
-                                .add_enabled(
-                                    self.radius > min,
-                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.radius = (self.radius - step).max(min);
-                            }
-                        });
-                    });
-
-                    ui.add_space(4.0);
-
-                    // Time window
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Time window")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let step = 1.0;
-                            let min = 10.0;
-                            let max = 500.0;
-                            if ui
-                                .add_enabled(
-                                    self.temporal_window_ns < max,
-                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.temporal_window_ns = (self.temporal_window_ns + step).min(max);
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.temporal_window_ns)
-                                    .range(min..=max)
-                                    .speed(step)
-                                    .suffix(" ns"),
-                            );
-                            if ui
-                                .add_enabled(
-                                    self.temporal_window_ns > min,
-                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.temporal_window_ns = (self.temporal_window_ns - step).max(min);
-                            }
-                        });
-                    });
-
-                    ui.add_space(4.0);
-
-                    // Min cluster
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Min cluster")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let min = 1;
-                            let max = 10;
-                            if ui
-                                .add_enabled(
-                                    self.min_cluster_size < max,
-                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.min_cluster_size = (self.min_cluster_size + 1).min(max);
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.min_cluster_size)
-                                    .range(min..=max)
-                                    .speed(1),
-                            );
-                            if ui
-                                .add_enabled(
-                                    self.min_cluster_size > min,
-                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.min_cluster_size = (self.min_cluster_size - 1).max(min);
-                            }
-                        });
-                    });
-                    if let Some(max_value) = self.max_cluster_size {
-                        if self.min_cluster_size > max_value {
-                            self.max_cluster_size = Some(self.min_cluster_size);
+        ui.horizontal(|ui| {
+            if ui.button("Load detector config…").clicked() {
+                if let Some(path) = FileDialog::new()
+                    .add_filter("Detector config", &["json"])
+                    .pick_file()
+                {
+                    match DetectorConfig::from_file(&path) {
+                        Ok(config) => {
+                            let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+                            self.detector_profile.custom_config = Some(config);
+                            self.detector_profile.custom_path = Some(path.clone());
+                            self.detector_profile.custom_name = name;
+                            self.detector_profile.kind = DetectorProfileKind::Custom;
+                        }
+                        Err(err) => {
+                            self.ui_state.roi_warning = Some((
+                                format!("Detector config load failed: {err}"),
+                                ui.ctx().input(|i| i.time + 6.0),
+                            ));
                         }
                     }
+                }
+            }
+            if ui.button("Reset to VENUS").clicked() {
+                self.detector_profile = DetectorProfile {
+                    kind: DetectorProfileKind::Venus,
+                    ..Default::default()
+                };
+            }
+        });
 
-                    ui.add_space(4.0);
-
-                    let mut limit_max = self.max_cluster_size.is_some();
-                    let mut max_value = self
-                        .max_cluster_size
-                        .unwrap_or(self.min_cluster_size.max(1));
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.checkbox(&mut limit_max, "");
-                        ui.label(
-                            egui::RichText::new("Max cluster")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if limit_max {
-                                let min = 1;
-                                let max = 256;
-                                if ui
-                                    .add_enabled(
-                                        max_value < max,
-                                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    max_value = (max_value + 1).min(max);
-                                }
-                                ui.add(
-                                    egui::DragValue::new(&mut max_value)
-                                        .range(min..=max)
-                                        .speed(1),
-                                );
-                                if ui
-                                    .add_enabled(
-                                        max_value > min,
-                                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    max_value = (max_value - 1).max(min);
-                                }
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("∞").size(10.0).color(colors.text_dim),
-                                );
-                            }
-                        });
-                    });
-                    if limit_max {
-                        let min_value = self.min_cluster_size.max(1);
-                        if max_value < min_value {
-                            max_value = min_value;
-                        }
-                        self.max_cluster_size = Some(max_value);
-                    } else {
-                        self.max_cluster_size = None;
-                    }
-
-                    // DBSCAN-specific
-                    if self.algo_type == AlgorithmType::Dbscan {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new("Min points")
-                                    .size(10.0)
-                                    .color(colors.text_muted),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let min = 1;
-                                    let max = 10;
-                                    if ui
-                                        .add_enabled(
-                                            self.dbscan_min_points < max,
-                                            egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.dbscan_min_points =
-                                            (self.dbscan_min_points + 1).min(max);
-                                    }
-                                    ui.add(
-                                        egui::DragValue::new(&mut self.dbscan_min_points)
-                                            .range(min..=max)
-                                            .speed(1),
-                                    );
-                                    if ui
-                                        .add_enabled(
-                                            self.dbscan_min_points > min,
-                                            egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.dbscan_min_points =
-                                            (self.dbscan_min_points - 1).max(min);
-                                    }
-                                },
-                            );
-                        });
-                    }
-
-                    if self.algo_type == AlgorithmType::Grid {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new("Grid cell")
-                                    .size(10.0)
-                                    .color(colors.text_muted),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let min = 4;
-                                    let max = 128;
-                                    if ui
-                                        .add_enabled(
-                                            self.grid_cell_size < max,
-                                            egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.grid_cell_size = (self.grid_cell_size + 1).min(max);
-                                    }
-                                    ui.add(
-                                        egui::DragValue::new(&mut self.grid_cell_size)
-                                            .range(min..=max)
-                                            .speed(1)
-                                            .suffix(" px"),
-                                    );
-                                    if ui
-                                        .add_enabled(
-                                            self.grid_cell_size > min,
-                                            egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.grid_cell_size = (self.grid_cell_size - 1).max(min);
-                                    }
-                                },
-                            );
-                        });
-                    }
-
-                    ui.add_space(4.0);
-
-                    // Super-resolution factor
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Super-res")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let step = 0.1;
-                            let min = 1.0;
-                            let max = 16.0;
-                            if ui
-                                .add_enabled(
-                                    self.super_resolution_factor < max,
-                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.super_resolution_factor =
-                                    (self.super_resolution_factor + step).min(max);
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.super_resolution_factor)
-                                    .range(min..=max)
-                                    .speed(step)
-                                    .suffix("×"),
-                            );
-                            if ui
-                                .add_enabled(
-                                    self.super_resolution_factor > min,
-                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.super_resolution_factor =
-                                    (self.super_resolution_factor - step).max(min);
-                            }
-                        });
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Extraction")
-                            .size(10.0)
-                            .color(colors.text_muted),
-                    );
-                    ui.add_space(2.0);
-
-                    ui.checkbox(&mut self.weighted_by_tot, "Weighted by TOT");
-                    ui.horizontal(|ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        ui.label(
-                            egui::RichText::new("Min TOT")
-                                .size(10.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let min = 0;
-                            let max = 200;
-                            if ui
-                                .add_enabled(
-                                    self.min_tot_threshold < max,
-                                    egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.min_tot_threshold = (self.min_tot_threshold + 1).min(max);
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.min_tot_threshold)
-                                    .range(min..=max)
-                                    .speed(1),
-                            );
-                            if ui
-                                .add_enabled(
-                                    self.min_tot_threshold > min,
-                                    egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
-                                )
-                                .clicked()
-                            {
-                                self.min_tot_threshold = (self.min_tot_threshold - 1).max(min);
-                            }
-                        });
-                    });
-
-                    ui.add_space(8.0);
-                    if ui.button("Reset to defaults").clicked() {
-                        self.radius = 5.0;
-                        self.temporal_window_ns = 75.0;
-                        self.min_cluster_size = 1;
-                        self.max_cluster_size = None;
-                        self.dbscan_min_points = 2;
-                        self.grid_cell_size = 32;
-                        self.super_resolution_factor = 1.0;
-                        self.weighted_by_tot = false;
-                        self.min_tot_threshold = 0;
-                    }
-                });
+        if let Some(path) = self.detector_profile.custom_path.as_ref() {
+            let colors = ThemeColors::from_ui(ui);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Custom: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ))
+                .size(10.0)
+                .color(colors.text_dim),
+            );
         }
+    }
 
+    fn render_tdc_frequency_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("TDC Freq")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let step = 1.0;
+                let min = 1.0;
+                let max = 120.0;
+                if ui
+                    .add_enabled(
+                        self.tdc_frequency < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.tdc_frequency = (self.tdc_frequency + step).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.tdc_frequency)
+                        .range(min..=max)
+                        .speed(step)
+                        .suffix(" Hz"),
+                );
+                if ui
+                    .add_enabled(
+                        self.tdc_frequency > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.tdc_frequency = (self.tdc_frequency - step).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_radius_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Radius")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let step = 0.5;
+                let min = 1.0;
+                let max = 50.0;
+                if ui
+                    .add_enabled(
+                        self.radius < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.radius = (self.radius + step).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.radius)
+                        .range(min..=max)
+                        .speed(step)
+                        .suffix(" px"),
+                );
+                if ui
+                    .add_enabled(
+                        self.radius > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.radius = (self.radius - step).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_time_window_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Time window")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let step = 1.0;
+                let min = 10.0;
+                let max = 500.0;
+                if ui
+                    .add_enabled(
+                        self.temporal_window_ns < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.temporal_window_ns = (self.temporal_window_ns + step).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.temporal_window_ns)
+                        .range(min..=max)
+                        .speed(step)
+                        .suffix(" ns"),
+                );
+                if ui
+                    .add_enabled(
+                        self.temporal_window_ns > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.temporal_window_ns = (self.temporal_window_ns - step).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_min_cluster_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Min cluster")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let min = 1;
+                let max = 10;
+                if ui
+                    .add_enabled(
+                        self.min_cluster_size < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.min_cluster_size = (self.min_cluster_size + 1).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.min_cluster_size)
+                        .range(min..=max)
+                        .speed(1),
+                );
+                if ui
+                    .add_enabled(
+                        self.min_cluster_size > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.min_cluster_size = (self.min_cluster_size - 1).max(min);
+                }
+            });
+        });
+        if let Some(max_value) = self.max_cluster_size {
+            if self.min_cluster_size > max_value {
+                self.max_cluster_size = Some(self.min_cluster_size);
+            }
+        }
+    }
+
+    fn render_max_cluster_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let mut limit_max = self.max_cluster_size.is_some();
+        let mut max_value = self
+            .max_cluster_size
+            .unwrap_or(self.min_cluster_size.max(1));
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut limit_max, "");
+            ui.label(
+                egui::RichText::new("Max cluster")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if limit_max {
+                    let min = 1;
+                    let max = 256;
+                    if ui
+                        .add_enabled(
+                            max_value < max,
+                            egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                        )
+                        .clicked()
+                    {
+                        max_value = (max_value + 1).min(max);
+                    }
+                    ui.add(
+                        egui::DragValue::new(&mut max_value)
+                            .range(min..=max)
+                            .speed(1),
+                    );
+                    if ui
+                        .add_enabled(
+                            max_value > min,
+                            egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                        )
+                        .clicked()
+                    {
+                        max_value = (max_value - 1).max(min);
+                    }
+                } else {
+                    ui.label(egui::RichText::new("∞").size(10.0).color(colors.text_dim));
+                }
+            });
+        });
+
+        if limit_max {
+            let min_value = self.min_cluster_size.max(1);
+            if max_value < min_value {
+                max_value = min_value;
+            }
+            self.max_cluster_size = Some(max_value);
+        } else {
+            self.max_cluster_size = None;
+        }
+    }
+
+    fn render_dbscan_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Min points")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let min = 1;
+                let max = 10;
+                if ui
+                    .add_enabled(
+                        self.dbscan_min_points < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.dbscan_min_points = (self.dbscan_min_points + 1).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.dbscan_min_points)
+                        .range(min..=max)
+                        .speed(1),
+                );
+                if ui
+                    .add_enabled(
+                        self.dbscan_min_points > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.dbscan_min_points = (self.dbscan_min_points - 1).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_grid_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Grid cell")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let min = 4;
+                let max = 128;
+                if ui
+                    .add_enabled(
+                        self.grid_cell_size < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.grid_cell_size = (self.grid_cell_size + 1).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.grid_cell_size)
+                        .range(min..=max)
+                        .speed(1)
+                        .suffix(" px"),
+                );
+                if ui
+                    .add_enabled(
+                        self.grid_cell_size > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.grid_cell_size = (self.grid_cell_size - 1).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_super_resolution_control(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Super-res")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let step = 0.1;
+                let min = 1.0;
+                let max = 16.0;
+                if ui
+                    .add_enabled(
+                        self.super_resolution_factor < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.super_resolution_factor = (self.super_resolution_factor + step).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.super_resolution_factor)
+                        .range(min..=max)
+                        .speed(step)
+                        .suffix("×"),
+                );
+                if ui
+                    .add_enabled(
+                        self.super_resolution_factor > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.super_resolution_factor = (self.super_resolution_factor - step).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_extraction_controls(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        ui.label(
+            egui::RichText::new("Extraction")
+                .size(10.0)
+                .color(colors.text_muted),
+        );
+        ui.add_space(2.0);
+
+        ui.checkbox(&mut self.weighted_by_tot, "Weighted by TOT");
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Min TOT")
+                    .size(10.0)
+                    .color(colors.text_muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let min = 0;
+                let max = 200;
+                if ui
+                    .add_enabled(
+                        self.min_tot_threshold < max,
+                        egui::Button::new("+").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.min_tot_threshold = (self.min_tot_threshold + 1).min(max);
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.min_tot_threshold)
+                        .range(min..=max)
+                        .speed(1),
+                );
+                if ui
+                    .add_enabled(
+                        self.min_tot_threshold > min,
+                        egui::Button::new("−").min_size(egui::vec2(18.0, 18.0)),
+                    )
+                    .clicked()
+                {
+                    self.min_tot_threshold = (self.min_tot_threshold - 1).max(min);
+                }
+            });
+        });
+    }
+
+    fn render_clustering_reset(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Reset to defaults").clicked() {
+            self.radius = 5.0;
+            self.temporal_window_ns = 75.0;
+            self.min_cluster_size = 1;
+            self.max_cluster_size = None;
+            self.dbscan_min_points = 2;
+            self.grid_cell_size = 32;
+            self.super_resolution_factor = 1.0;
+            self.weighted_by_tot = false;
+            self.min_tot_threshold = 0;
+        }
+    }
+
+    fn render_run_clustering_button(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
 
-        // Run Clustering button
         let can_cluster = !self.processing.is_loading
             && !self.processing.is_processing
             && self.selected_file.is_some()
@@ -1314,27 +1329,34 @@ impl RustpixApp {
     }
 
     /// Render pixel health (dead/hot masks) summary and controls.
-    #[allow(clippy::too_many_lines)]
     fn render_pixel_health(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
-        let (dead_count, hot_count, mean, std_dev, threshold) =
-            if let Some(mask) = self.pixel_masks.as_ref() {
-                (
-                    mask.dead_count,
-                    mask.hot_count,
-                    mask.mean,
-                    mask.std_dev,
-                    mask.hot_threshold,
-                )
-            } else {
-                ui.label(
-                    egui::RichText::new("Load data to analyze pixel health")
-                        .size(11.0)
-                        .color(colors.text_muted),
-                );
-                return;
-            };
+        let Some(mask) = self.pixel_masks.as_ref() else {
+            ui.label(
+                egui::RichText::new("Load data to analyze pixel health")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+            return;
+        };
+        let (dead_count, hot_count, mean, std_dev, hot_threshold) = (
+            mask.dead_count,
+            mask.hot_count,
+            mask.mean,
+            mask.std_dev,
+            mask.hot_threshold,
+        );
 
+        self.render_pixel_health_header(ui, &colors);
+        Self::render_pixel_health_counts(ui, &colors, dead_count, hot_count);
+        self.render_pixel_health_overlays(ui);
+
+        if self.ui_state.show_pixel_health_settings {
+            self.render_pixel_health_settings(ui, &colors, mean, std_dev, hot_threshold);
+        }
+    }
+
+    fn render_pixel_health_header(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
         ui.horizontal(|ui| {
             ui.label(form_label("Hot pixels"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1350,7 +1372,14 @@ impl RustpixApp {
                 }
             });
         });
+    }
 
+    fn render_pixel_health_counts(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        dead_count: usize,
+        hot_count: usize,
+    ) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(
@@ -1381,7 +1410,9 @@ impl RustpixApp {
                 );
             });
         });
+    }
 
+    fn render_pixel_health_overlays(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.checkbox(
             &mut self.ui_state.show_hot_pixels,
@@ -1397,38 +1428,45 @@ impl RustpixApp {
             self.update_masked_spectrum();
             self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
         }
+    }
 
-        if self.ui_state.show_pixel_health_settings {
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(6.0);
+    fn render_pixel_health_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        mean: f64,
+        std_dev: f64,
+        threshold: f64,
+    ) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
 
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Sigma threshold")
-                        .size(11.0)
-                        .color(colors.text_muted),
-                );
-                let mut sigma = self.hot_pixel_sigma;
-                let response = ui.add(egui::DragValue::new(&mut sigma).range(1.0..=10.0));
-                if response.changed() {
-                    self.hot_pixel_sigma = sigma;
-                    self.update_pixel_masks();
-                }
-            });
-            ui.add_space(6.0);
-            if ui.button("Recompute masks").clicked() {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Sigma threshold")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+            let mut sigma = self.hot_pixel_sigma;
+            let response = ui.add(egui::DragValue::new(&mut sigma).range(1.0..=10.0));
+            if response.changed() {
+                self.hot_pixel_sigma = sigma;
                 self.update_pixel_masks();
             }
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "mean {mean:.2} • σ {std_dev:.2} • threshold {threshold:.2}"
-                ))
-                .size(10.0)
-                .color(colors.text_dim),
-            );
+        });
+        ui.add_space(6.0);
+        if ui.button("Recompute masks").clicked() {
+            self.update_pixel_masks();
         }
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "mean {mean:.2} • σ {std_dev:.2} • threshold {threshold:.2}"
+            ))
+            .size(10.0)
+            .color(colors.text_dim),
+        );
     }
 
     /// Render floating settings windows (app + spectrum).
@@ -1520,179 +1558,45 @@ impl RustpixApp {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_export_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.ui_state.show_export_dialog;
         let mut should_close = false;
+        let availability = self.export_availability();
         egui::Window::new("Export HDF5")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
                 let colors = ThemeColors::from_ui(ui);
-                let options = &mut self.ui_state.export_options;
-                let hits_available = self.hit_batch.as_ref().is_some_and(|b| !b.is_empty());
-                let neutrons_available = !self.neutrons.is_empty();
-                let hist_available = match self.ui_state.view_mode {
-                    ViewMode::Hits => self.hyperstack.is_some(),
-                    ViewMode::Neutrons => self.neutron_hyperstack.is_some(),
-                };
-                let masks_available = self.pixel_masks.is_some();
+                let hit_count = self.statistics.hit_count;
+                let neutron_count = self.statistics.neutron_count;
+                let view_mode = self.ui_state.view_mode;
+                let export_in_progress = self.ui_state.export_in_progress;
 
-                if !hits_available {
-                    options.include_hits = false;
-                }
-                if !neutrons_available {
-                    options.include_neutrons = false;
-                }
-                if !hist_available {
-                    options.include_histogram = false;
-                }
-                if !masks_available {
-                    options.include_pixel_masks = false;
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Select data to export")
-                            .size(11.0)
-                            .color(colors.text_primary),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let gear = Self::file_icon_image(FileToolbarIcon::Gear, colors.text_muted);
-                        if ui
-                            .add(egui::ImageButton::new(gear).frame(true))
-                            .on_hover_text("Advanced export options")
-                            .clicked()
-                        {
-                            options.advanced = !options.advanced;
-                        }
-                    });
-                });
-
-                ui.add_space(8.0);
-
-                let hits_label = if self.statistics.hit_count > 0 {
-                    format!("Hits ({})", format_number(self.statistics.hit_count))
-                } else {
-                    "Hits".to_string()
-                };
-                ui.add_enabled(
-                    hits_available,
-                    egui::Checkbox::new(&mut options.include_hits, hits_label),
-                );
-
-                let neutrons_label = if self.statistics.neutron_count > 0 {
-                    format!(
-                        "Neutrons ({})",
-                        format_number(self.statistics.neutron_count)
-                    )
-                } else {
-                    "Neutrons".to_string()
-                };
-                ui.add_enabled(
-                    neutrons_available,
-                    egui::Checkbox::new(&mut options.include_neutrons, neutrons_label),
-                );
-
-                let hist_label = format!("Histogram ({})", self.ui_state.view_mode);
-                ui.add_enabled(
-                    hist_available,
-                    egui::Checkbox::new(&mut options.include_histogram, hist_label),
-                );
-
-                ui.add_enabled(
-                    masks_available,
-                    egui::Checkbox::new(&mut options.include_pixel_masks, "Pixel masks"),
-                );
-
-                let deflate_ok = hdf5::filters::deflate_available();
-                if !deflate_ok {
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(
-                            "Deflate compression unavailable. Rebuild with HDF5 zlib support.",
-                        )
-                        .size(10.0)
-                        .color(accent::RED),
-                    );
-                }
-
-                if options.advanced {
+                let save_clicked = {
+                    let options = &mut self.ui_state.export_options;
+                    Self::apply_export_availability(options, availability);
+                    Self::render_export_header(ui, &colors, options);
                     ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-
-                    ui.label(
-                        egui::RichText::new("Compression")
-                            .size(11.0)
-                            .color(colors.text_primary),
+                    Self::render_export_dataset_options(
+                        ui,
+                        options,
+                        availability,
+                        hit_count,
+                        neutron_count,
+                        view_mode,
                     );
-                    ui.horizontal(|ui| {
-                        ui.label("Level");
-                        ui.add(egui::DragValue::new(&mut options.compression_level).range(0..=9));
-                        ui.checkbox(&mut options.shuffle, "Shuffle");
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Chunking")
-                            .size(11.0)
-                            .color(colors.text_primary),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Event chunk");
-                        ui.add(
-                            egui::DragValue::new(&mut options.chunk_events)
-                                .range(1_000..=5_000_000),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut options.hist_chunk_override, "Histogram chunk override");
-                    });
-
-                    if options.hist_chunk_override {
-                        ui.horizontal(|ui| {
-                            ui.label("rot");
-                            ui.add(egui::DragValue::new(&mut options.hist_chunk_rot).range(1..=16));
-                            ui.label("y");
-                            ui.add(egui::DragValue::new(&mut options.hist_chunk_y).range(8..=512));
-                            ui.label("x");
-                            ui.add(egui::DragValue::new(&mut options.hist_chunk_x).range(8..=512));
-                            ui.label("tof");
-                            ui.add(
-                                egui::DragValue::new(&mut options.hist_chunk_tof).range(4..=512),
-                            );
-                        });
+                    if !availability.deflate_ok {
+                        Self::render_export_deflate_warning(ui);
                     }
+                    if options.advanced {
+                        Self::render_export_advanced(ui, &colors, options);
+                    }
+                    ui.add_space(10.0);
+                    Self::render_export_save_button(ui, options, availability, export_in_progress)
+                };
 
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Include fields")
-                            .size(11.0)
-                            .color(colors.text_primary),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut options.include_xy, "x/y");
-                        ui.checkbox(&mut options.include_tot, "tot");
-                        ui.checkbox(&mut options.include_chip_id, "chip id");
-                        ui.checkbox(&mut options.include_cluster_id, "cluster id");
-                        ui.checkbox(&mut options.include_n_hits, "n_hits");
-                    });
-                }
-
-                ui.add_space(10.0);
-                let any_selected = options.include_hits
-                    || options.include_neutrons
-                    || options.include_histogram
-                    || options.include_pixel_masks;
-                let can_export = any_selected && deflate_ok && !self.ui_state.export_in_progress;
-
-                if ui
-                    .add_enabled(can_export, egui::Button::new("Save HDF5..."))
-                    .clicked()
-                {
+                if save_clicked {
                     if let Some(path) = FileDialog::new().set_file_name("rustpix.h5").save_file() {
                         self.start_export_hdf5(path);
                         should_close = true;
@@ -1703,6 +1607,194 @@ impl RustpixApp {
             open = false;
         }
         self.ui_state.show_export_dialog = open;
+    }
+
+    fn export_availability(&self) -> ExportAvailability {
+        let hits_available = self.hit_batch.as_ref().is_some_and(|b| !b.is_empty());
+        let neutrons_available = !self.neutrons.is_empty();
+        let histogram_available = match self.ui_state.view_mode {
+            ViewMode::Hits => self.hyperstack.is_some(),
+            ViewMode::Neutrons => self.neutron_hyperstack.is_some(),
+        };
+        let masks_available = self.pixel_masks.is_some();
+        let deflate_ok = hdf5::filters::deflate_available();
+        ExportAvailability {
+            hits_available,
+            neutrons_available,
+            histogram_available,
+            masks_available,
+            deflate_ok,
+        }
+    }
+
+    fn apply_export_availability(
+        options: &mut Hdf5ExportOptions,
+        availability: ExportAvailability,
+    ) {
+        if !availability.hits_available {
+            options.include_hits = false;
+        }
+        if !availability.neutrons_available {
+            options.include_neutrons = false;
+        }
+        if !availability.histogram_available {
+            options.include_histogram = false;
+        }
+        if !availability.masks_available {
+            options.include_pixel_masks = false;
+        }
+    }
+
+    fn render_export_header(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        options: &mut Hdf5ExportOptions,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Select data to export")
+                    .size(11.0)
+                    .color(colors.text_primary),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let gear = Self::file_icon_image(FileToolbarIcon::Gear, colors.text_muted);
+                if ui
+                    .add(egui::ImageButton::new(gear).frame(true))
+                    .on_hover_text("Advanced export options")
+                    .clicked()
+                {
+                    options.advanced = !options.advanced;
+                }
+            });
+        });
+    }
+
+    fn render_export_dataset_options(
+        ui: &mut egui::Ui,
+        options: &mut Hdf5ExportOptions,
+        availability: ExportAvailability,
+        hit_count: usize,
+        neutron_count: usize,
+        view_mode: ViewMode,
+    ) {
+        let hits_label = if hit_count > 0 {
+            format!("Hits ({})", format_number(hit_count))
+        } else {
+            "Hits".to_string()
+        };
+        ui.add_enabled(
+            availability.hits_available,
+            egui::Checkbox::new(&mut options.include_hits, hits_label),
+        );
+
+        let neutrons_label = if neutron_count > 0 {
+            format!("Neutrons ({})", format_number(neutron_count))
+        } else {
+            "Neutrons".to_string()
+        };
+        ui.add_enabled(
+            availability.neutrons_available,
+            egui::Checkbox::new(&mut options.include_neutrons, neutrons_label),
+        );
+
+        let hist_label = format!("Histogram ({view_mode})");
+        ui.add_enabled(
+            availability.histogram_available,
+            egui::Checkbox::new(&mut options.include_histogram, hist_label),
+        );
+
+        ui.add_enabled(
+            availability.masks_available,
+            egui::Checkbox::new(&mut options.include_pixel_masks, "Pixel masks"),
+        );
+    }
+
+    fn render_export_deflate_warning(ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Deflate compression unavailable. Rebuild with HDF5 zlib support.")
+                .size(10.0)
+                .color(accent::RED),
+        );
+    }
+
+    fn render_export_advanced(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        options: &mut Hdf5ExportOptions,
+    ) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        ui.label(
+            egui::RichText::new("Compression")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Level");
+            ui.add(egui::DragValue::new(&mut options.compression_level).range(0..=9));
+            ui.checkbox(&mut options.shuffle, "Shuffle");
+        });
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Chunking")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Event chunk");
+            ui.add(egui::DragValue::new(&mut options.chunk_events).range(1_000..=5_000_000));
+        });
+
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut options.hist_chunk_override, "Histogram chunk override");
+        });
+
+        if options.hist_chunk_override {
+            ui.horizontal(|ui| {
+                ui.label("rot");
+                ui.add(egui::DragValue::new(&mut options.hist_chunk_rot).range(1..=16));
+                ui.label("y");
+                ui.add(egui::DragValue::new(&mut options.hist_chunk_y).range(8..=512));
+                ui.label("x");
+                ui.add(egui::DragValue::new(&mut options.hist_chunk_x).range(8..=512));
+                ui.label("tof");
+                ui.add(egui::DragValue::new(&mut options.hist_chunk_tof).range(4..=512));
+            });
+        }
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Include fields")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut options.include_xy, "x/y");
+            ui.checkbox(&mut options.include_tot, "tot");
+            ui.checkbox(&mut options.include_chip_id, "chip id");
+            ui.checkbox(&mut options.include_cluster_id, "cluster id");
+            ui.checkbox(&mut options.include_n_hits, "n_hits");
+        });
+    }
+
+    fn render_export_save_button(
+        ui: &mut egui::Ui,
+        options: &Hdf5ExportOptions,
+        availability: ExportAvailability,
+        export_in_progress: bool,
+    ) -> bool {
+        let any_selected = options.include_hits
+            || options.include_neutrons
+            || options.include_histogram
+            || options.include_pixel_masks;
+        let can_export = any_selected && availability.deflate_ok && !export_in_progress;
+
+        ui.add_enabled(can_export, egui::Button::new("Save HDF5..."))
+            .clicked()
     }
 
     fn file_icon_image(icon: FileToolbarIcon, tint: Color32) -> egui::Image<'static> {
@@ -1731,4 +1823,14 @@ impl RustpixApp {
 enum CacheModeIcon {
     Memory,
     Stream,
+}
+
+#[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+struct ExportAvailability {
+    hits_available: bool,
+    neutrons_available: bool,
+    histogram_available: bool,
+    masks_available: bool,
+    deflate_ok: bool,
 }
