@@ -3,9 +3,6 @@
 //! This module provides the `Hyperstack3D` structure which stores
 //! binned event data in a 3D array indexed by `[tof, y, x]`.
 
-// Allow unused methods/fields - they are reserved for Issue #82 (TOF slicer UI)
-#![allow(dead_code)]
-
 use std::ops::Range;
 
 use rustpix_core::neutron::NeutronBatch;
@@ -152,6 +149,7 @@ impl Hyperstack3D {
     }
 
     /// Get the count at a specific position.
+    #[cfg(test)]
     #[must_use]
     #[inline]
     pub fn get(&self, tof_bin: usize, y: usize, x: usize) -> Option<u64> {
@@ -164,6 +162,7 @@ impl Hyperstack3D {
     }
 
     /// Increment the count at a specific position.
+    #[cfg(test)]
     #[inline]
     pub fn increment(&mut self, tof_bin: usize, y: usize, x: usize) {
         if tof_bin < self.n_tof_bins && y < self.height && x < self.width {

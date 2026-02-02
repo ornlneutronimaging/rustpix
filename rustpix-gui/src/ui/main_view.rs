@@ -39,11 +39,8 @@ enum ZoomToolbarIcon {
     Box,
 }
 
-#[allow(dead_code)]
 struct SpectrumExportConfig {
     axis: SpectrumXAxis,
-    flight_path_m: f64,
-    tof_offset_ns: f64,
     log_x: bool,
     log_y: bool,
 }
@@ -1782,13 +1779,7 @@ impl RustpixApp {
         }
 
         if export_png_clicked && !lines.is_empty() {
-            let export_config = SpectrumExportConfig {
-                axis,
-                flight_path_m,
-                tof_offset_ns,
-                log_x,
-                log_y,
-            };
+            let export_config = SpectrumExportConfig { axis, log_x, log_y };
             if let Err(err) =
                 Self::export_spectrum_png(&lines, export_bounds, colors, &export_config)
             {

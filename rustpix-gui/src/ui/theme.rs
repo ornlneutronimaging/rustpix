@@ -31,7 +31,6 @@ pub mod dark {
 }
 
 /// Color palette for the application (light theme).
-#[allow(dead_code)]
 pub mod light {
     use eframe::egui::Color32;
 
@@ -64,30 +63,23 @@ pub mod accent {
     pub const RED: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
 }
 
-/// Re-export colors for backward compatibility (dark theme defaults).
-#[allow(unused_imports)]
-pub mod colors {
-    pub use super::accent::BLUE as ACCENT_BLUE;
-    pub use super::accent::GREEN as ACCENT_GREEN;
-    pub use super::accent::RED as ACCENT_RED;
-    pub use super::dark::*;
-}
-
 /// Theme-aware color accessor.
 /// Use this to get colors that adapt to the current light/dark mode.
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub struct ThemeColors {
     pub bg_dark: Color32,
     pub bg_panel: Color32,
     pub bg_header: Color32,
+    #[allow(dead_code)]
     pub bg_input: Color32,
     pub border: Color32,
     pub border_light: Color32,
     pub text_primary: Color32,
     pub text_muted: Color32,
     pub text_dim: Color32,
+    #[allow(dead_code)]
     pub button_bg: Color32,
+    #[allow(dead_code)]
     pub button_hover: Color32,
 }
 
@@ -264,36 +256,6 @@ pub fn primary_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
         .fill(accent::BLUE)
         .rounding(Rounding::same(4.0))
-}
-
-/// Style a button as a secondary/ghost button (theme-aware).
-#[allow(dead_code)]
-pub fn secondary_button_themed<'a>(ctx: &egui::Context, text: &'a str) -> egui::Button<'a> {
-    let is_dark = ctx.style().visuals.dark_mode;
-    let (text_color, bg, border) = if is_dark {
-        (dark::TEXT_PRIMARY, dark::BUTTON_BG, dark::BORDER_LIGHT)
-    } else {
-        (light::TEXT_PRIMARY, light::BUTTON_BG, light::BORDER_LIGHT)
-    };
-    egui::Button::new(egui::RichText::new(text).color(text_color))
-        .fill(bg)
-        .stroke(Stroke::new(1.0, border))
-        .rounding(Rounding::same(4.0))
-}
-
-/// Style a button as a secondary/ghost button (dark theme, for compatibility).
-#[allow(dead_code)]
-pub fn secondary_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(egui::RichText::new(text).color(dark::TEXT_PRIMARY))
-        .fill(dark::BUTTON_BG)
-        .stroke(Stroke::new(1.0, dark::BORDER_LIGHT))
-        .rounding(Rounding::same(4.0))
-}
-
-/// Create a section header label.
-#[allow(dead_code)]
-pub fn section_header(text: &str) -> egui::RichText {
-    egui::RichText::new(text.to_uppercase()).size(11.0).strong()
 }
 
 /// Create a form label.

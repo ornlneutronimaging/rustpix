@@ -7,7 +7,6 @@ use egui_plot::{
 
 /// ROI selection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum RoiSelectionMode {
     #[default]
     Rectangle,
@@ -16,7 +15,7 @@ pub enum RoiSelectionMode {
 
 /// Region of interest definition.
 #[derive(Debug, Clone)]
-#[allow(dead_code, clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Roi {
     pub id: usize,
     pub name: String,
@@ -30,7 +29,6 @@ pub struct Roi {
 
 /// ROI shape variants.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum RoiShape {
     Rectangle { x1: f64, y1: f64, x2: f64, y2: f64 },
     Polygon { vertices: Vec<(f64, f64)> },

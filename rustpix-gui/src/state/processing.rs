@@ -35,13 +35,6 @@ impl ProcessingState {
         self.cancel_flag.store(true, Ordering::SeqCst);
     }
 
-    /// Check if cancellation was requested.
-    #[must_use]
-    #[allow(dead_code)] // Will be used by loader worker
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel_flag.load(Ordering::SeqCst)
-    }
-
     /// Reset the cancellation flag for a new operation.
     pub fn reset_cancel(&self) {
         self.cancel_flag.store(false, Ordering::SeqCst);
@@ -49,7 +42,6 @@ impl ProcessingState {
 
     /// Get a clone of the cancel flag for passing to workers.
     #[must_use]
-    #[allow(dead_code)] // Will be used when passing to loader worker
     pub fn cancel_flag_clone(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel_flag)
     }
