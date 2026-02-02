@@ -20,7 +20,6 @@ enum FileToolbarIcon {
 
 impl RustpixApp {
     /// Render the top panel with RUSTPIX branding, file info, and view mode toggle.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_top_panel(&mut self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
@@ -41,135 +40,161 @@ impl RustpixApp {
                     let colors = ThemeColors::from_ui(ui);
                     ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
 
-                    let separator = |ui: &mut egui::Ui| {
-                        ui.add_space(2.0);
-                        ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
-                        ui.add_space(2.0);
-                    };
-
-                    let can_load = !self.processing.is_loading && !self.processing.is_processing;
-                    let can_export = self.hit_batch.is_some()
-                        || !self.neutrons.is_empty()
-                        || self.hyperstack.is_some()
-                        || self.neutron_hyperstack.is_some();
-                    let can_export = can_export && !self.ui_state.export_in_progress;
-
-                    let icon_button = |ui: &mut egui::Ui,
-                                       icon: FileToolbarIcon,
-                                       enabled: bool,
-                                       tooltip: &str| {
-                        let image = Self::file_icon_image(icon, colors.text_primary)
-                            .fit_to_exact_size(egui::vec2(16.0, 16.0));
-                        let btn = egui::ImageButton::new(image)
-                            .frame(true)
-                            .rounding(Rounding::same(4.0));
-                        let response = ui
-                            .add_enabled_ui(enabled, |ui| ui.add_sized(egui::vec2(30.0, 28.0), btn))
-                            .inner;
-                        response.on_hover_text(tooltip)
-                    };
-
-                    // RUSTPIX branding
-                    ui.label(
-                        egui::RichText::new("RUSTPIX")
-                            .size(14.0)
-                            .strong()
-                            .color(accent::BLUE),
-                    );
-
-                    separator(ui);
-
-                    if icon_button(ui, FileToolbarIcon::Open, can_load, "Open file").clicked() {
-                        if let Some(path) =
-                            FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file()
-                        {
-                            self.load_file(path);
-                        }
-                    }
-
-                    if icon_button(ui, FileToolbarIcon::Export, can_export, "Export HDF5").clicked()
-                    {
-                        self.ui_state.show_export_dialog = true;
-                    }
-
-                    separator(ui);
-
-                    let (status_text, status_color, status_bold) =
-                        if let Some(p) = &self.selected_file {
-                            let name = p.file_name().unwrap_or_default().to_string_lossy();
-                            if self.statistics.hit_count > 0 {
-                                (
-                                    format!(
-                                        "{} • {} hits",
-                                        name,
-                                        format_number(self.statistics.hit_count)
-                                    ),
-                                    colors.text_muted,
-                                    false,
-                                )
-                            } else {
-                                (format!("{name}"), colors.text_muted, false)
-                            }
-                        } else {
-                            ("No file loaded".to_string(), colors.text_primary, true)
-                        };
-
-                    let right_reserve = 330.0;
-                    let status_width = (ui.available_width() - right_reserve).max(120.0);
-                    let status_height = ui.spacing().interact_size.y.max(24.0);
-                    let (status_rect, status_response) = ui.allocate_exact_size(
-                        egui::vec2(status_width, status_height),
-                        egui::Sense::hover(),
-                    );
-                    let status_font = if status_bold {
-                        FontId::new(13.0, FontFamily::Monospace)
-                    } else {
-                        FontId::new(12.0, FontFamily::Monospace)
-                    };
-                    let galley = ui.fonts(|fonts| {
-                        fonts.layout_no_wrap(status_text.clone(), status_font, status_color)
-                    });
-                    let text_width = galley.size().x;
-                    let text_y = status_rect.center().y - galley.size().y / 2.0;
-                    let painter = ui.painter().with_clip_rect(status_rect);
-
-                    if text_width <= status_rect.width() || !status_response.hovered() {
-                        let x = status_rect.left();
-                        painter.galley(egui::pos2(x, text_y), galley.clone(), status_color);
-                    } else {
-                        let speed = 30.0;
-                        let gap = 24.0;
-                        let scroll_len = text_width + gap;
-                        let t = ui.input(|i| i.time);
-                        #[allow(clippy::cast_possible_truncation)]
-                        let offset = ((t as f32) * speed) % scroll_len;
-                        let x1 = status_rect.left() - offset;
-                        painter.galley(egui::pos2(x1, text_y), galley.clone(), status_color);
-                        painter.galley(
-                            egui::pos2(x1 + scroll_len, text_y),
-                            galley.clone(),
-                            status_color,
-                        );
-                        ui.ctx().request_repaint();
-                    }
-
-                    status_response.on_hover_text(status_text.clone());
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-
-                        if icon_button(ui, FileToolbarIcon::Gear, true, "Hyperstack settings")
-                            .clicked()
-                        {
-                            self.ui_state.show_app_settings = !self.ui_state.show_app_settings;
-                        }
-
-                        // HITS/NEUTRONS toggle buttons
-                        self.render_view_mode_toggle(ui);
-                        self.render_cache_toggle(ui);
-                    });
+                    self.render_top_bar_left(ui, colors);
+                    self.render_top_bar_status(ui, colors);
+                    self.render_top_bar_right(ui);
                 });
             });
+    }
+
+    fn render_top_bar_left(&mut self, ui: &mut egui::Ui, colors: ThemeColors) {
+        let can_load = !self.processing.is_loading && !self.processing.is_processing;
+        let can_export = self.hit_batch.is_some()
+            || !self.neutrons.is_empty()
+            || self.hyperstack.is_some()
+            || self.neutron_hyperstack.is_some();
+        let can_export = can_export && !self.ui_state.export_in_progress;
+
+        ui.label(
+            egui::RichText::new("RUSTPIX")
+                .size(14.0)
+                .strong()
+                .color(accent::BLUE),
+        );
+
+        Self::top_bar_separator(ui, colors);
+
+        if Self::file_toolbar_button(ui, colors, FileToolbarIcon::Open, can_load, "Open file")
+            .clicked()
+        {
+            if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
+                self.load_file(path);
+            }
+        }
+
+        if Self::file_toolbar_button(
+            ui,
+            colors,
+            FileToolbarIcon::Export,
+            can_export,
+            "Export HDF5",
+        )
+        .clicked()
+        {
+            self.ui_state.show_export_dialog = true;
+        }
+
+        Self::top_bar_separator(ui, colors);
+    }
+
+    fn render_top_bar_status(&self, ui: &mut egui::Ui, colors: ThemeColors) {
+        let (status_text, status_color, status_bold) = self.status_banner_text(colors);
+        let right_reserve = 330.0;
+        let status_width = (ui.available_width() - right_reserve).max(120.0);
+        let status_height = ui.spacing().interact_size.y.max(24.0);
+        let (status_rect, status_response) = ui.allocate_exact_size(
+            egui::vec2(status_width, status_height),
+            egui::Sense::hover(),
+        );
+        let status_font = if status_bold {
+            FontId::new(13.0, FontFamily::Monospace)
+        } else {
+            FontId::new(12.0, FontFamily::Monospace)
+        };
+        let galley =
+            ui.fonts(|fonts| fonts.layout_no_wrap(status_text.clone(), status_font, status_color));
+        let text_width = galley.size().x;
+        let text_y = status_rect.center().y - galley.size().y / 2.0;
+        let painter = ui.painter().with_clip_rect(status_rect);
+
+        if text_width <= status_rect.width() || !status_response.hovered() {
+            let x = status_rect.left();
+            painter.galley(egui::pos2(x, text_y), galley.clone(), status_color);
+        } else {
+            let speed = 30.0;
+            let gap = 24.0;
+            let scroll_len = text_width + gap;
+            let t = ui.input(|i| i.time);
+            #[allow(clippy::cast_possible_truncation)]
+            let offset = ((t as f32) * speed) % scroll_len;
+            let x1 = status_rect.left() - offset;
+            painter.galley(egui::pos2(x1, text_y), galley.clone(), status_color);
+            painter.galley(
+                egui::pos2(x1 + scroll_len, text_y),
+                galley.clone(),
+                status_color,
+            );
+            ui.ctx().request_repaint();
+        }
+
+        status_response.on_hover_text(status_text);
+    }
+
+    fn render_top_bar_right(&mut self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let colors = ThemeColors::from_ui(ui);
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+
+            if Self::file_toolbar_button(
+                ui,
+                colors,
+                FileToolbarIcon::Gear,
+                true,
+                "Hyperstack settings",
+            )
+            .clicked()
+            {
+                self.ui_state.show_app_settings = !self.ui_state.show_app_settings;
+            }
+
+            self.render_view_mode_toggle(ui);
+            self.render_cache_toggle(ui);
+        });
+    }
+
+    fn status_banner_text(&self, colors: ThemeColors) -> (String, Color32, bool) {
+        if let Some(p) = &self.selected_file {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            if self.statistics.hit_count > 0 {
+                (
+                    format!(
+                        "{} • {} hits",
+                        name,
+                        format_number(self.statistics.hit_count)
+                    ),
+                    colors.text_muted,
+                    false,
+                )
+            } else {
+                (format!("{name}"), colors.text_muted, false)
+            }
+        } else {
+            ("No file loaded".to_string(), colors.text_primary, true)
+        }
+    }
+
+    fn top_bar_separator(ui: &mut egui::Ui, colors: ThemeColors) {
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("│").size(14.0).color(colors.text_dim));
+        ui.add_space(2.0);
+    }
+
+    fn file_toolbar_button(
+        ui: &mut egui::Ui,
+        colors: ThemeColors,
+        icon: FileToolbarIcon,
+        enabled: bool,
+        tooltip: &str,
+    ) -> egui::Response {
+        let image = Self::file_icon_image(icon, colors.text_primary)
+            .fit_to_exact_size(egui::vec2(16.0, 16.0));
+        let btn = egui::ImageButton::new(image)
+            .frame(true)
+            .rounding(Rounding::same(4.0));
+        let response = ui
+            .add_enabled_ui(enabled, |ui| ui.add_sized(egui::vec2(30.0, 28.0), btn))
+            .inner;
+        response.on_hover_text(tooltip)
     }
 
     /// Render the HITS/NEUTRONS toggle button group.
@@ -247,7 +272,6 @@ impl RustpixApp {
     }
 
     /// Render the bottom status bar.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_bottom_panel(&self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
@@ -265,183 +289,186 @@ impl RustpixApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let colors = ThemeColors::from_ui(ui);
-                    // Status indicator
-                    let (status_color, status_text) =
-                        if self.processing.is_loading || self.processing.is_processing {
-                            (accent::BLUE, &self.processing.status_text)
-                        } else {
-                            (accent::GREEN, &"Ready".to_string())
-                        };
-
-                    ui.label(egui::RichText::new("●").size(11.0).color(status_color));
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .size(11.0)
-                            .color(status_color),
-                    );
-
-                    ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
-
-                    // Cursor info
-                    if let Some((x, y, count)) = self.cursor_info {
-                        ui.label(
-                            egui::RichText::new(format!("Cursor: ({x}, {y}) = "))
-                                .size(11.0)
-                                .color(colors.text_muted),
-                        );
-                        #[allow(clippy::cast_possible_truncation)]
-                        let count_usize = count as usize;
-                        ui.label(
-                            egui::RichText::new(format_number(count_usize))
-                                .size(11.0)
-                                .color(colors.text_primary),
-                        );
-                        ui.label(
-                            egui::RichText::new(" counts")
-                                .size(11.0)
-                                .color(colors.text_muted),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Cursor: -")
-                                .size(11.0)
-                                .color(colors.text_muted),
-                        );
-                    }
-
-                    if let Some((message, expires_at)) = &self.ui_state.roi_status {
-                        let now = ctx.input(|i| i.time);
-                        if now <= *expires_at {
-                            ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
-                            ui.label(egui::RichText::new(message).size(11.0).color(accent::BLUE));
-                            ctx.request_repaint();
-                        }
-                    }
-
-                    if let Some((message, expires_at)) = &self.ui_state.roi_warning {
-                        let now = ctx.input(|i| i.time);
-                        if now <= *expires_at {
-                            ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
-                            ui.label(egui::RichText::new(message).size(11.0).color(accent::RED));
-                        }
-                    }
-
-                    if self.ui_state.export_in_progress {
-                        ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
-                        ui.label(
-                            egui::RichText::new(&self.ui_state.export_status)
-                                .size(11.0)
-                                .color(colors.text_muted),
-                        );
-                        ui.add(
-                            egui::ProgressBar::new(self.ui_state.export_progress)
-                                .desired_width(120.0)
-                                .show_percentage(),
-                        );
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        let memory_bytes = self.memory_rss_bytes();
-                        let memory_text = if memory_bytes > 0 {
-                            format!("RAM: {}", format_bytes(memory_bytes))
-                        } else {
-                            "RAM: --".to_string()
-                        };
-
-                        let memory_response = ui.label(
-                            egui::RichText::new(memory_text)
-                                .size(11.0)
-                                .color(colors.text_primary),
-                        );
-                        memory_response.on_hover_ui(|ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new("Memory (process)")
-                                    .size(12.0)
-                                    .strong(),
-                            );
-                            if memory_bytes > 0 {
-                                ui.label(format!("Process RSS: {}", format_bytes(memory_bytes)));
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("Process memory unavailable")
-                                        .color(colors.text_muted),
-                                );
-                            }
-
-                            let breakdown = self.memory_breakdown();
-                            let estimated: u64 = breakdown.iter().map(|(_, bytes)| *bytes).sum();
-                            if estimated > 0 {
-                                ui.label(format!(
-                                    "Estimated buffers: {}",
-                                    format_bytes(estimated)
-                                ));
-                            }
-
-                            if !breakdown.is_empty() {
-                                ui.add_space(4.0);
-                                egui::Grid::new("memory_breakdown")
-                                    .num_columns(2)
-                                    .spacing(egui::vec2(8.0, 2.0))
-                                    .show(ui, |ui| {
-                                        for (label, bytes) in breakdown {
-                                            ui.label(
-                                                egui::RichText::new(label)
-                                                    .color(colors.text_muted),
-                                            );
-                                            ui.label(format_bytes(bytes));
-                                            ui.end_row();
-                                        }
-                                    });
-                            }
-
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(
-                                    "Estimates exclude allocator overhead, textures, and OS caches.",
-                                )
-                                .size(10.0)
-                                .color(colors.text_muted),
-                            );
-                        });
-
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
-                        ui.add_space(8.0);
-                        let (dead_count, hot_count) = self
-                            .pixel_masks
-                            .as_ref()
-                            .map_or((0, 0), |mask| (mask.dead_count, mask.hot_count));
-
-                        // Hot pixel count
-                        ui.label(
-                            egui::RichText::new(format_number(hot_count))
-                                .size(11.0)
-                                .color(accent::RED),
-                        );
-                        ui.label(
-                            egui::RichText::new("Hot: ")
-                                .size(11.0)
-                                .color(colors.text_muted),
-                        );
-
-                        ui.add_space(8.0);
-
-                        // Dead pixel count
-                        ui.label(
-                            egui::RichText::new(format_number(dead_count))
-                                .size(11.0)
-                                .color(colors.text_dim),
-                        );
-                        ui.label(
-                            egui::RichText::new("Dead: ")
-                                .size(11.0)
-                                .color(colors.text_muted),
-                        );
-                    });
+                    self.render_status_indicator(ui);
+                    Self::status_separator(ui, colors);
+                    self.render_cursor_status(ui, colors);
+                    self.render_roi_messages(ui, ctx, colors);
+                    self.render_export_status(ui, colors);
+                    self.render_bottom_right(ui);
                 });
             });
+    }
+
+    fn render_status_indicator(&self, ui: &mut egui::Ui) {
+        let (status_color, status_text) =
+            if self.processing.is_loading || self.processing.is_processing {
+                (accent::BLUE, self.processing.status_text.as_str())
+            } else {
+                (accent::GREEN, "Ready")
+            };
+        ui.label(egui::RichText::new("●").size(11.0).color(status_color));
+        ui.label(
+            egui::RichText::new(status_text)
+                .size(11.0)
+                .color(status_color),
+        );
+    }
+
+    fn render_cursor_status(&self, ui: &mut egui::Ui, colors: ThemeColors) {
+        if let Some((x, y, count)) = self.cursor_info {
+            ui.label(
+                egui::RichText::new(format!("Cursor: ({x}, {y}) = "))
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+            #[allow(clippy::cast_possible_truncation)]
+            let count_usize = count as usize;
+            ui.label(
+                egui::RichText::new(format_number(count_usize))
+                    .size(11.0)
+                    .color(colors.text_primary),
+            );
+            ui.label(
+                egui::RichText::new(" counts")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("Cursor: -")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+        }
+    }
+
+    fn render_roi_messages(&self, ui: &mut egui::Ui, ctx: &egui::Context, colors: ThemeColors) {
+        if let Some((message, expires_at)) = &self.ui_state.roi_status {
+            let now = ctx.input(|i| i.time);
+            if now <= *expires_at {
+                Self::status_separator(ui, colors);
+                ui.label(egui::RichText::new(message).size(11.0).color(accent::BLUE));
+                ctx.request_repaint();
+            }
+        }
+
+        if let Some((message, expires_at)) = &self.ui_state.roi_warning {
+            let now = ctx.input(|i| i.time);
+            if now <= *expires_at {
+                Self::status_separator(ui, colors);
+                ui.label(egui::RichText::new(message).size(11.0).color(accent::RED));
+            }
+        }
+    }
+
+    fn render_export_status(&self, ui: &mut egui::Ui, colors: ThemeColors) {
+        if self.ui_state.export_in_progress {
+            Self::status_separator(ui, colors);
+            ui.label(
+                egui::RichText::new(&self.ui_state.export_status)
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+            ui.add(
+                egui::ProgressBar::new(self.ui_state.export_progress)
+                    .desired_width(120.0)
+                    .show_percentage(),
+            );
+        }
+    }
+
+    fn render_bottom_right(&self, ui: &mut egui::Ui) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let colors = ThemeColors::from_ui(ui);
+            let memory_bytes = self.memory_rss_bytes();
+            let memory_text = if memory_bytes > 0 {
+                format!("RAM: {}", format_bytes(memory_bytes))
+            } else {
+                "RAM: --".to_string()
+            };
+
+            let memory_response = ui.label(
+                egui::RichText::new(memory_text)
+                    .size(11.0)
+                    .color(colors.text_primary),
+            );
+            memory_response.on_hover_ui(|ui| {
+                let colors = ThemeColors::from_ui(ui);
+                ui.label(egui::RichText::new("Memory (process)").size(12.0).strong());
+                if memory_bytes > 0 {
+                    ui.label(format!("Process RSS: {}", format_bytes(memory_bytes)));
+                } else {
+                    ui.label(
+                        egui::RichText::new("Process memory unavailable").color(colors.text_muted),
+                    );
+                }
+
+                let breakdown = self.memory_breakdown();
+                let estimated: u64 = breakdown.iter().map(|(_, bytes)| *bytes).sum();
+                if estimated > 0 {
+                    ui.label(format!("Estimated buffers: {}", format_bytes(estimated)));
+                }
+
+                if !breakdown.is_empty() {
+                    ui.add_space(4.0);
+                    egui::Grid::new("memory_breakdown")
+                        .num_columns(2)
+                        .spacing(egui::vec2(8.0, 2.0))
+                        .show(ui, |ui| {
+                            for (label, bytes) in breakdown {
+                                ui.label(egui::RichText::new(label).color(colors.text_muted));
+                                ui.label(format_bytes(bytes));
+                                ui.end_row();
+                            }
+                        });
+                }
+
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Estimates exclude allocator overhead, textures, and OS caches.",
+                    )
+                    .size(10.0)
+                    .color(colors.text_muted),
+                );
+            });
+
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
+            ui.add_space(8.0);
+            let (dead_count, hot_count) = self
+                .pixel_masks
+                .as_ref()
+                .map_or((0, 0), |mask| (mask.dead_count, mask.hot_count));
+
+            ui.label(
+                egui::RichText::new(format_number(hot_count))
+                    .size(11.0)
+                    .color(accent::RED),
+            );
+            ui.label(
+                egui::RichText::new("Hot: ")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new(format_number(dead_count))
+                    .size(11.0)
+                    .color(colors.text_dim),
+            );
+            ui.label(
+                egui::RichText::new("Dead: ")
+                    .size(11.0)
+                    .color(colors.text_muted),
+            );
+        });
+    }
+
+    fn status_separator(ui: &mut egui::Ui, colors: ThemeColors) {
+        ui.label(egui::RichText::new("│").size(11.0).color(colors.text_dim));
     }
 
     /// Render cache vs streaming toggle in the top bar.

@@ -237,7 +237,6 @@ fn build_debug_info(mmap: &memmap2::Mmap, sections: &[Tpx3Section], tdc_correcti
 ///
 /// Uses parallel processing per chip with synchronized merging
 /// to produce a globally time-ordered `HitBatch`.
-#[allow(clippy::too_many_lines)]
 fn process_sections_to_batch(
     mmap: &memmap2::Mmap,
     sections: &[Tpx3Section],
@@ -295,20 +294,8 @@ fn process_sections_to_batch(
             });
         }
 
-        for rx_opt in receivers.iter().flatten() {
-            loop {
-                if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                    return;
-                }
-                match rx_opt.recv_timeout(Duration::from_millis(50)) {
-                    Ok(batch) => {
-                        heap.push(batch);
-                        break;
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
+        if !prime_heap(&receivers, &mut heap, cancel_flag) {
+            return;
         }
 
         while let Some(head) = heap.peek() {
@@ -328,18 +315,8 @@ fn process_sections_to_batch(
                     .get(batch.chip_id as usize)
                     .and_then(|opt| opt.as_ref())
                 {
-                    loop {
-                        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                            break;
-                        }
-                        match rx.recv_timeout(Duration::from_millis(50)) {
-                            Ok(next) => {
-                                heap.push(next);
-                                break;
-                            }
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                        }
+                    if let Some(next) = recv_batch_with_cancel(rx, cancel_flag) {
+                        heap.push(next);
                     }
                 }
 
@@ -371,4 +348,38 @@ fn process_sections_to_batch(
     });
 
     (full_batch, processed_hits)
+}
+
+fn recv_batch_with_cancel(
+    rx: &std::sync::mpsc::Receiver<PulseBatch>,
+    cancel_flag: &std::sync::atomic::AtomicBool,
+) -> Option<PulseBatch> {
+    loop {
+        if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(batch) => return Some(batch),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
+fn prime_heap(
+    receivers: &[Option<std::sync::mpsc::Receiver<PulseBatch>>],
+    heap: &mut BinaryHeap<PulseBatch>,
+    cancel_flag: &std::sync::atomic::AtomicBool,
+) -> bool {
+    for rx_opt in receivers.iter().flatten() {
+        match recv_batch_with_cancel(rx_opt, cancel_flag) {
+            Some(batch) => heap.push(batch),
+            None => {
+                if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
