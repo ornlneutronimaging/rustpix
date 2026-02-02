@@ -455,10 +455,18 @@ impl RustpixApp {
             self.active_counts()
         };
 
+        let (width, height) = self.current_dimensions();
+
         let Some(counts) = counts else {
-            return egui::ColorImage::new([512, 512], egui::Color32::BLACK);
+            return egui::ColorImage::new([width.max(1), height.max(1)], egui::Color32::BLACK);
         };
-        generate_histogram_image(counts, self.colormap, self.ui_state.log_scale)
+        generate_histogram_image(
+            counts,
+            width,
+            height,
+            self.colormap,
+            self.ui_state.log_scale,
+        )
     }
 
     pub(crate) fn update_pixel_masks(&mut self) {
@@ -699,6 +707,12 @@ impl RustpixApp {
         } else {
             self.active_counts()
         }
+    }
+
+    /// Get width/height for the active view.
+    pub fn current_dimensions(&self) -> (usize, usize) {
+        self.active_hyperstack()
+            .map_or((512, 512), |hs| (hs.width(), hs.height()))
     }
 
     pub(crate) fn start_export_hdf5(&mut self, path: PathBuf) {

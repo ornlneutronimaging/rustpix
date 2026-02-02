@@ -132,13 +132,12 @@ impl RustpixApp {
             && self.roi_state.polygon_draft.is_some()
             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
-        // Get data bounds based on view mode
-        // TODO: Neutron mode may have different bounds due to super-resolution
-        #[allow(clippy::match_same_arms)]
-        let data_size: f64 = match self.ui_state.view_mode {
-            ViewMode::Hits => 512.0,
-            ViewMode::Neutrons => 512.0,
-        };
+        let (data_width, data_height) = self.current_dimensions();
+        let data_width = data_width.max(1);
+        let data_height = data_height.max(1);
+        let data_width_f64 = usize_to_f64(data_width);
+        let data_height_f64 = usize_to_f64(data_height);
+        let data_extent = data_width_f64.max(data_height_f64);
 
         // Track if bin changed via interaction
         let mut new_tof_bin: Option<usize> = None;
@@ -257,9 +256,12 @@ impl RustpixApp {
                                     });
                                     ui.add_space(4.0);
 
-                                    let half = data_size / 2.0;
+                                    let half_x = data_width_f64 / 2.0;
+                                    let half_y = data_height_f64 / 2.0;
                                     #[allow(clippy::cast_possible_truncation)]
-                                    let data_size_f32 = data_size as f32;
+                                    let data_width_f32 = data_width_f64 as f32;
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    let data_height_f32 = data_height_f64 as f32;
 
                                     // Determine if we need to reset the plot view
                                     let should_reset = needs_plot_reset || reset_view_clicked;
@@ -331,9 +333,9 @@ impl RustpixApp {
                                         .data_aspect(1.0)
                                         .auto_bounds(Vec2b::new(false, false))
                                         .include_x(0.0)
-                                        .include_x(data_size)
+                                        .include_x(data_width_f64)
                                         .include_y(0.0)
-                                        .include_y(data_size)
+                                        .include_y(data_height_f64)
                                         .show_grid(Vec2b::new(show_grid, show_grid))
                                         .x_axis_label("X (pixels)")
                                         .y_axis_label("Y (pixels)")
@@ -349,32 +351,36 @@ impl RustpixApp {
                                     plot.show(ui, |plot_ui| {
                                         // Set explicit bounds on reset or double-click
                                         if should_reset || plot_ui.response().double_clicked() {
-                                            let pad = (data_size * 0.05).max(16.0);
+                                            let pad_x = (data_width_f64 * 0.05).max(16.0);
+                                            let pad_y = (data_height_f64 * 0.05).max(16.0);
 
                                             // Fit the full detector + padding to the current plot aspect.
                                             let plot_w = f64::from(plot_rect.width().max(1.0));
                                             let plot_h = f64::from(plot_rect.height().max(1.0));
                                             let available_aspect = plot_w / plot_h;
-                                            let data_span = data_size + pad * 2.0;
-                                            let mut x_half = data_span / 2.0;
-                                            let mut y_half = data_span / 2.0;
+                                            let data_span_x = data_width_f64 + pad_x * 2.0;
+                                            let data_span_y = data_height_f64 + pad_y * 2.0;
+                                            let data_aspect = data_span_x / data_span_y;
+                                            let mut x_half = data_span_x / 2.0;
+                                            let mut y_half = data_span_y / 2.0;
 
-                                            if available_aspect >= 1.0 {
+                                            if available_aspect >= data_aspect {
                                                 x_half = y_half * available_aspect;
                                             } else {
                                                 y_half = x_half / available_aspect;
                                             }
 
-                                            let center = data_size / 2.0;
+                                            let center_x = data_width_f64 / 2.0;
+                                            let center_y = data_height_f64 / 2.0;
                                             plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                                [center - x_half, center - y_half],
-                                                [center + x_half, center + y_half],
+                                                [center_x - x_half, center_y - y_half],
+                                                [center_x + x_half, center_y + y_half],
                                             ));
                                         }
                                         plot_ui.image(PlotImage::new(
                                             tex_id,
-                                            PlotPoint::new(half, half),
-                                            [data_size_f32, data_size_f32],
+                                            PlotPoint::new(half_x, half_y),
+                                            [data_width_f32, data_height_f32],
                                         ));
 
                                         if self.ui_state.view_mode == ViewMode::Hits
@@ -396,8 +402,8 @@ impl RustpixApp {
 
                                         let clamp_point = |point: PlotPoint| {
                                             PlotPoint::new(
-                                                point.x.clamp(0.0, data_size),
-                                                point.y.clamp(0.0, data_size),
+                                                point.x.clamp(0.0, data_width_f64),
+                                                point.y.clamp(0.0, data_height_f64),
                                             )
                                         };
 
@@ -622,11 +628,11 @@ impl RustpixApp {
                                                             pos,
                                                             min_roi_size,
                                                             0.0,
-                                                            data_size,
+                                                            data_extent,
                                                         );
                                                     } else {
                                                         self.roi_state
-                                                            .update_drag(pos, 0.0, data_size);
+                                                            .update_drag(pos, 0.0, data_extent);
                                                     }
                                                 }
                                             }
@@ -658,24 +664,23 @@ impl RustpixApp {
                                             let y = curr.y;
                                             if x >= 0.0
                                                 && y >= 0.0
-                                                && x < data_size
-                                                && y < data_size
+                                                && x < data_width_f64
+                                                && y < data_height_f64
                                             {
                                                 #[allow(
                                                     clippy::cast_possible_truncation,
                                                     clippy::cast_sign_loss
                                                 )]
-                                                let bound = data_size as usize;
                                                 let (Some(xi), Some(yi)) = (
-                                                    f64_to_usize_bounded(x, bound),
-                                                    f64_to_usize_bounded(y, bound),
+                                                    f64_to_usize_bounded(x, data_width),
+                                                    f64_to_usize_bounded(y, data_height),
                                                 ) else {
                                                     self.cursor_info = None;
                                                     return;
                                                 };
                                                 let count = counts_for_cursor
                                                     .as_ref()
-                                                    .map_or(0, |c| c[yi * 512 + xi]);
+                                                    .map_or(0, |c| c[yi * data_width + xi]);
                                                 self.cursor_info = Some((xi, yi, count));
                                             } else {
                                                 self.cursor_info = None;
