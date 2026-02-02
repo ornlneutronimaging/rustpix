@@ -215,6 +215,10 @@ pub struct RustpixApp {
     pub(crate) neutron_tof_bins: usize,
     /// Super-resolution factor for clustering extraction.
     pub(crate) super_resolution_factor: f64,
+    /// Super-resolution factor used for the current neutron batch.
+    neutron_super_resolution_factor: f64,
+    /// Super-resolution factor captured when clustering starts.
+    processing_super_resolution_factor: f64,
     /// Whether to weight extraction by TOT.
     pub(crate) weighted_by_tot: bool,
     /// Minimum TOT threshold for extraction.
@@ -293,6 +297,8 @@ impl Default for RustpixApp {
             hit_tof_bins: 200,
             neutron_tof_bins: 200,
             super_resolution_factor: 1.0,
+            neutron_super_resolution_factor: 1.0,
+            processing_super_resolution_factor: 1.0,
             weighted_by_tot: false,
             min_tot_threshold: 0,
             ui_state,
@@ -357,6 +363,8 @@ impl RustpixApp {
         self.neutron_hyperstack = None;
         self.neutron_counts = None;
         self.neutron_spectrum = None;
+        self.neutron_super_resolution_factor = 1.0;
+        self.processing_super_resolution_factor = self.super_resolution_factor;
         self.ui_state.view_mode = ViewMode::Hits;
         self.ui_state.spectrum.full_fov_visible = true;
         self.ui_state.panel_popups.show_roi_panel = false;
@@ -410,6 +418,7 @@ impl RustpixApp {
             self.processing.progress = 0.0;
             self.processing.status_text.clear();
             self.processing.status_text.push_str("Clustering...");
+            self.processing_super_resolution_factor = self.super_resolution_factor;
 
             let tx = self.tx.clone();
             let algo_type = self.algo_type;
@@ -739,7 +748,7 @@ impl RustpixApp {
             view_mode: self.ui_state.view_mode,
             flight_path_m: self.flight_path_m,
             tof_offset_ns: self.tof_offset_ns,
-            super_resolution_factor: self.super_resolution_factor,
+            super_resolution_factor: self.neutron_super_resolution_factor,
         };
 
         self.ui_state.export.in_progress = true;
@@ -1155,13 +1164,23 @@ impl RustpixApp {
         }
         let tof_max = self.statistics.tof_max;
         let bins = self.neutron_tof_bins.max(1);
+        let (width, height) = self
+            .hyperstack
+            .as_deref()
+            .map(|hs| (hs.width(), hs.height()))
+            .or_else(|| {
+                self.neutron_hyperstack
+                    .as_deref()
+                    .map(|hs| (hs.width(), hs.height()))
+            })
+            .unwrap_or((512, 512));
         let neutron_hs = Hyperstack3D::from_neutrons(
             &self.neutrons,
             bins,
             tof_max,
-            512,
-            512,
-            self.super_resolution_factor,
+            width,
+            height,
+            self.neutron_super_resolution_factor,
         );
         self.neutron_counts = Some(neutron_hs.project_xy());
         self.neutron_spectrum = Some(neutron_hs.full_spectrum());
@@ -1266,6 +1285,7 @@ impl RustpixApp {
             }
         }
 
+        let super_res_factor = self.processing_super_resolution_factor;
         if let Some(hit_hs) = self.hyperstack.as_deref() {
             let neutron_hs = Hyperstack3D::from_neutrons(
                 &neutrons,
@@ -1273,7 +1293,7 @@ impl RustpixApp {
                 hit_hs.tof_max(),
                 hit_hs.width(),
                 hit_hs.height(),
-                self.super_resolution_factor,
+                super_res_factor,
             );
             self.neutron_counts = Some(neutron_hs.project_xy());
             self.neutron_spectrum = Some(neutron_hs.full_spectrum());
@@ -1282,6 +1302,7 @@ impl RustpixApp {
         }
 
         self.neutrons = Arc::new(neutrons);
+        self.neutron_super_resolution_factor = super_res_factor;
     }
 
     fn handle_processing_error(&mut self, error: &str) {
@@ -1453,13 +1474,18 @@ fn prepare_neutron_export(
     if request.neutrons.is_empty() {
         return Err(anyhow!("No neutrons available"));
     }
-    let scaled = scale_neutrons_for_export(&request.neutrons, request.super_resolution_factor)?;
-    let (x_size, y_size) = neutron_dimensions_from(request.neutron_hyperstack.as_deref(), &scaled)
-        .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
+    let neutrons = request.neutrons.as_ref();
+    let (x_size, y_size) = neutron_dimensions_from(
+        request.neutron_hyperstack.as_deref(),
+        neutrons,
+        request.super_resolution_factor,
+    )
+    .ok_or_else(|| anyhow!("Unable to determine detector dimensions"))?;
     let compression_level = request.options.compression_level.min(9);
     let options = NeutronWriteOptions {
         x_size,
         y_size,
+        super_resolution_factor: request.super_resolution_factor,
         chunk_events: request.options.chunk_events.max(1),
         compression: Some(compression_level),
         shuffle: request.options.advanced.shuffle,
@@ -1473,7 +1499,7 @@ fn prepare_neutron_export(
     };
     let payload = NeutronEventBatch {
         tdc_timestamp_25ns: 0,
-        neutrons: scaled,
+        neutrons: neutrons.clone(),
     };
     Ok((Some(payload), Some(options)))
 }
@@ -1575,31 +1601,6 @@ fn optional_nonzero(value: f64) -> Option<f64> {
     } else {
         Some(value)
     }
-}
-
-fn scale_neutrons_for_export(
-    neutrons: &NeutronBatch,
-    super_resolution_factor: f64,
-) -> Result<NeutronBatch> {
-    let count = neutrons.len();
-    if count == 0 {
-        return Err(anyhow!("No neutrons available"));
-    }
-    let factor = if super_resolution_factor.is_finite() && super_resolution_factor > 0.0 {
-        super_resolution_factor
-    } else {
-        1.0
-    };
-    let mut batch = NeutronBatch::with_capacity(count);
-    for i in 0..count {
-        batch.x.push(neutrons.x[i] / factor);
-        batch.y.push(neutrons.y[i] / factor);
-        batch.tof.push(neutrons.tof[i]);
-        batch.tot.push(neutrons.tot[i]);
-        batch.n_hits.push(neutrons.n_hits[i]);
-        batch.chip_id.push(neutrons.chip_id[i]);
-    }
-    Ok(batch)
 }
 
 fn ensure_deflate_available() -> Result<()> {
@@ -1846,13 +1847,21 @@ fn hit_dimensions_from(
 fn neutron_dimensions_from(
     hyperstack: Option<&Hyperstack3D>,
     neutrons: &NeutronBatch,
+    super_resolution_factor: f64,
 ) -> Option<(u32, u32)> {
+    let factor = if super_resolution_factor.is_finite() && super_resolution_factor > 0.0 {
+        super_resolution_factor
+    } else {
+        1.0
+    };
     let mut max_x = 0u32;
     let mut max_y = 0u32;
     let mut saw_point = false;
     for (&x, &y) in neutrons.x.iter().zip(neutrons.y.iter()) {
-        let x_u32 = f64_to_u32_checked(x)?;
-        let y_u32 = f64_to_u32_checked(y)?;
+        let x_pixel = (x / factor).round();
+        let y_pixel = (y / factor).round();
+        let x_u32 = f64_to_u32_checked(x_pixel)?;
+        let y_u32 = f64_to_u32_checked(y_pixel)?;
         saw_point = true;
         if x_u32 > max_x {
             max_x = x_u32;

@@ -174,6 +174,8 @@ pub struct NeutronWriteOptions {
     pub x_size: u32,
     /// Detector Y size in pixels.
     pub y_size: u32,
+    /// Super-resolution factor used for neutron coordinates.
+    pub super_resolution_factor: f64,
     /// Chunk size along the event dimension.
     pub chunk_events: usize,
     /// Optional gzip compression level (0-9).
@@ -204,6 +206,7 @@ impl NeutronWriteOptions {
         Self {
             x_size,
             y_size,
+            super_resolution_factor: 1.0,
             chunk_events: 100_000,
             compression: Some(1),
             shuffle: true,
@@ -299,10 +302,10 @@ pub struct NeutronEventData {
     pub chip_id: Option<Vec<u8>>,
     /// Number of hits per neutron.
     pub n_hits: Option<Vec<u16>>,
-    /// X coordinates (pixels).
-    pub x: Option<Vec<u16>>,
-    /// Y coordinates (pixels).
-    pub y: Option<Vec<u16>>,
+    /// X coordinates (pixels, may be super-resolution).
+    pub x: Option<Vec<f64>>,
+    /// Y coordinates (pixels, may be super-resolution).
+    pub y: Option<Vec<f64>>,
     /// Event group attributes.
     pub attrs: EventAttributes,
 }
@@ -320,6 +323,8 @@ pub struct EventAttributes {
     pub tof_offset_ns: Option<f64>,
     /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
+    /// Super-resolution factor for neutron coordinates.
+    pub super_resolution_factor: Option<f64>,
 }
 
 /// Neutron event batch with pulse timestamp.
@@ -703,8 +708,8 @@ fn read_neutron_event_group(entry: &Group, group: &Group) -> Result<NeutronEvent
     let time_over_threshold_ns = read_dataset_vec_opt::<u64>(group, "time_over_threshold")?;
     let chip_id = read_dataset_vec_opt::<u8>(group, "chip_id")?;
     let n_hits = read_dataset_vec_opt::<u16>(group, "n_hits")?;
-    let x = read_dataset_vec_opt::<u16>(group, "x")?;
-    let y = read_dataset_vec_opt::<u16>(group, "y")?;
+    let x = read_dataset_vec_opt_f64(group, "x")?;
+    let y = read_dataset_vec_opt_f64(group, "y")?;
 
     let attrs = read_event_attrs(entry, group)?;
 
@@ -729,6 +734,7 @@ fn read_event_attrs(entry: &Group, group: &Group) -> Result<EventAttributes> {
         flight_path_m: read_attr_opt::<f64>(entry, "flight_path_m")?,
         tof_offset_ns: read_attr_opt::<f64>(entry, "tof_offset_ns")?,
         energy_axis_kind: read_attr_opt_string(entry, "energy_axis_kind")?,
+        super_resolution_factor: read_attr_opt::<f64>(group, "super_resolution_factor")?,
     };
 
     if let Some(value) = read_attr_opt::<f64>(group, "flight_path_m")? {
@@ -739,6 +745,9 @@ fn read_event_attrs(entry: &Group, group: &Group) -> Result<EventAttributes> {
     }
     if let Some(value) = read_attr_opt_string(group, "energy_axis_kind")? {
         attrs.energy_axis_kind = Some(value);
+    }
+    if let Some(value) = read_attr_opt::<f64>(group, "super_resolution_factor")? {
+        attrs.super_resolution_factor = Some(value);
     }
 
     Ok(attrs)
@@ -1035,7 +1044,7 @@ impl NeutronEventWriter {
         };
 
         let x = if options.include_xy {
-            Some(create_extendable_dataset::<u16>(
+            Some(create_extendable_dataset::<f64>(
                 group,
                 "x",
                 options.chunk_events,
@@ -1047,7 +1056,7 @@ impl NeutronEventWriter {
         };
 
         let y = if options.include_xy {
-            Some(create_extendable_dataset::<u16>(
+            Some(create_extendable_dataset::<f64>(
                 group,
                 "y",
                 options.chunk_events,
@@ -1077,6 +1086,10 @@ impl NeutronEventWriter {
         if let Some(ds) = &y {
             set_dataset_units(ds, "pixel")?;
         }
+        group
+            .new_attr::<f64>()
+            .create("super_resolution_factor")?
+            .write_scalar(&options.super_resolution_factor)?;
 
         Ok(Self {
             event_id,
@@ -1118,9 +1131,28 @@ impl NeutronEventWriter {
         let mut y_values = Vec::with_capacity(count);
         let mut event_id = Vec::with_capacity(count);
 
+        let super_res = if options.super_resolution_factor.is_finite()
+            && options.super_resolution_factor > 0.0
+        {
+            options.super_resolution_factor
+        } else {
+            1.0
+        };
+
         for (&x, &y) in batch.neutrons.x.iter().zip(batch.neutrons.y.iter()) {
-            let x_pixel = x.round();
-            let y_pixel = y.round();
+            if !x.is_finite() || !y.is_finite() {
+                return Err(Error::InvalidFormat(
+                    "neutron x/y must be finite".to_string(),
+                ));
+            }
+            if x < 0.0 || y < 0.0 {
+                return Err(Error::InvalidFormat(
+                    "neutron x/y must be non-negative for event_id mapping".to_string(),
+                ));
+            }
+
+            let x_pixel = (x / super_res).round();
+            let y_pixel = (y / super_res).round();
 
             if x_pixel < 0.0 || y_pixel < 0.0 {
                 return Err(Error::InvalidFormat(
@@ -1147,18 +1179,13 @@ impl NeutronEventWriter {
                 ));
             }
 
-            let x_u16 = u16::try_from(x_u32)
-                .map_err(|_| Error::InvalidFormat("neutron x exceeds u16 range".to_string()))?;
-            let y_u16 = u16::try_from(y_u32)
-                .map_err(|_| Error::InvalidFormat("neutron y exceeds u16 range".to_string()))?;
-
             let id = y_u32 * options.x_size + x_u32;
             let id = i32::try_from(id).map_err(|_| {
                 Error::InvalidFormat("event_id exceeds i32 range; adjust x_size/y_size".to_string())
             })?;
 
-            x_values.push(x_u16);
-            y_values.push(y_u16);
+            x_values.push(x);
+            y_values.push(y);
             event_id.push(id);
         }
 
@@ -2139,6 +2166,24 @@ fn read_dataset_vec_opt<T: H5Type>(group: &Group, name: &str) -> Result<Option<V
     }
 }
 
+fn read_dataset_vec_opt_f64(group: &Group, name: &str) -> Result<Option<Vec<f64>>> {
+    let Ok(dataset) = group.dataset(name) else {
+        return Ok(None);
+    };
+    if let Ok(values) = dataset.read_raw::<f64>() {
+        return Ok(Some(values));
+    }
+    if let Ok(values) = dataset.read_raw::<f32>() {
+        return Ok(Some(values.into_iter().map(f64::from).collect()));
+    }
+    if let Ok(values) = dataset.read_raw::<u16>() {
+        return Ok(Some(values.into_iter().map(f64::from).collect()));
+    }
+    Err(Error::InvalidFormat(format!(
+        "Unsupported datatype for dataset {name}"
+    )))
+}
+
 fn read_attr_opt<T: H5Type + Clone>(group: &Group, name: &str) -> Result<Option<T>> {
     match group.attr(name) {
         Ok(attr) => Ok(Some(attr.read_scalar::<T>()?)),
@@ -2235,6 +2280,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 512,
             y_size: 512,
+            super_resolution_factor: 1.0,
             chunk_events: 10,
             compression: None,
             shuffle: false,
@@ -2253,8 +2299,14 @@ mod tests {
         assert_eq!(data.event_id.len(), 2);
         assert_eq!(data.event_time_zero_ns, vec![12 * NS_PER_TICK]);
         assert_eq!(data.event_index, vec![0]);
-        assert_eq!(data.x.as_ref().unwrap(), &vec![10, 12]);
-        assert_eq!(data.y.as_ref().unwrap(), &vec![20, 22]);
+        let x = data.x.as_ref().unwrap();
+        let y = data.y.as_ref().unwrap();
+        assert_eq!(x.len(), 2);
+        assert_eq!(y.len(), 2);
+        assert!((x[0] - 10.2).abs() < 1e-6);
+        assert!((x[1] - 11.8).abs() < 1e-6);
+        assert!((y[0] - 20.4).abs() < 1e-6);
+        assert!((y[1] - 21.6).abs() < 1e-6);
         assert_eq!(
             data.time_over_threshold_ns.as_ref().unwrap(),
             &vec![175, 225]
@@ -2357,6 +2409,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 512,
             y_size: 512,
+            super_resolution_factor: 1.0,
             chunk_events: 2,
             compression: None,
             shuffle: false,
@@ -2523,6 +2576,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 10,
             y_size: 10,
+            super_resolution_factor: 1.0,
             chunk_events: 10,
             compression: None,
             shuffle: false,
@@ -2558,6 +2612,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 10,
             y_size: 10,
+            super_resolution_factor: 1.0,
             chunk_events: 10,
             compression: None,
             shuffle: false,
