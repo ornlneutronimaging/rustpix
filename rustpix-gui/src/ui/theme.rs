@@ -14,7 +14,6 @@ pub mod dark {
     pub const BG_DARK: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
     pub const BG_PANEL: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x1f);
     pub const BG_HEADER: Color32 = Color32::from_rgb(0x25, 0x25, 0x25);
-    pub const BG_INPUT: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
 
     // Border colors
     pub const BORDER: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
@@ -26,8 +25,8 @@ pub mod dark {
     pub const TEXT_DIM: Color32 = Color32::from_rgb(0x66, 0x66, 0x66);
 
     // Button colors
-    pub const BUTTON_BG: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
-    pub const BUTTON_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+    pub const BG_INPUT: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+    pub const BUTTON_HOVER: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 }
 
 /// Color palette for the application (light theme).
@@ -38,7 +37,6 @@ pub mod light {
     pub const BG_DARK: Color32 = Color32::from_rgb(0xf5, 0xf5, 0xf5);
     pub const BG_PANEL: Color32 = Color32::from_rgb(0xff, 0xff, 0xff);
     pub const BG_HEADER: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa);
-    pub const BG_INPUT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
 
     // Border colors
     pub const BORDER: Color32 = Color32::from_rgb(0xd0, 0xd0, 0xd0);
@@ -50,8 +48,8 @@ pub mod light {
     pub const TEXT_DIM: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 
     // Button colors
-    pub const BUTTON_BG: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
-    pub const BUTTON_HOVER: Color32 = Color32::from_rgb(0xdd, 0xdd, 0xdd);
+    pub const BG_INPUT: Color32 = Color32::from_rgb(0xf0, 0xf0, 0xf0);
+    pub const BUTTON_HOVER: Color32 = Color32::from_rgb(0xe6, 0xe6, 0xe6);
 }
 
 /// Shared accent colors (same for both themes).
@@ -70,17 +68,11 @@ pub struct ThemeColors {
     pub bg_dark: Color32,
     pub bg_panel: Color32,
     pub bg_header: Color32,
-    #[allow(dead_code)]
-    pub bg_input: Color32,
     pub border: Color32,
     pub border_light: Color32,
     pub text_primary: Color32,
     pub text_muted: Color32,
     pub text_dim: Color32,
-    #[allow(dead_code)]
-    pub button_bg: Color32,
-    #[allow(dead_code)]
-    pub button_hover: Color32,
 }
 
 impl ThemeColors {
@@ -101,28 +93,22 @@ impl ThemeColors {
                 bg_dark: dark::BG_DARK,
                 bg_panel: dark::BG_PANEL,
                 bg_header: dark::BG_HEADER,
-                bg_input: dark::BG_INPUT,
                 border: dark::BORDER,
                 border_light: dark::BORDER_LIGHT,
                 text_primary: dark::TEXT_PRIMARY,
                 text_muted: dark::TEXT_MUTED,
                 text_dim: dark::TEXT_DIM,
-                button_bg: dark::BUTTON_BG,
-                button_hover: dark::BUTTON_HOVER,
             }
         } else {
             Self {
                 bg_dark: light::BG_DARK,
                 bg_panel: light::BG_PANEL,
                 bg_header: light::BG_HEADER,
-                bg_input: light::BG_INPUT,
                 border: light::BORDER,
                 border_light: light::BORDER_LIGHT,
                 text_primary: light::TEXT_PRIMARY,
                 text_muted: light::TEXT_MUTED,
                 text_dim: light::TEXT_DIM,
-                button_bg: light::BUTTON_BG,
-                button_hover: light::BUTTON_HOVER,
             }
         }
     }

@@ -55,13 +55,12 @@ impl Statistics {
 
     /// Convert TOF range to milliseconds given TDC frequency.
     #[must_use]
-    #[allow(clippy::similar_names)]
     pub fn tof_range_ms(&self, tdc_frequency: f64) -> f64 {
-        let tdc_period_s = 1.0 / tdc_frequency;
-        let tdc_period_ms = tdc_period_s * 1000.0;
+        let tdc_period_seconds = 1.0 / tdc_frequency;
+        let tdc_period_millis = tdc_period_seconds * 1000.0;
         let max_units = f64::from(self.tof_max);
         if max_units > 0.0 {
-            tdc_period_ms
+            tdc_period_millis
         } else {
             0.0
         }

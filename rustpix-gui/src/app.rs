@@ -65,6 +65,15 @@ pub(crate) struct RoiSpectrumEntry {
     pub shape_hash: u64,
 }
 
+#[derive(Clone, Copy)]
+struct RoiSpectrumContext<'a> {
+    hyperstack: &'a Hyperstack3D,
+    width: usize,
+    height: usize,
+    n_bins: usize,
+    mask: Option<&'a PixelMaskData>,
+}
+
 #[derive(Default)]
 struct RoiSpectraCache {
     roi_revision: u64,
@@ -963,10 +972,17 @@ impl RustpixApp {
         mask: Option<&PixelMaskData>,
     ) -> Option<RoiSpectrumData> {
         let mask = Self::active_pixel_mask(mask, width, height);
+        let ctx = RoiSpectrumContext {
+            hyperstack,
+            width,
+            height,
+            n_bins,
+            mask,
+        };
         match &roi.shape {
-            RoiShape::Rectangle { x1, y1, x2, y2 } => Some(Self::compute_rect_spectrum(
-                *x1, *y1, *x2, *y2, hyperstack, width, height, n_bins, mask,
-            )),
+            RoiShape::Rectangle { x1, y1, x2, y2 } => {
+                Some(Self::compute_rect_spectrum(*x1, *y1, *x2, *y2, ctx))
+            }
             RoiShape::Polygon { vertices } => {
                 Self::compute_polygon_spectrum(vertices, hyperstack, width, height, n_bins, mask)
             }
@@ -1024,34 +1040,29 @@ impl RustpixApp {
         indices
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compute_rect_spectrum(
         x1: f64,
         y1: f64,
         x2: f64,
         y2: f64,
-        hyperstack: &Hyperstack3D,
-        width: usize,
-        height: usize,
-        n_bins: usize,
-        mask: Option<&PixelMaskData>,
+        ctx: RoiSpectrumContext<'_>,
     ) -> RoiSpectrumData {
-        let (x_start, x_end) = clamp_span(x1, x2, width);
-        let (y_start, y_end) = clamp_span(y1, y2, height);
+        let (x_start, x_end) = clamp_span(x1, x2, ctx.width);
+        let (y_start, y_end) = clamp_span(y1, y2, ctx.height);
         let area = (x2 - x1).abs() * (y2 - y1).abs();
 
         if x_start >= x_end || y_start >= y_end {
             return RoiSpectrumData {
-                counts: vec![0; n_bins],
+                counts: vec![0; ctx.n_bins],
                 area,
                 pixel_count: 0,
             };
         }
 
-        if let Some(mask) = mask {
+        if let Some(mask) = ctx.mask {
             let indices =
-                Self::collect_rect_indices(width, x_start, x_end, y_start, y_end, Some(mask));
-            let counts = Self::sum_counts_for_indices(hyperstack, n_bins, &indices);
+                Self::collect_rect_indices(ctx.width, x_start, x_end, y_start, y_end, Some(mask));
+            let counts = Self::sum_counts_for_indices(ctx.hyperstack, ctx.n_bins, &indices);
             let pixel_count = indices.len() as u64;
             return RoiSpectrumData {
                 counts,
@@ -1060,7 +1071,7 @@ impl RustpixApp {
             };
         }
 
-        let counts = hyperstack.spectrum(x_start..x_end, y_start..y_end);
+        let counts = ctx.hyperstack.spectrum(x_start..x_end, y_start..y_end);
         let pixel_count = (x_end - x_start) as u64 * (y_end - y_start) as u64;
         RoiSpectrumData {
             counts,

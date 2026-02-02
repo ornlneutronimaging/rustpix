@@ -52,6 +52,17 @@ struct SpectrumAxisConfig {
     tof_offset_ns: f64,
 }
 
+#[derive(Clone, Copy)]
+struct SpectrumLineConfig {
+    axis: SpectrumXAxis,
+    log_x: bool,
+    log_y: bool,
+    bin_width_ms: f64,
+    spec_bins: usize,
+    flight_path_m: f64,
+    tof_offset_ns: f64,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct CentralPanelInputs {
     counts_for_cursor: Option<Vec<u64>>,
@@ -162,6 +173,16 @@ struct SpectrumExportGeometry {
     axis_color: Rgba<u8>,
     grid_color: Rgba<u8>,
     label_color: Rgba<u8>,
+}
+
+struct HistogramDragContext<'a> {
+    ctx: &'a egui::Context,
+    plot_ui: &'a mut egui_plot::PlotUi,
+    response: &'a egui::Response,
+    pointer_pos: Option<PlotPoint>,
+    handle_radius: f64,
+    min_roi_size: f64,
+    data_extent: f64,
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -493,7 +514,7 @@ impl RustpixApp {
             ui.add_space(4.0);
             self.render_histogram_plot(ctx, ui, inputs, state, tex_id);
         } else {
-            self.render_histogram_empty(ui, colors);
+            Self::render_histogram_empty(ui, colors);
         }
     }
 
@@ -614,15 +635,16 @@ impl RustpixApp {
                     min_roi_size,
                 );
             } else {
-                self.handle_histogram_roi_drag(
+                let mut drag = HistogramDragContext {
                     ctx,
                     plot_ui,
-                    &response,
+                    response: &response,
                     pointer_pos,
-                    interaction.handle_radius,
+                    handle_radius: interaction.handle_radius,
                     min_roi_size,
-                    geometry.data_extent,
-                );
+                    data_extent: geometry.data_extent,
+                };
+                self.handle_histogram_roi_drag(&mut drag);
             }
 
             self.update_histogram_cursor_info(plot_ui, inputs);
@@ -642,7 +664,7 @@ impl RustpixApp {
         });
     }
 
-    fn render_histogram_empty(&self, ui: &mut egui::Ui, colors: &ThemeColors) {
+    fn render_histogram_empty(ui: &mut egui::Ui, colors: &ThemeColors) {
         let no_data_bg = if colors.bg_dark == super::theme::dark::BG_DARK {
             Color32::from_rgb(0x0d, 0x0d, 0x0d)
         } else {
@@ -914,20 +936,7 @@ impl RustpixApp {
                         let start_screen = plot_ui.screen_from_plot(start);
                         let current_screen = plot_ui.screen_from_plot(current);
                         let rect = Rect::from_two_pos(start_screen, current_screen);
-                        let painter = plot_ui
-                            .ctx()
-                            .layer_painter(LayerId::new(Order::Foreground, response.id))
-                            .with_clip_rect(response.rect);
-                        painter.rect_filled(
-                            rect,
-                            Rounding::same(2.0),
-                            Color32::from_rgba_unmultiplied(58, 130, 246, 32),
-                        );
-                        painter.rect_stroke(
-                            rect,
-                            Rounding::same(2.0),
-                            Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
-                        );
+                        Self::draw_zoom_rect(plot_ui, response, rect);
                     }
                 }
                 if response.drag_stopped() {
@@ -982,47 +991,39 @@ impl RustpixApp {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn handle_histogram_roi_drag(
-        &mut self,
-        ctx: &egui::Context,
-        plot_ui: &mut egui_plot::PlotUi,
-        response: &egui::Response,
-        pointer_pos: Option<PlotPoint>,
-        handle_radius: f64,
-        min_roi_size: f64,
-        data_extent: f64,
-    ) {
-        if response.drag_started() {
-            if let Some(pos) = pointer_pos {
-                if let Some((roi_id, index)) = self.roi_state.hit_test_vertex(pos, handle_radius) {
-                    let bounds = plot_ui.plot_bounds();
+    fn handle_histogram_roi_drag(&mut self, drag: &mut HistogramDragContext<'_>) {
+        if drag.response.drag_started() {
+            if let Some(pos) = drag.pointer_pos {
+                if let Some((roi_id, index)) =
+                    self.roi_state.hit_test_vertex(pos, drag.handle_radius)
+                {
+                    let bounds = drag.plot_ui.plot_bounds();
                     self.roi_state.start_vertex_drag(roi_id, index, pos, bounds);
                 } else if let Some((hit_id, handle)) =
-                    self.roi_state.hit_test_handle(pos, handle_radius)
+                    self.roi_state.hit_test_handle(pos, drag.handle_radius)
                 {
-                    let bounds = plot_ui.plot_bounds();
+                    let bounds = drag.plot_ui.plot_bounds();
                     self.roi_state.start_edit_drag(hit_id, handle, pos, bounds);
                 } else if let Some(hit_id) = self.roi_state.hit_test(pos) {
-                    let bounds = plot_ui.plot_bounds();
+                    let bounds = drag.plot_ui.plot_bounds();
                     self.roi_state.start_drag(hit_id, pos, bounds);
                 }
             }
         }
-        if response.dragged() {
-            if let Some(pos) = pointer_pos {
+        if drag.response.dragged() {
+            if let Some(pos) = drag.pointer_pos {
                 if self.roi_state.is_edit_dragging() {
                     self.roi_state.update_vertex_drag(pos);
                     self.roi_state
-                        .update_edit_drag(pos, min_roi_size, 0.0, data_extent);
+                        .update_edit_drag(pos, drag.min_roi_size, 0.0, drag.data_extent);
                 } else {
-                    self.roi_state.update_drag(pos, 0.0, data_extent);
+                    self.roi_state.update_drag(pos, 0.0, drag.data_extent);
                 }
             }
         }
-        if response.drag_stopped() {
+        if drag.response.drag_stopped() {
             if let Err(err) = self.roi_state.end_vertex_drag() {
-                self.notify_roi_error(ctx, err);
+                self.notify_roi_error(drag.ctx, err);
             }
             self.roi_state.end_edit_drag();
             self.roi_state.end_drag();
@@ -1163,6 +1164,23 @@ impl RustpixApp {
         };
         let expires_at = ctx.input(|i| i.time) + 2.5;
         self.ui_state.roi_warning = Some((message, expires_at));
+    }
+
+    fn draw_zoom_rect(plot_ui: &egui_plot::PlotUi, response: &egui::Response, rect: Rect) {
+        let painter = plot_ui
+            .ctx()
+            .layer_painter(LayerId::new(Order::Foreground, response.id))
+            .with_clip_rect(response.rect);
+        painter.rect_filled(
+            rect,
+            Rounding::same(2.0),
+            Color32::from_rgba_unmultiplied(58, 130, 246, 32),
+        );
+        painter.rect_stroke(
+            rect,
+            Rounding::same(2.0),
+            Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
+        );
     }
 
     /// Render the colorbar legend.
@@ -1324,16 +1342,7 @@ impl RustpixApp {
 
     fn commit_polygon_draft(&mut self, ctx: &egui::Context) {
         if let Err(err) = self.roi_state.commit_polygon(3) {
-            let message = match err {
-                crate::viewer::RoiCommitError::TooFewPoints => {
-                    "Polygon needs at least 3 points".to_string()
-                }
-                crate::viewer::RoiCommitError::SelfIntersecting => {
-                    "Polygon edges cannot self-intersect".to_string()
-                }
-            };
-            let expires_at = ctx.input(|i| i.time) + 2.5;
-            self.ui_state.roi_warning = Some((message, expires_at));
+            self.notify_roi_error(ctx, err);
             self.roi_state.cancel_draft();
         }
     }
@@ -1361,7 +1370,7 @@ impl RustpixApp {
         self.render_spectrum_range_panel(ctx);
 
         let Some(plot_data) = self.build_spectrum_plot_data(&colors, inputs) else {
-            self.render_spectrum_empty(ui);
+            Self::render_spectrum_empty(ui);
             return;
         };
 
@@ -1389,7 +1398,6 @@ impl RustpixApp {
             })
     }
 
-    #[allow(clippy::too_many_lines)]
     fn render_spectrum_toolbar(
         &mut self,
         ui: &mut egui::Ui,
@@ -1407,162 +1415,196 @@ impl RustpixApp {
                 ui.horizontal(|ui| {
                     let colors = ThemeColors::from_ui(ui);
                     let energy_available = self.flight_path_m > 0.0;
-                    let prev_axis = self.ui_state.spectrum_x_axis;
-
-                    egui::ComboBox::from_id_salt("tof_unit")
-                        .selected_text(self.ui_state.spectrum_x_axis.to_string())
-                        .width(90.0)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(
-                                    self.ui_state.spectrum_x_axis == SpectrumXAxis::ToFMs,
-                                    SpectrumXAxis::ToFMs.to_string(),
-                                )
-                                .clicked()
-                            {
-                                self.ui_state.spectrum_x_axis = SpectrumXAxis::ToFMs;
-                            }
-
-                            if ui
-                                .add_enabled(
-                                    energy_available,
-                                    egui::SelectableLabel::new(
-                                        self.ui_state.spectrum_x_axis == SpectrumXAxis::EnergyEv,
-                                        SpectrumXAxis::EnergyEv.to_string(),
-                                    ),
-                                )
-                                .on_hover_text(if energy_available {
-                                    "Energy axis"
-                                } else {
-                                    "Set flight path in spectrum settings"
-                                })
-                                .clicked()
-                            {
-                                self.ui_state.spectrum_x_axis = SpectrumXAxis::EnergyEv;
-                            }
-                        });
-
-                    if prev_axis != self.ui_state.spectrum_x_axis {
+                    if self.render_spectrum_axis_selector(ui, energy_available) {
                         actions.reset_clicked = true;
                     }
-
-                    if ui
-                        .add(
-                            egui::Button::new("⚙")
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(Stroke::new(1.0, colors.border_light))
-                                .rounding(Rounding::same(4.0)),
-                        )
-                        .on_hover_text("Spectrum settings")
-                        .clicked()
-                    {
-                        self.ui_state.show_spectrum_settings =
-                            !self.ui_state.show_spectrum_settings;
-                    }
-
-                    let data_button = egui::Button::new("")
-                        .min_size(egui::vec2(28.0, 22.0))
-                        .fill(if self.ui_state.show_roi_panel {
-                            colors.bg_header
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(Stroke::new(1.0, colors.border_light))
-                        .rounding(Rounding::same(4.0));
-                    let data_response = ui.add(data_button);
-                    let data_icon = Self::roi_icon_image(RoiToolbarIcon::Data, colors.text_muted);
-                    data_icon.paint_at(ui, data_response.rect.shrink(4.0));
-                    if data_response
-                        .on_hover_text("Spectrum data selection")
-                        .clicked()
-                    {
-                        self.ui_state.show_roi_panel = !self.ui_state.show_roi_panel;
-                        if !self.ui_state.show_roi_panel {
-                            self.ui_state.roi_rename_id = None;
-                        }
-                    }
+                    self.render_spectrum_settings_button(ui, &colors);
+                    self.render_spectrum_data_button(ui, &colors);
 
                     ui.add_space(8.0);
                     if self.render_spectrum_log_toggles(ui, &colors) {
                         actions.reset_clicked = true;
                     }
-
-                    let range_btn = egui::Button::new(
-                        egui::RichText::new("↔ Range")
-                            .size(10.0)
-                            .color(colors.text_dim),
-                    )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0));
-                    if ui.add(range_btn).clicked() {
-                        let opening = !self.ui_state.show_spectrum_range;
-                        self.ui_state.show_spectrum_range = opening;
-                        if opening {
-                            self.populate_spectrum_range_inputs();
-                        }
-                    }
+                    self.render_spectrum_range_button(ui, &colors);
 
                     ui.add_space(8.0);
                     Self::toolbar_divider(ui);
                     ui.add_space(8.0);
 
-                    let png_btn = egui::Button::new(
-                        egui::RichText::new("📷 PNG")
-                            .size(10.0)
-                            .color(colors.text_dim),
-                    )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0));
-                    if ui
-                        .add_enabled(has_full_spectrum, png_btn)
-                        .on_hover_text("Export spectrum as PNG")
-                        .clicked()
-                    {
-                        actions.export_png_clicked = true;
-                    }
-
-                    let csv_btn = egui::Button::new(
-                        egui::RichText::new("💾 CSV")
-                            .size(10.0)
-                            .color(colors.text_dim),
-                    )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0));
-                    if ui
-                        .add_enabled(has_visible_spectrum, csv_btn)
-                        .on_hover_text("Export spectrum as CSV")
-                        .clicked()
-                    {
-                        actions.export_csv_clicked = true;
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let colors = ThemeColors::from_ui(ui);
-                        self.render_spectrum_zoom_group(ui);
-                        ui.add_space(6.0);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("↺ Reset")
-                                        .size(10.0)
-                                        .color(colors.text_muted),
-                                )
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(Stroke::new(1.0, colors.border_light))
-                                .rounding(Rounding::same(4.0)),
-                            )
-                            .on_hover_text("Reset spectrum view (or double-click)")
-                            .clicked()
-                        {
-                            actions.reset_clicked = true;
-                        }
-                    });
+                    self.render_spectrum_export_buttons(
+                        ui,
+                        &colors,
+                        has_full_spectrum,
+                        has_visible_spectrum,
+                        &mut actions,
+                    );
+                    self.render_spectrum_reset_controls(ui, &colors, &mut actions);
                 });
             });
         actions
+    }
+
+    fn render_spectrum_axis_selector(&mut self, ui: &mut egui::Ui, energy_available: bool) -> bool {
+        let prev_axis = self.ui_state.spectrum_x_axis;
+        egui::ComboBox::from_id_salt("tof_unit")
+            .selected_text(self.ui_state.spectrum_x_axis.to_string())
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        self.ui_state.spectrum_x_axis == SpectrumXAxis::ToFMs,
+                        SpectrumXAxis::ToFMs.to_string(),
+                    )
+                    .clicked()
+                {
+                    self.ui_state.spectrum_x_axis = SpectrumXAxis::ToFMs;
+                }
+
+                if ui
+                    .add_enabled(
+                        energy_available,
+                        egui::SelectableLabel::new(
+                            self.ui_state.spectrum_x_axis == SpectrumXAxis::EnergyEv,
+                            SpectrumXAxis::EnergyEv.to_string(),
+                        ),
+                    )
+                    .on_hover_text(if energy_available {
+                        "Energy axis"
+                    } else {
+                        "Set flight path in spectrum settings"
+                    })
+                    .clicked()
+                {
+                    self.ui_state.spectrum_x_axis = SpectrumXAxis::EnergyEv;
+                }
+            });
+        prev_axis != self.ui_state.spectrum_x_axis
+    }
+
+    fn render_spectrum_settings_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        if ui
+            .add(
+                egui::Button::new("⚙")
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0)),
+            )
+            .on_hover_text("Spectrum settings")
+            .clicked()
+        {
+            self.ui_state.show_spectrum_settings = !self.ui_state.show_spectrum_settings;
+        }
+    }
+
+    fn render_spectrum_data_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let data_button = egui::Button::new("")
+            .min_size(egui::vec2(28.0, 22.0))
+            .fill(if self.ui_state.show_roi_panel {
+                colors.bg_header
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        let data_response = ui.add(data_button);
+        let data_icon = Self::roi_icon_image(RoiToolbarIcon::Data, colors.text_muted);
+        data_icon.paint_at(ui, data_response.rect.shrink(4.0));
+        if data_response
+            .on_hover_text("Spectrum data selection")
+            .clicked()
+        {
+            self.ui_state.show_roi_panel = !self.ui_state.show_roi_panel;
+            if !self.ui_state.show_roi_panel {
+                self.ui_state.roi_rename_id = None;
+            }
+        }
+    }
+
+    fn render_spectrum_range_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let range_btn = egui::Button::new(
+            egui::RichText::new("↔ Range")
+                .size(10.0)
+                .color(colors.text_dim),
+        )
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, colors.border_light))
+        .rounding(Rounding::same(4.0));
+        if ui.add(range_btn).clicked() {
+            let opening = !self.ui_state.show_spectrum_range;
+            self.ui_state.show_spectrum_range = opening;
+            if opening {
+                self.populate_spectrum_range_inputs();
+            }
+        }
+    }
+
+    fn render_spectrum_export_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        has_full_spectrum: bool,
+        has_visible_spectrum: bool,
+        actions: &mut SpectrumToolbarActions,
+    ) {
+        let png_btn = egui::Button::new(
+            egui::RichText::new("📷 PNG")
+                .size(10.0)
+                .color(colors.text_dim),
+        )
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, colors.border_light))
+        .rounding(Rounding::same(4.0));
+        if ui
+            .add_enabled(has_full_spectrum, png_btn)
+            .on_hover_text("Export spectrum as PNG")
+            .clicked()
+        {
+            actions.export_png_clicked = true;
+        }
+
+        let csv_btn = egui::Button::new(
+            egui::RichText::new("💾 CSV")
+                .size(10.0)
+                .color(colors.text_dim),
+        )
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::new(1.0, colors.border_light))
+        .rounding(Rounding::same(4.0));
+        if ui
+            .add_enabled(has_visible_spectrum, csv_btn)
+            .on_hover_text("Export spectrum as CSV")
+            .clicked()
+        {
+            actions.export_csv_clicked = true;
+        }
+    }
+
+    fn render_spectrum_reset_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        actions: &mut SpectrumToolbarActions,
+    ) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            self.render_spectrum_zoom_group(ui);
+            ui.add_space(6.0);
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("↺ Reset")
+                            .size(10.0)
+                            .color(colors.text_muted),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .rounding(Rounding::same(4.0)),
+                )
+                .on_hover_text("Reset spectrum view (or double-click)")
+                .clicked()
+            {
+                actions.reset_clicked = true;
+            }
+        });
     }
 
     #[allow(clippy::similar_names)]
@@ -1621,6 +1663,15 @@ impl RustpixApp {
 
         let (spec_bins, max_ms, bin_width_ms) =
             self.spectrum_bin_params(inputs.spectrum.as_deref(), inputs.n_bins);
+        let line_config = SpectrumLineConfig {
+            axis,
+            log_x,
+            log_y,
+            bin_width_ms,
+            spec_bins,
+            flight_path_m,
+            tof_offset_ns,
+        };
 
         let mut lines: Vec<(String, Color32, Vec<[f64; 2]>)> = Vec::new();
         let mut legend_items: Vec<(String, Color32)> = Vec::new();
@@ -1630,16 +1681,7 @@ impl RustpixApp {
 
         if self.ui_state.full_fov_visible {
             if let Some(full) = inputs.spectrum.as_ref() {
-                if let Some((points, stats)) = Self::build_spectrum_line(
-                    full,
-                    axis,
-                    log_x,
-                    log_y,
-                    bin_width_ms,
-                    spec_bins,
-                    flight_path_m,
-                    tof_offset_ns,
-                ) {
+                if let Some((points, stats)) = Self::build_spectrum_line(full, line_config) {
                     x_min = x_min.min(stats.x_min);
                     x_max = x_max.max(stats.x_max);
                     y_max = y_max.max(stats.y_max);
@@ -1656,16 +1698,7 @@ impl RustpixApp {
             let Some(data) = self.roi_spectrum_data(roi.id) else {
                 continue;
             };
-            if let Some((points, stats)) = Self::build_spectrum_line(
-                &data.counts,
-                axis,
-                log_x,
-                log_y,
-                bin_width_ms,
-                spec_bins,
-                flight_path_m,
-                tof_offset_ns,
-            ) {
+            if let Some((points, stats)) = Self::build_spectrum_line(&data.counts, line_config) {
                 x_min = x_min.min(stats.x_min);
                 x_max = x_max.max(stats.x_max);
                 y_max = y_max.max(stats.y_max);
@@ -1717,18 +1750,11 @@ impl RustpixApp {
         (spec_bins, max_ms, bin_width_ms)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build_spectrum_line(
         counts: &[u64],
-        axis: SpectrumXAxis,
-        log_x: bool,
-        log_y: bool,
-        bin_width_ms: f64,
-        spec_bins: usize,
-        flight_path_m: f64,
-        tof_offset_ns: f64,
+        config: SpectrumLineConfig,
     ) -> Option<(Vec<[f64; 2]>, SpectrumLineStats)> {
-        if counts.is_empty() || spec_bins == 0 {
+        if counts.is_empty() || config.spec_bins == 0 {
             return None;
         }
         let mut points = Vec::with_capacity(counts.len());
@@ -1736,17 +1762,19 @@ impl RustpixApp {
         let mut x_min_local = f64::INFINITY;
         let mut x_max_local = f64::NEG_INFINITY;
         for (i, &c) in counts.iter().enumerate() {
-            let tof_ms = usize_to_f64(i) * bin_width_ms;
-            let mut x = match axis {
+            let tof_ms = usize_to_f64(i) * config.bin_width_ms;
+            let mut x = match config.axis {
                 SpectrumXAxis::ToFMs => tof_ms,
                 SpectrumXAxis::EnergyEv => {
-                    let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns) else {
+                    let Some(e) =
+                        tof_ms_to_energy_ev(tof_ms, config.flight_path_m, config.tof_offset_ns)
+                    else {
                         continue;
                     };
                     e
                 }
             };
-            if log_x {
+            if config.log_x {
                 if x <= 0.0 {
                     continue;
                 }
@@ -1754,7 +1782,7 @@ impl RustpixApp {
             }
 
             let mut y = u64_to_f64(c);
-            if log_y {
+            if config.log_y {
                 y = u64_to_f64(c.max(1)).log10();
             }
             local_y_max = local_y_max.max(y);
@@ -1971,20 +1999,7 @@ impl RustpixApp {
                         let start_screen = plot_ui.screen_from_plot(start);
                         let current_screen = plot_ui.screen_from_plot(current);
                         let rect = Rect::from_two_pos(start_screen, current_screen);
-                        let painter = plot_ui
-                            .ctx()
-                            .layer_painter(LayerId::new(Order::Foreground, response.id))
-                            .with_clip_rect(response.rect);
-                        painter.rect_filled(
-                            rect,
-                            Rounding::same(2.0),
-                            Color32::from_rgba_unmultiplied(58, 130, 246, 32),
-                        );
-                        painter.rect_stroke(
-                            rect,
-                            Rounding::same(2.0),
-                            Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
-                        );
+                        Self::draw_zoom_rect(plot_ui, response, rect);
                     }
                 }
                 if response.drag_stopped() {
@@ -2129,7 +2144,7 @@ impl RustpixApp {
         }
     }
 
-    fn render_spectrum_empty(&self, ui: &mut egui::Ui) {
+    fn render_spectrum_empty(ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
         let no_data_bg = if colors.bg_dark == super::theme::dark::BG_DARK {
             Color32::from_rgb(0x0d, 0x0d, 0x0d)
