@@ -261,13 +261,11 @@ pub struct RustpixApp {
 impl Default for RustpixApp {
     fn default() -> Self {
         let (tx, rx) = channel();
-        let ui_state = UiState {
-            full_fov_visible: true,
-            show_hot_pixels: true,
-            exclude_masked_pixels: true,
-            cache_hits_in_memory: true,
-            ..Default::default()
-        };
+        let mut ui_state = UiState::default();
+        ui_state.spectrum.full_fov_visible = true;
+        ui_state.pixel_health.show_hot_pixels = true;
+        ui_state.pixel_health.exclude_masked_pixels = true;
+        ui_state.cache.cache_hits_in_memory = true;
         Self {
             selected_file: None,
             algo_type: AlgorithmType::Abs, // Default to ABS per design doc
@@ -328,7 +326,7 @@ impl RustpixApp {
         let tx = self.tx.clone();
         let detector_config = self.current_detector_config();
         let hit_tof_bins = self.hit_tof_bins;
-        let cache_hits = self.ui_state.cache_hits_in_memory;
+        let cache_hits = self.ui_state.cache.cache_hits_in_memory;
         let cancel_flag = self.processing.cancel_flag_clone();
         thread::spawn(move || {
             load_file_worker(
@@ -360,10 +358,10 @@ impl RustpixApp {
         self.neutron_counts = None;
         self.neutron_spectrum = None;
         self.ui_state.view_mode = ViewMode::Hits;
-        self.ui_state.full_fov_visible = true;
-        self.ui_state.show_roi_panel = false;
+        self.ui_state.spectrum.full_fov_visible = true;
+        self.ui_state.panel_popups.show_roi_panel = false;
         self.ui_state.roi_status = None;
-        self.ui_state.show_spectrum_range = false;
+        self.ui_state.panel_popups.show_spectrum_range = false;
         self.ui_state.spectrum_x_range = None;
         self.ui_state.spectrum_y_range = None;
         self.ui_state.spectrum_x_min_input.clear();
@@ -378,9 +376,9 @@ impl RustpixApp {
         self.ui_state.spectrum_last_plot_rect = None;
         self.ui_state.roi_rename_id = None;
         self.ui_state.roi_rename_text.clear();
-        self.ui_state.export_in_progress = false;
-        self.ui_state.export_progress = 0.0;
-        self.ui_state.export_status.clear();
+        self.ui_state.export.in_progress = false;
+        self.ui_state.export.progress = 0.0;
+        self.ui_state.export.status.clear();
         self.roi_state.clear();
         self.roi_spectra_hits = RoiSpectraCache::default();
         self.roi_spectra_neutrons = RoiSpectraCache::default();
@@ -455,7 +453,7 @@ impl RustpixApp {
 
     /// Generate histogram image from current view (hits or neutrons).
     pub fn generate_histogram(&self) -> egui::ColorImage {
-        let counts = if self.ui_state.slicer_enabled {
+        let counts = if self.ui_state.histogram.slicer_enabled {
             // Get current TOF slice from active hyperstack
             self.active_hyperstack()
                 .and_then(|hs| hs.slice_tof(self.ui_state.current_tof_bin))
@@ -474,7 +472,7 @@ impl RustpixApp {
             width,
             height,
             self.colormap,
-            self.ui_state.log_scale,
+            self.ui_state.histogram.log_scale,
         )
     }
 
@@ -558,14 +556,14 @@ impl RustpixApp {
         });
 
         self.update_masked_spectrum();
-        if self.ui_state.exclude_masked_pixels {
+        if self.ui_state.pixel_health.exclude_masked_pixels {
             self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
         }
     }
 
     pub(crate) fn update_masked_spectrum(&mut self) {
         self.masked_tof_spectrum = None;
-        if !self.ui_state.exclude_masked_pixels {
+        if !self.ui_state.pixel_health.exclude_masked_pixels {
             return;
         }
         let Some(hyperstack) = self.hyperstack.as_deref() else {
@@ -690,7 +688,7 @@ impl RustpixApp {
     pub fn tof_spectrum(&self) -> Option<&[u64]> {
         match self.ui_state.view_mode {
             ViewMode::Hits => {
-                if self.ui_state.exclude_masked_pixels {
+                if self.ui_state.pixel_health.exclude_masked_pixels {
                     self.masked_tof_spectrum
                         .as_deref()
                         .or(self.tof_spectrum.as_deref())
@@ -710,7 +708,7 @@ impl RustpixApp {
 
     /// Get counts for current view (projection or slice).
     pub fn current_counts(&self) -> Option<&[u64]> {
-        if self.ui_state.slicer_enabled {
+        if self.ui_state.histogram.slicer_enabled {
             self.active_hyperstack()
                 .and_then(|hs| hs.slice_tof(self.ui_state.current_tof_bin))
         } else {
@@ -725,14 +723,14 @@ impl RustpixApp {
     }
 
     pub(crate) fn start_export_hdf5(&mut self, path: PathBuf) {
-        if self.ui_state.export_in_progress {
+        if self.ui_state.export.in_progress {
             return;
         }
 
         let tx = self.tx.clone();
         let request = ExportHdf5Request {
             path,
-            options: self.ui_state.export_options.clone(),
+            options: self.ui_state.export.options.clone(),
             hit_batch: self.hit_batch.clone(),
             neutrons: Arc::clone(&self.neutrons),
             hyperstack: self.hyperstack.clone(),
@@ -744,9 +742,9 @@ impl RustpixApp {
             super_resolution_factor: self.super_resolution_factor,
         };
 
-        self.ui_state.export_in_progress = true;
-        self.ui_state.export_progress = 0.0;
-        self.ui_state.export_status = "Preparing export".to_string();
+        self.ui_state.export.in_progress = true;
+        self.ui_state.export.progress = 0.0;
+        self.ui_state.export.status = "Preparing export".to_string();
 
         thread::spawn(move || {
             let _ = tx.send(AppMessage::ExportProgress(
@@ -934,12 +932,13 @@ impl RustpixApp {
         let width = hyperstack.width();
         let height = hyperstack.height();
         let n_bins = hyperstack.n_tof_bins();
-        let mask =
-            if self.ui_state.exclude_masked_pixels && self.ui_state.view_mode == ViewMode::Hits {
-                self.pixel_masks.as_ref()
-            } else {
-                None
-            };
+        let mask = if self.ui_state.pixel_health.exclude_masked_pixels
+            && self.ui_state.view_mode == ViewMode::Hits
+        {
+            self.pixel_masks.as_ref()
+        } else {
+            None
+        };
         let mut spectra = HashMap::with_capacity(self.roi_state.rois.len());
 
         for roi in &self.roi_state.rois {
@@ -1145,7 +1144,7 @@ impl RustpixApp {
         self.update_pixel_masks();
         self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
         self.ui_state.current_tof_bin = 0;
-        self.ui_state.needs_plot_reset = true;
+        self.ui_state.histogram_view.needs_plot_reset = true;
         self.texture = None;
     }
 
@@ -1169,7 +1168,7 @@ impl RustpixApp {
         self.neutron_hyperstack = Some(Arc::new(neutron_hs));
         self.neutron_data_revision = self.neutron_data_revision.wrapping_add(1);
         self.ui_state.current_tof_bin = 0;
-        self.ui_state.needs_plot_reset = true;
+        self.ui_state.histogram_view.needs_plot_reset = true;
         self.texture = None;
     }
 
@@ -1238,7 +1237,7 @@ impl RustpixApp {
         self.update_pixel_masks();
         self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
 
-        self.ui_state.needs_plot_reset = true;
+        self.ui_state.histogram_view.needs_plot_reset = true;
 
         let img = self.generate_histogram();
         self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
@@ -1291,9 +1290,9 @@ impl RustpixApp {
     }
 
     fn handle_export_progress(&mut self, progress: f32, status: String) {
-        self.ui_state.export_in_progress = true;
-        self.ui_state.export_progress = progress;
-        self.ui_state.export_status = status;
+        self.ui_state.export.in_progress = true;
+        self.ui_state.export.progress = progress;
+        self.ui_state.export.status = status;
     }
 
     fn handle_export_complete(
@@ -1303,9 +1302,9 @@ impl RustpixApp {
         size_bytes: u64,
         warnings: &[String],
     ) {
-        self.ui_state.export_in_progress = false;
-        self.ui_state.export_progress = 1.0;
-        self.ui_state.export_status = if warnings.is_empty() {
+        self.ui_state.export.in_progress = false;
+        self.ui_state.export.progress = 1.0;
+        self.ui_state.export.status = if warnings.is_empty() {
             "Export complete".to_string()
         } else {
             "Export complete (warnings)".to_string()
@@ -1333,8 +1332,8 @@ impl RustpixApp {
     }
 
     fn handle_export_error(&mut self, ctx: &egui::Context, error: &str) {
-        self.ui_state.export_in_progress = false;
-        self.ui_state.export_status = "Export failed".to_string();
+        self.ui_state.export.in_progress = false;
+        self.ui_state.export.status = "Export failed".to_string();
         self.ui_state.roi_warning = Some((
             format!("HDF5 export failed: {error}"),
             ctx.input(|i| i.time + 6.0),
@@ -1408,7 +1407,7 @@ fn prepare_hit_export(
     request: &ExportHdf5Request,
     tx: &Sender<AppMessage>,
 ) -> Result<(Option<EventBatch>, Option<HitWriteOptions>)> {
-    if !request.options.include_hits {
+    if !request.options.datasets.hits {
         return Ok((None, None));
     }
     send_export_progress(tx, 0.15, "Preparing hits");
@@ -1427,14 +1426,14 @@ fn prepare_hit_export(
         y_size,
         chunk_events: request.options.chunk_events.max(1),
         compression: Some(compression_level),
-        shuffle: request.options.shuffle,
+        shuffle: request.options.advanced.shuffle,
         flight_path_m: optional_positive(request.flight_path_m),
         tof_offset_ns: optional_nonzero(request.tof_offset_ns),
         energy_axis_kind: Some("tof".to_string()),
-        include_xy: request.options.include_xy,
-        include_tot: request.options.include_tot,
-        include_chip_id: request.options.include_chip_id,
-        include_cluster_id: request.options.include_cluster_id,
+        include_xy: request.options.fields.xy,
+        include_tot: request.options.fields.tot,
+        include_chip_id: request.options.fields.chip_id,
+        include_cluster_id: request.options.cluster_fields.cluster_id,
     };
     let payload = EventBatch {
         tdc_timestamp_25ns: 0,
@@ -1447,7 +1446,7 @@ fn prepare_neutron_export(
     request: &ExportHdf5Request,
     tx: &Sender<AppMessage>,
 ) -> Result<(Option<NeutronEventBatch>, Option<NeutronWriteOptions>)> {
-    if !request.options.include_neutrons {
+    if !request.options.datasets.neutrons {
         return Ok((None, None));
     }
     send_export_progress(tx, 0.35, "Preparing neutrons");
@@ -1463,14 +1462,14 @@ fn prepare_neutron_export(
         y_size,
         chunk_events: request.options.chunk_events.max(1),
         compression: Some(compression_level),
-        shuffle: request.options.shuffle,
+        shuffle: request.options.advanced.shuffle,
         flight_path_m: optional_positive(request.flight_path_m),
         tof_offset_ns: optional_nonzero(request.tof_offset_ns),
         energy_axis_kind: Some("tof".to_string()),
-        include_xy: request.options.include_xy,
-        include_tot: request.options.include_tot,
-        include_chip_id: request.options.include_chip_id,
-        include_n_hits: request.options.include_n_hits,
+        include_xy: request.options.fields.xy,
+        include_tot: request.options.fields.tot,
+        include_chip_id: request.options.fields.chip_id,
+        include_n_hits: request.options.cluster_fields.n_hits,
     };
     let payload = NeutronEventBatch {
         tdc_timestamp_25ns: 0,
@@ -1483,7 +1482,7 @@ fn prepare_histogram_export(
     request: &ExportHdf5Request,
     tx: &Sender<AppMessage>,
 ) -> Result<(Option<HistogramWriteData>, Option<HistogramWriteOptions>)> {
-    if !request.options.include_histogram {
+    if !request.options.datasets.histogram {
         return Ok((None, None));
     }
     send_export_progress(tx, 0.55, "Preparing histogram");
@@ -1499,12 +1498,12 @@ fn prepare_histogram_export(
     let compression_level = request.options.compression_level.min(9);
     let mut options = HistogramWriteOptions {
         compression: Some(compression_level),
-        shuffle: request.options.shuffle,
+        shuffle: request.options.advanced.shuffle,
         flight_path_m: optional_positive(request.flight_path_m),
         tof_offset_ns: optional_nonzero(request.tof_offset_ns),
         ..Default::default()
     };
-    if request.options.hist_chunk_override {
+    if request.options.advanced.hist_chunk_override {
         options.chunk_counts = Some([
             request.options.hist_chunk_rot.clamp(1, 1),
             request.options.hist_chunk_y.clamp(1, height),
@@ -1519,7 +1518,7 @@ fn prepare_mask_export(
     request: &ExportHdf5Request,
     tx: &Sender<AppMessage>,
 ) -> Result<(Option<PixelMaskWriteData>, Option<PixelMaskWriteOptions>)> {
-    if !request.options.include_pixel_masks {
+    if !request.options.masks.pixel_masks {
         return Ok((None, None));
     }
     send_export_progress(tx, 0.7, "Preparing pixel masks");
@@ -1540,7 +1539,7 @@ fn prepare_mask_export(
     };
     let options = PixelMaskWriteOptions {
         compression: Some(compression_level),
-        shuffle: request.options.shuffle,
+        shuffle: request.options.advanced.shuffle,
     };
     Ok((Some(payload), Some(options)))
 }
@@ -1629,16 +1628,16 @@ fn validate_hdf5_export(path: &Path, options: &Hdf5ExportOptions) -> Result<Vec<
         .map_err(|err| anyhow!("Missing entry group: {err}"))?;
     let mut warnings = Vec::new();
 
-    if options.include_hits {
+    if options.datasets.hits {
         validate_hits_group(&entry, options, &mut warnings);
     }
-    if options.include_neutrons {
+    if options.datasets.neutrons {
         validate_neutrons_group(&entry, options, &mut warnings);
     }
-    if options.include_histogram {
+    if options.datasets.histogram {
         validate_histogram_group(&entry, options, &mut warnings);
     }
-    if options.include_pixel_masks {
+    if options.masks.pixel_masks {
         validate_pixel_mask_group(&entry, options, &mut warnings);
     }
 
@@ -1665,16 +1664,16 @@ fn validate_hits_group(
             warnings.push(format!("Missing hits dataset: {name}"));
         }
     }
-    if options.include_tot && group.dataset("time_over_threshold").is_err() {
+    if options.fields.tot && group.dataset("time_over_threshold").is_err() {
         warnings.push("Missing hits dataset: time_over_threshold".to_string());
     }
-    if options.include_chip_id && group.dataset("chip_id").is_err() {
+    if options.fields.chip_id && group.dataset("chip_id").is_err() {
         warnings.push("Missing hits dataset: chip_id".to_string());
     }
-    if options.include_cluster_id && group.dataset("cluster_id").is_err() {
+    if options.cluster_fields.cluster_id && group.dataset("cluster_id").is_err() {
         warnings.push("Missing hits dataset: cluster_id".to_string());
     }
-    if options.include_xy {
+    if options.fields.xy {
         if group.dataset("x").is_err() {
             warnings.push("Missing hits dataset: x".to_string());
         }
@@ -1714,16 +1713,16 @@ fn validate_neutrons_group(
             warnings.push(format!("Missing neutrons dataset: {name}"));
         }
     }
-    if options.include_tot && group.dataset("time_over_threshold").is_err() {
+    if options.fields.tot && group.dataset("time_over_threshold").is_err() {
         warnings.push("Missing neutrons dataset: time_over_threshold".to_string());
     }
-    if options.include_chip_id && group.dataset("chip_id").is_err() {
+    if options.fields.chip_id && group.dataset("chip_id").is_err() {
         warnings.push("Missing neutrons dataset: chip_id".to_string());
     }
-    if options.include_n_hits && group.dataset("n_hits").is_err() {
+    if options.cluster_fields.n_hits && group.dataset("n_hits").is_err() {
         warnings.push("Missing neutrons dataset: n_hits".to_string());
     }
-    if options.include_xy {
+    if options.fields.xy {
         if group.dataset("x").is_err() {
             warnings.push("Missing neutrons dataset: x".to_string());
         }
@@ -1807,7 +1806,7 @@ fn check_dataset_filters(
             warnings.push(format!("Missing deflate compression on {label}"));
         }
     }
-    if options.shuffle {
+    if options.advanced.shuffle {
         let has_shuffle = filters.iter().any(|f| matches!(f, Filter::Shuffle));
         if !has_shuffle {
             warnings.push(format!("Missing shuffle filter on {label}"));

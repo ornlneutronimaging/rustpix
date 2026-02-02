@@ -53,7 +53,7 @@ impl RustpixApp {
             || !self.neutrons.is_empty()
             || self.hyperstack.is_some()
             || self.neutron_hyperstack.is_some();
-        let can_export = can_export && !self.ui_state.export_in_progress;
+        let can_export = can_export && !self.ui_state.export.in_progress;
 
         ui.label(
             egui::RichText::new("RUSTPIX")
@@ -81,7 +81,7 @@ impl RustpixApp {
         )
         .clicked()
         {
-            self.ui_state.show_export_dialog = true;
+            self.ui_state.export.show_dialog = true;
         }
 
         Self::top_bar_separator(ui, colors);
@@ -145,7 +145,7 @@ impl RustpixApp {
             )
             .clicked()
             {
-                self.ui_state.show_app_settings = !self.ui_state.show_app_settings;
+                self.ui_state.panels.show_app_settings = !self.ui_state.panels.show_app_settings;
             }
 
             self.render_view_mode_toggle(ui);
@@ -362,15 +362,15 @@ impl RustpixApp {
     }
 
     fn render_export_status(&self, ui: &mut egui::Ui, colors: ThemeColors) {
-        if self.ui_state.export_in_progress {
+        if self.ui_state.export.in_progress {
             Self::status_separator(ui, colors);
             ui.label(
-                egui::RichText::new(&self.ui_state.export_status)
+                egui::RichText::new(&self.ui_state.export.status)
                     .size(11.0)
                     .color(colors.text_muted),
             );
             ui.add(
-                egui::ProgressBar::new(self.ui_state.export_progress)
+                egui::ProgressBar::new(self.ui_state.export.progress)
                     .desired_width(120.0)
                     .show_percentage(),
             );
@@ -474,7 +474,7 @@ impl RustpixApp {
     /// Render cache vs streaming toggle in the top bar.
     fn render_cache_toggle(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
-        let cache_on = self.ui_state.cache_hits_in_memory;
+        let cache_on = self.ui_state.cache.cache_hits_in_memory;
         let on_tint = if cache_on {
             Color32::WHITE
         } else {
@@ -515,7 +515,7 @@ impl RustpixApp {
                         .min_size(egui::vec2(28.0, 0.0));
 
                     if ui.add(cache_btn).on_hover_text(cache_tooltip).clicked() {
-                        self.ui_state.cache_hits_in_memory = true;
+                        self.ui_state.cache.cache_hits_in_memory = true;
                     }
 
                     let stream_btn = egui::Button::image(off_icon)
@@ -529,7 +529,7 @@ impl RustpixApp {
                         .min_size(egui::vec2(28.0, 0.0));
 
                     if ui.add(stream_btn).on_hover_text(stream_tooltip).clicked() {
-                        self.ui_state.cache_hits_in_memory = false;
+                        self.ui_state.cache.cache_hits_in_memory = false;
                     }
                 });
             });
@@ -713,17 +713,17 @@ impl RustpixApp {
         let n_bins = self.n_tof_bins();
         ui.add_enabled_ui(n_bins > 0, |ui| {
             if ui
-                .checkbox(&mut self.ui_state.slicer_enabled, "TOF Slicer")
+                .checkbox(&mut self.ui_state.histogram.slicer_enabled, "TOF Slicer")
                 .changed()
             {
                 self.texture = None;
             }
         });
 
-        ui.checkbox(&mut self.ui_state.show_histogram, "Spectrum");
+        ui.checkbox(&mut self.ui_state.histogram.show, "Spectrum");
 
         if ui
-            .checkbox(&mut self.ui_state.log_scale, "Log scale")
+            .checkbox(&mut self.ui_state.histogram.log_scale, "Log scale")
             .changed()
         {
             self.texture = None;
@@ -747,7 +747,7 @@ impl RustpixApp {
 
         self.render_clustering_algorithm(ui);
 
-        if self.ui_state.show_clustering_params {
+        if self.ui_state.panels.show_clustering_params {
             self.render_clustering_params(ui, &colors);
         }
 
@@ -783,7 +783,8 @@ impl RustpixApp {
                 .on_hover_text("Algorithm parameters")
                 .clicked()
             {
-                self.ui_state.show_clustering_params = !self.ui_state.show_clustering_params;
+                self.ui_state.panels.show_clustering_params =
+                    !self.ui_state.panels.show_clustering_params;
             }
         });
     }
@@ -1351,7 +1352,7 @@ impl RustpixApp {
         Self::render_pixel_health_counts(ui, &colors, dead_count, hot_count);
         self.render_pixel_health_overlays(ui);
 
-        if self.ui_state.show_pixel_health_settings {
+        if self.ui_state.pixel_health.show_pixel_health_settings {
             self.render_pixel_health_settings(ui, &colors, mean, std_dev, hot_threshold);
         }
     }
@@ -1367,8 +1368,8 @@ impl RustpixApp {
                     .on_hover_text("Pixel mask settings")
                     .clicked()
                 {
-                    self.ui_state.show_pixel_health_settings =
-                        !self.ui_state.show_pixel_health_settings;
+                    self.ui_state.pixel_health.show_pixel_health_settings =
+                        !self.ui_state.pixel_health.show_pixel_health_settings;
                 }
             });
         });
@@ -1415,16 +1416,16 @@ impl RustpixApp {
     fn render_pixel_health_overlays(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.checkbox(
-            &mut self.ui_state.show_hot_pixels,
+            &mut self.ui_state.pixel_health.show_hot_pixels,
             "Show hot pixels overlay",
         );
-        let mut exclude_masked = self.ui_state.exclude_masked_pixels;
+        let mut exclude_masked = self.ui_state.pixel_health.exclude_masked_pixels;
         let exclude_response = ui.checkbox(
             &mut exclude_masked,
             "Exclude masked pixels from spectra/stats",
         );
         if exclude_response.changed() {
-            self.ui_state.exclude_masked_pixels = exclude_masked;
+            self.ui_state.pixel_health.exclude_masked_pixels = exclude_masked;
             self.update_masked_spectrum();
             self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
         }
@@ -1471,8 +1472,8 @@ impl RustpixApp {
 
     /// Render floating settings windows (app + spectrum).
     pub(crate) fn render_settings_windows(&mut self, ctx: &egui::Context) {
-        if self.ui_state.show_app_settings {
-            let mut show_app_settings = self.ui_state.show_app_settings;
+        if self.ui_state.panels.show_app_settings {
+            let mut show_app_settings = self.ui_state.panels.show_app_settings;
             egui::Window::new("Hyperstack Settings")
                 .open(&mut show_app_settings)
                 .collapsible(false)
@@ -1519,11 +1520,11 @@ impl RustpixApp {
                             }
                         });
                 });
-            self.ui_state.show_app_settings = show_app_settings;
+            self.ui_state.panels.show_app_settings = show_app_settings;
         }
 
-        if self.ui_state.show_spectrum_settings {
-            let mut show_spectrum_settings = self.ui_state.show_spectrum_settings;
+        if self.ui_state.panels.show_spectrum_settings {
+            let mut show_spectrum_settings = self.ui_state.panels.show_spectrum_settings;
             egui::Window::new("Spectrum Settings")
                 .open(&mut show_spectrum_settings)
                 .collapsible(false)
@@ -1550,16 +1551,16 @@ impl RustpixApp {
                         );
                     });
                 });
-            self.ui_state.show_spectrum_settings = show_spectrum_settings;
+            self.ui_state.panels.show_spectrum_settings = show_spectrum_settings;
         }
 
-        if self.ui_state.show_export_dialog {
+        if self.ui_state.export.show_dialog {
             self.render_export_dialog(ctx);
         }
     }
 
     fn render_export_dialog(&mut self, ctx: &egui::Context) {
-        let mut open = self.ui_state.show_export_dialog;
+        let mut open = self.ui_state.export.show_dialog;
         let mut should_close = false;
         let availability = self.export_availability();
         egui::Window::new("Export HDF5")
@@ -1571,10 +1572,10 @@ impl RustpixApp {
                 let hit_count = self.statistics.hit_count;
                 let neutron_count = self.statistics.neutron_count;
                 let view_mode = self.ui_state.view_mode;
-                let export_in_progress = self.ui_state.export_in_progress;
+                let export_in_progress = self.ui_state.export.in_progress;
 
                 let save_clicked = {
-                    let options = &mut self.ui_state.export_options;
+                    let options = &mut self.ui_state.export.options;
                     Self::apply_export_availability(options, availability);
                     Self::render_export_header(ui, &colors, options);
                     ui.add_space(8.0);
@@ -1589,7 +1590,7 @@ impl RustpixApp {
                     if !availability.deflate.is_available() {
                         Self::render_export_deflate_warning(ui);
                     }
-                    if options.advanced {
+                    if options.advanced.enabled {
                         Self::render_export_advanced(ui, &colors, options);
                     }
                     ui.add_space(10.0);
@@ -1606,7 +1607,7 @@ impl RustpixApp {
         if should_close {
             open = false;
         }
-        self.ui_state.show_export_dialog = open;
+        self.ui_state.export.show_dialog = open;
     }
 
     fn export_availability(&self) -> ExportAvailability {
@@ -1632,16 +1633,16 @@ impl RustpixApp {
         availability: ExportAvailability,
     ) {
         if !availability.hits.is_available() {
-            options.include_hits = false;
+            options.datasets.hits = false;
         }
         if !availability.neutrons.is_available() {
-            options.include_neutrons = false;
+            options.datasets.neutrons = false;
         }
         if !availability.histogram.is_available() {
-            options.include_histogram = false;
+            options.datasets.histogram = false;
         }
         if !availability.masks.is_available() {
-            options.include_pixel_masks = false;
+            options.masks.pixel_masks = false;
         }
     }
 
@@ -1663,7 +1664,7 @@ impl RustpixApp {
                     .on_hover_text("Advanced export options")
                     .clicked()
                 {
-                    options.advanced = !options.advanced;
+                    options.advanced.enabled = !options.advanced.enabled;
                 }
             });
         });
@@ -1684,7 +1685,7 @@ impl RustpixApp {
         };
         ui.add_enabled(
             availability.hits.is_available(),
-            egui::Checkbox::new(&mut options.include_hits, hits_label),
+            egui::Checkbox::new(&mut options.datasets.hits, hits_label),
         );
 
         let neutrons_label = if neutron_count > 0 {
@@ -1694,18 +1695,18 @@ impl RustpixApp {
         };
         ui.add_enabled(
             availability.neutrons.is_available(),
-            egui::Checkbox::new(&mut options.include_neutrons, neutrons_label),
+            egui::Checkbox::new(&mut options.datasets.neutrons, neutrons_label),
         );
 
         let hist_label = format!("Histogram ({view_mode})");
         ui.add_enabled(
             availability.histogram.is_available(),
-            egui::Checkbox::new(&mut options.include_histogram, hist_label),
+            egui::Checkbox::new(&mut options.datasets.histogram, hist_label),
         );
 
         ui.add_enabled(
             availability.masks.is_available(),
-            egui::Checkbox::new(&mut options.include_pixel_masks, "Pixel masks"),
+            egui::Checkbox::new(&mut options.masks.pixel_masks, "Pixel masks"),
         );
     }
 
@@ -1735,7 +1736,7 @@ impl RustpixApp {
         ui.horizontal(|ui| {
             ui.label("Level");
             ui.add(egui::DragValue::new(&mut options.compression_level).range(0..=9));
-            ui.checkbox(&mut options.shuffle, "Shuffle");
+            ui.checkbox(&mut options.advanced.shuffle, "Shuffle");
         });
 
         ui.add_space(6.0);
@@ -1750,10 +1751,13 @@ impl RustpixApp {
         });
 
         ui.horizontal(|ui| {
-            ui.checkbox(&mut options.hist_chunk_override, "Histogram chunk override");
+            ui.checkbox(
+                &mut options.advanced.hist_chunk_override,
+                "Histogram chunk override",
+            );
         });
 
-        if options.hist_chunk_override {
+        if options.advanced.hist_chunk_override {
             ui.horizontal(|ui| {
                 ui.label("rot");
                 ui.add(egui::DragValue::new(&mut options.hist_chunk_rot).range(1..=16));
@@ -1773,11 +1777,11 @@ impl RustpixApp {
                 .color(colors.text_primary),
         );
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut options.include_xy, "x/y");
-            ui.checkbox(&mut options.include_tot, "tot");
-            ui.checkbox(&mut options.include_chip_id, "chip id");
-            ui.checkbox(&mut options.include_cluster_id, "cluster id");
-            ui.checkbox(&mut options.include_n_hits, "n_hits");
+            ui.checkbox(&mut options.fields.xy, "x/y");
+            ui.checkbox(&mut options.fields.tot, "tot");
+            ui.checkbox(&mut options.fields.chip_id, "chip id");
+            ui.checkbox(&mut options.cluster_fields.cluster_id, "cluster id");
+            ui.checkbox(&mut options.cluster_fields.n_hits, "n_hits");
         });
     }
 
@@ -1787,10 +1791,10 @@ impl RustpixApp {
         availability: ExportAvailability,
         export_in_progress: bool,
     ) -> bool {
-        let any_selected = options.include_hits
-            || options.include_neutrons
-            || options.include_histogram
-            || options.include_pixel_masks;
+        let any_selected = options.datasets.hits
+            || options.datasets.neutrons
+            || options.datasets.histogram
+            || options.masks.pixel_masks;
         let can_export = any_selected && availability.deflate.is_available() && !export_in_progress;
 
         ui.add_enabled(can_export, egui::Button::new("Save HDF5..."))

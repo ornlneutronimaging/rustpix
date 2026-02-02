@@ -63,24 +63,35 @@ struct SpectrumLineConfig {
     tof_offset_ns: f64,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 struct CentralPanelInputs {
     counts_for_cursor: Option<Vec<u64>>,
     spectrum: Option<Vec<u64>>,
-    slicer_enabled: bool,
     current_tof_bin: usize,
-    show_spectrum: bool,
     n_bins: usize,
-    needs_plot_reset: bool,
-    show_grid: bool,
-    delete_roi: bool,
-    exit_edit_mode: bool,
-    commit_polygon: bool,
+    visibility: CentralPanelVisibility,
+    plot_flags: CentralPanelPlotFlags,
+    actions: CentralPanelActions,
     data_width: usize,
     data_height: usize,
     data_width_f64: f64,
     data_height_f64: f64,
     data_extent: f64,
+}
+
+struct CentralPanelVisibility {
+    slicer_enabled: bool,
+    show_spectrum: bool,
+}
+
+struct CentralPanelActions {
+    delete_roi: bool,
+    exit_edit_mode: bool,
+    commit_polygon: bool,
+}
+
+struct CentralPanelPlotFlags {
+    needs_plot_reset: bool,
+    show_grid: bool,
 }
 
 struct CentralPanelLayout {
@@ -144,13 +155,17 @@ struct HistogramGeometry {
     data_height_f32: f32,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 struct HistogramInteraction {
     shift_down: bool,
     zoom_mode: ZoomMode,
-    zoom_active: bool,
     handle_radius: f64,
     disable_plot_drag: bool,
+}
+
+impl HistogramInteraction {
+    fn zoom_active(&self) -> bool {
+        self.zoom_mode != ZoomMode::None
+    }
 }
 
 struct SpectrumExportGeometry {
@@ -249,12 +264,12 @@ impl RustpixApp {
     fn build_central_panel_inputs(&self, ctx: &egui::Context) -> CentralPanelInputs {
         let counts_for_cursor = self.current_counts().map(<[u64]>::to_vec);
         let spectrum = self.tof_spectrum().map(<[u64]>::to_vec);
-        let slicer_enabled = self.ui_state.slicer_enabled;
+        let slicer_enabled = self.ui_state.histogram.slicer_enabled;
         let current_tof_bin = self.ui_state.current_tof_bin;
-        let show_spectrum = self.ui_state.show_histogram;
+        let show_spectrum = self.ui_state.histogram.show;
         let n_bins = self.n_tof_bins();
-        let needs_plot_reset = self.ui_state.needs_plot_reset;
-        let show_grid = self.ui_state.show_grid;
+        let needs_plot_reset = self.ui_state.histogram_view.needs_plot_reset;
+        let show_grid = self.ui_state.histogram_view.show_grid;
         let wants_keyboard = ctx.wants_keyboard_input();
         let delete_roi = ctx.input(|i| {
             !wants_keyboard
@@ -275,15 +290,21 @@ impl RustpixApp {
         CentralPanelInputs {
             counts_for_cursor,
             spectrum,
-            slicer_enabled,
             current_tof_bin,
-            show_spectrum,
             n_bins,
-            needs_plot_reset,
-            show_grid,
-            delete_roi,
-            exit_edit_mode,
-            commit_polygon,
+            visibility: CentralPanelVisibility {
+                slicer_enabled,
+                show_spectrum,
+            },
+            plot_flags: CentralPanelPlotFlags {
+                needs_plot_reset,
+                show_grid,
+            },
+            actions: CentralPanelActions {
+                delete_roi,
+                exit_edit_mode,
+                commit_polygon,
+            },
             data_width,
             data_height,
             data_width_f64,
@@ -293,14 +314,14 @@ impl RustpixApp {
     }
 
     fn apply_central_panel_shortcuts(&mut self, ctx: &egui::Context, inputs: &CentralPanelInputs) {
-        if inputs.delete_roi {
+        if inputs.actions.delete_roi {
             self.roi_state.delete_selected();
         }
-        if inputs.exit_edit_mode {
+        if inputs.actions.exit_edit_mode {
             self.roi_state.clear_edit_mode();
             self.roi_state.cancel_draft();
         }
-        if inputs.commit_polygon {
+        if inputs.actions.commit_polygon {
             self.commit_polygon_draft(ctx);
         }
     }
@@ -332,8 +353,8 @@ impl RustpixApp {
             self.texture = None;
         }
 
-        if inputs.needs_plot_reset || state.reset_view_clicked {
-            self.ui_state.needs_plot_reset = false;
+        if inputs.plot_flags.needs_plot_reset || state.reset_view_clicked {
+            self.ui_state.histogram_view.needs_plot_reset = false;
         }
     }
 
@@ -343,12 +364,12 @@ impl RustpixApp {
         inputs: &CentralPanelInputs,
     ) -> CentralPanelLayout {
         let available_height = ui.available_height();
-        let slicer_height = if inputs.slicer_enabled && inputs.n_bins > 0 {
+        let slicer_height = if inputs.visibility.slicer_enabled && inputs.n_bins > 0 {
             48.0
         } else {
             0.0
         };
-        let spectrum_height = if inputs.show_spectrum {
+        let spectrum_height = if inputs.visibility.show_spectrum {
             if self.spectrum_has_legend() {
                 260.0
             } else {
@@ -362,7 +383,7 @@ impl RustpixApp {
     }
 
     fn spectrum_has_legend(&self) -> bool {
-        self.ui_state.full_fov_visible
+        self.ui_state.spectrum.full_fov_visible
             || self
                 .roi_state
                 .rois
@@ -404,7 +425,7 @@ impl RustpixApp {
         inputs: &CentralPanelInputs,
         state: &mut CentralPanelState,
     ) {
-        if inputs.slicer_enabled && inputs.n_bins > 0 {
+        if inputs.visibility.slicer_enabled && inputs.n_bins > 0 {
             let colors = ThemeColors::from_ui(ui);
             ui.add_space(8.0);
             let margin = egui::Margin::symmetric(16.0, 12.0);
@@ -490,12 +511,12 @@ impl RustpixApp {
         inputs: &CentralPanelInputs,
         state: &mut CentralPanelState,
     ) {
-        if inputs.show_spectrum {
+        if inputs.visibility.show_spectrum {
             ui.add_space(8.0);
             let mut new_tof_bin = state.new_tof_bin;
             let mut spectrum_inputs = SpectrumPanelInputs {
                 spectrum: &inputs.spectrum,
-                slicer_enabled: inputs.slicer_enabled,
+                slicer_enabled: inputs.visibility.slicer_enabled,
                 current_tof_bin: inputs.current_tof_bin,
                 n_bins: inputs.n_bins,
                 new_tof_bin: &mut new_tof_bin,
@@ -555,13 +576,13 @@ impl RustpixApp {
 
                 ui.add_space(8.0);
                 let grid_btn = egui::Button::new(egui::RichText::new("▦ Grid").size(10.0).color(
-                    if self.ui_state.show_grid {
+                    if self.ui_state.histogram_view.show_grid {
                         Color32::WHITE
                     } else {
                         colors.text_muted
                     },
                 ))
-                .fill(if self.ui_state.show_grid {
+                .fill(if self.ui_state.histogram_view.show_grid {
                     accent::BLUE
                 } else {
                     Color32::TRANSPARENT
@@ -570,7 +591,8 @@ impl RustpixApp {
                 .rounding(Rounding::same(4.0));
 
                 if ui.add(grid_btn).on_hover_text("Toggle grid").clicked() {
-                    self.ui_state.show_grid = !self.ui_state.show_grid;
+                    self.ui_state.histogram_view.show_grid =
+                        !self.ui_state.histogram_view.show_grid;
                 }
             });
         });
@@ -585,7 +607,7 @@ impl RustpixApp {
         tex_id: egui::TextureId,
     ) {
         let geometry = self.histogram_geometry(inputs);
-        let should_reset = inputs.needs_plot_reset || state.reset_view_clicked;
+        let should_reset = inputs.plot_flags.needs_plot_reset || state.reset_view_clicked;
         let plot_rect = ui.available_rect_before_wrap();
         let interaction = self.compute_histogram_interaction(ctx);
 
@@ -596,7 +618,10 @@ impl RustpixApp {
             .include_x(inputs.data_width_f64)
             .include_y(0.0)
             .include_y(inputs.data_height_f64)
-            .show_grid(Vec2b::new(inputs.show_grid, inputs.show_grid))
+            .show_grid(Vec2b::new(
+                inputs.plot_flags.show_grid,
+                inputs.plot_flags.show_grid,
+            ))
             .x_axis_label("X (pixels)")
             .y_axis_label("Y (pixels)")
             .allow_drag(!interaction.disable_plot_drag);
@@ -614,10 +639,10 @@ impl RustpixApp {
 
             let response = plot_ui.response().clone();
             let pointer_pos = self.histogram_pointer_pos(plot_ui, &geometry);
-            let rect_drawing = !interaction.zoom_active
+            let rect_drawing = !interaction.zoom_active()
                 && roi_mode == RoiSelectionMode::Rectangle
                 && (interaction.shift_down || self.roi_state.draft.is_some());
-            let poly_drawing = !interaction.zoom_active
+            let poly_drawing = !interaction.zoom_active()
                 && roi_mode == RoiSelectionMode::Polygon
                 && (interaction.shift_down || self.roi_state.polygon_draft.is_some());
 
@@ -629,7 +654,7 @@ impl RustpixApp {
                 poly_drawing,
             );
 
-            if interaction.zoom_active {
+            if interaction.zoom_active() {
                 self.handle_histogram_zoom(plot_ui, &interaction, &response, pointer_pos);
             } else if rect_drawing || poly_drawing {
                 self.handle_histogram_roi_drawing(
@@ -730,7 +755,6 @@ impl RustpixApp {
         HistogramInteraction {
             shift_down,
             zoom_mode,
-            zoom_active,
             handle_radius,
             disable_plot_drag,
         }
@@ -814,7 +838,7 @@ impl RustpixApp {
     }
 
     fn draw_hot_pixel_overlay(&self, plot_ui: &mut egui_plot::PlotUi) {
-        if self.ui_state.view_mode == ViewMode::Hits && self.ui_state.show_hot_pixels {
+        if self.ui_state.view_mode == ViewMode::Hits && self.ui_state.pixel_health.show_hot_pixels {
             if let Some(mask) = &self.pixel_masks {
                 if !mask.hot_points.is_empty() {
                     let hot_points = Points::new(PlotPoints::new(mask.hot_points.clone()))
@@ -853,7 +877,7 @@ impl RustpixApp {
         if !response.hovered() {
             return;
         }
-        if interaction.zoom_active {
+        if interaction.zoom_active() {
             let icon = match interaction.zoom_mode {
                 ZoomMode::In => egui::CursorIcon::ZoomIn,
                 ZoomMode::Out => egui::CursorIcon::ZoomOut,
@@ -1394,7 +1418,7 @@ impl RustpixApp {
 
     fn has_visible_spectrum(&self, spectrum: Option<&[u64]>) -> bool {
         let has_full_spectrum = spectrum.is_some_and(|s| !s.is_empty());
-        (self.ui_state.full_fov_visible && has_full_spectrum)
+        (self.ui_state.spectrum.full_fov_visible && has_full_spectrum)
             || self.roi_state.rois.iter().any(|roi| {
                 roi.visibility.spectrum_visible
                     && self
@@ -1497,14 +1521,15 @@ impl RustpixApp {
             .on_hover_text("Spectrum settings")
             .clicked()
         {
-            self.ui_state.show_spectrum_settings = !self.ui_state.show_spectrum_settings;
+            self.ui_state.panels.show_spectrum_settings =
+                !self.ui_state.panels.show_spectrum_settings;
         }
     }
 
     fn render_spectrum_data_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
         let data_button = egui::Button::new("")
             .min_size(egui::vec2(28.0, 22.0))
-            .fill(if self.ui_state.show_roi_panel {
+            .fill(if self.ui_state.panel_popups.show_roi_panel {
                 colors.bg_header
             } else {
                 Color32::TRANSPARENT
@@ -1518,8 +1543,8 @@ impl RustpixApp {
             .on_hover_text("Spectrum data selection")
             .clicked()
         {
-            self.ui_state.show_roi_panel = !self.ui_state.show_roi_panel;
-            if !self.ui_state.show_roi_panel {
+            self.ui_state.panel_popups.show_roi_panel = !self.ui_state.panel_popups.show_roi_panel;
+            if !self.ui_state.panel_popups.show_roi_panel {
                 self.ui_state.roi_rename_id = None;
             }
         }
@@ -1535,8 +1560,8 @@ impl RustpixApp {
         .stroke(Stroke::new(1.0, colors.border_light))
         .rounding(Rounding::same(4.0));
         if ui.add(range_btn).clicked() {
-            let opening = !self.ui_state.show_spectrum_range;
-            self.ui_state.show_spectrum_range = opening;
+            let opening = !self.ui_state.panel_popups.show_spectrum_range;
+            self.ui_state.panel_popups.show_spectrum_range = opening;
             if opening {
                 self.populate_spectrum_range_inputs();
             }
@@ -1614,13 +1639,13 @@ impl RustpixApp {
 
     fn render_spectrum_log_toggles(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) -> bool {
         let mut reset = false;
-        if Self::render_log_toggle(ui, colors, "logX", self.ui_state.log_x) {
-            self.ui_state.log_x = !self.ui_state.log_x;
+        if Self::render_log_toggle(ui, colors, "logX", self.ui_state.spectrum.log_x) {
+            self.ui_state.spectrum.log_x = !self.ui_state.spectrum.log_x;
             reset = true;
         }
 
-        if Self::render_log_toggle(ui, colors, "logY", self.ui_state.log_y) {
-            self.ui_state.log_y = !self.ui_state.log_y;
+        if Self::render_log_toggle(ui, colors, "logY", self.ui_state.spectrum.log_y) {
+            self.ui_state.spectrum.log_y = !self.ui_state.spectrum.log_y;
             reset = true;
         }
         reset
@@ -1654,8 +1679,8 @@ impl RustpixApp {
         colors: &ThemeColors,
         inputs: &SpectrumPanelInputs,
     ) -> Option<SpectrumPlotData> {
-        let log_x = self.ui_state.log_x;
-        let log_y = self.ui_state.log_y;
+        let log_x = self.ui_state.spectrum.log_x;
+        let log_y = self.ui_state.spectrum.log_y;
         let axis = self.ui_state.spectrum_x_axis;
         let flight_path_m = self.flight_path_m;
         let tof_offset_ns = self.tof_offset_ns;
@@ -1678,7 +1703,7 @@ impl RustpixApp {
         let mut x_max = f64::NEG_INFINITY;
         let mut y_max: f64 = 0.0;
 
-        if self.ui_state.full_fov_visible {
+        if self.ui_state.spectrum.full_fov_visible {
             if let Some(full) = inputs.spectrum.as_ref() {
                 if let Some((points, stats)) = Self::build_spectrum_line(full, line_config) {
                     x_min = x_min.min(stats.x_min);
@@ -2187,7 +2212,7 @@ impl RustpixApp {
                 full,
                 &self.roi_state.rois,
                 self.roi_spectra_map(),
-                self.ui_state.full_fov_visible,
+                self.ui_state.spectrum.full_fov_visible,
                 data.bin_width_ms,
                 axis_config,
             ) {
@@ -2221,10 +2246,10 @@ impl RustpixApp {
     }
 
     fn render_roi_data_panel(&mut self, ctx: &egui::Context) {
-        if !self.ui_state.show_roi_panel {
+        if !self.ui_state.panel_popups.show_roi_panel {
             return;
         }
-        let mut open = self.ui_state.show_roi_panel;
+        let mut open = self.ui_state.panel_popups.show_roi_panel;
         egui::Window::new("Spectrum Data")
             .open(&mut open)
             .resizable(false)
@@ -2233,7 +2258,7 @@ impl RustpixApp {
             .show(ctx, |ui| {
                 self.render_roi_data_panel_contents(ui);
             });
-        self.ui_state.show_roi_panel = open;
+        self.ui_state.panel_popups.show_roi_panel = open;
         if !open {
             self.ui_state.roi_rename_id = None;
         }
@@ -2247,7 +2272,7 @@ impl RustpixApp {
                 .color(colors.text_dim),
         );
         ui.separator();
-        ui.checkbox(&mut self.ui_state.full_fov_visible, "Full FOV");
+        ui.checkbox(&mut self.ui_state.spectrum.full_fov_visible, "Full FOV");
 
         self.sync_roi_rename_id();
         if self.roi_state.rois.is_empty() {
@@ -2329,7 +2354,7 @@ impl RustpixApp {
         let (ui_state, roi_state) = (&mut self.ui_state, &mut self.roi_state);
         ui.horizontal_wrapped(|ui| {
             if ui.button("Show Full FOV Only").clicked() {
-                ui_state.full_fov_visible = true;
+                ui_state.spectrum.full_fov_visible = true;
                 for roi in &mut roi_state.rois {
                     roi.visibility.spectrum_visible = false;
                 }
@@ -2348,10 +2373,10 @@ impl RustpixApp {
     }
 
     fn render_spectrum_range_panel(&mut self, ctx: &egui::Context) {
-        if !self.ui_state.show_spectrum_range {
+        if !self.ui_state.panel_popups.show_spectrum_range {
             return;
         }
-        let mut open = self.ui_state.show_spectrum_range;
+        let mut open = self.ui_state.panel_popups.show_spectrum_range;
         let axis_label = match self.ui_state.spectrum_x_axis {
             SpectrumXAxis::ToFMs => "TOF (ms)",
             SpectrumXAxis::EnergyEv => "Energy (eV)",
@@ -2365,7 +2390,7 @@ impl RustpixApp {
                 self.render_spectrum_range_contents(ui, axis_label);
             });
 
-        self.ui_state.show_spectrum_range = open;
+        self.ui_state.panel_popups.show_spectrum_range = open;
     }
 
     fn render_spectrum_range_contents(&mut self, ui: &mut egui::Ui, axis_label: &str) {
