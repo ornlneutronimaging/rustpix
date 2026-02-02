@@ -52,6 +52,118 @@ struct SpectrumAxisConfig {
     tof_offset_ns: f64,
 }
 
+#[allow(clippy::struct_excessive_bools)]
+struct CentralPanelInputs {
+    counts_for_cursor: Option<Vec<u64>>,
+    spectrum: Option<Vec<u64>>,
+    slicer_enabled: bool,
+    current_tof_bin: usize,
+    show_spectrum: bool,
+    n_bins: usize,
+    needs_plot_reset: bool,
+    show_grid: bool,
+    delete_roi: bool,
+    exit_edit_mode: bool,
+    commit_polygon: bool,
+    data_width: usize,
+    data_height: usize,
+    data_width_f64: f64,
+    data_height_f64: f64,
+    data_extent: f64,
+}
+
+struct CentralPanelLayout {
+    image_height: f32,
+}
+
+#[derive(Default)]
+struct CentralPanelState {
+    new_tof_bin: Option<usize>,
+    reset_view_clicked: bool,
+}
+
+struct SpectrumPanelInputs<'a> {
+    spectrum: &'a Option<Vec<u64>>,
+    slicer_enabled: bool,
+    current_tof_bin: usize,
+    n_bins: usize,
+    new_tof_bin: &'a mut Option<usize>,
+}
+
+#[derive(Default)]
+struct SpectrumToolbarActions {
+    reset_clicked: bool,
+    export_png_clicked: bool,
+    export_csv_clicked: bool,
+}
+
+struct SpectrumLineStats {
+    x_min: f64,
+    x_max: f64,
+    y_max: f64,
+}
+
+struct SpectrumPlotData {
+    axis: SpectrumXAxis,
+    log_x: bool,
+    log_y: bool,
+    bin_width_ms: f64,
+    spec_bins: usize,
+    max_ms: f64,
+    x_min: f64,
+    x_max: f64,
+    y_max: f64,
+    x_label: String,
+    y_label: String,
+    lines: Vec<(String, Color32, Vec<[f64; 2]>)>,
+    legend_items: Vec<(String, Color32)>,
+    manual_bounds: Option<PlotBounds>,
+    export_bounds: PlotBounds,
+    flight_path_m: f64,
+    tof_offset_ns: f64,
+}
+
+struct HistogramGeometry {
+    data_width_f64: f64,
+    data_height_f64: f64,
+    data_extent: f64,
+    half_x: f64,
+    half_y: f64,
+    data_width_f32: f32,
+    data_height_f32: f32,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct HistogramInteraction {
+    shift_down: bool,
+    zoom_mode: ZoomMode,
+    zoom_active: bool,
+    handle_radius: f64,
+    disable_plot_drag: bool,
+}
+
+struct SpectrumExportGeometry {
+    width: u32,
+    height: u32,
+    pad: i32,
+    pad_f64: f64,
+    plot_left: i32,
+    plot_right: i32,
+    plot_top: i32,
+    plot_bottom: i32,
+    plot_w: f64,
+    plot_h: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    x_scale: f64,
+    y_scale: f64,
+    axis_color: Rgba<u8>,
+    grid_color: Rgba<u8>,
+    label_color: Rgba<u8>,
+}
+
 #[allow(clippy::cast_possible_truncation)]
 fn round_to_i32_clamped(value: f64) -> i32 {
     if !value.is_finite() {
@@ -100,17 +212,20 @@ fn parse_spectrum_range(min_text: &str, max_text: &str) -> Result<Option<(f64, f
     Ok(Some((min_val, max_val)))
 }
 
+#[allow(clippy::unused_self)]
 impl RustpixApp {
     /// Render the central panel with histogram, slicer, and spectrum.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn render_central_panel(&mut self, ctx: &egui::Context) {
-        // Get theme-aware colors
         let colors = ThemeColors::from_ctx(ctx);
-
-        // Ensure texture is up to date
         self.ensure_texture(ctx);
+        let inputs = self.build_central_panel_inputs(ctx);
+        self.apply_central_panel_shortcuts(ctx, &inputs);
+        let mut state = CentralPanelState::default();
+        self.render_central_panel_body(ctx, &colors, &inputs, &mut state);
+        self.finish_central_panel(&inputs, &state);
+    }
 
-        // Clone data to avoid borrow conflicts in Plot closures
+    fn build_central_panel_inputs(&self, ctx: &egui::Context) -> CentralPanelInputs {
         let counts_for_cursor = self.current_counts().map(<[u64]>::to_vec);
         let spectrum = self.tof_spectrum().map(<[u64]>::to_vec);
         let slicer_enabled = self.ui_state.slicer_enabled;
@@ -136,22 +251,46 @@ impl RustpixApp {
         let data_height_f64 = usize_to_f64(data_height);
         let data_extent = data_width_f64.max(data_height_f64);
 
-        // Track if bin changed via interaction
-        let mut new_tof_bin: Option<usize> = None;
-        // Track if user clicked reset view button
-        let mut reset_view_clicked = false;
+        CentralPanelInputs {
+            counts_for_cursor,
+            spectrum,
+            slicer_enabled,
+            current_tof_bin,
+            show_spectrum,
+            n_bins,
+            needs_plot_reset,
+            show_grid,
+            delete_roi,
+            exit_edit_mode,
+            commit_polygon,
+            data_width,
+            data_height,
+            data_width_f64,
+            data_height_f64,
+            data_extent,
+        }
+    }
 
-        if delete_roi {
+    fn apply_central_panel_shortcuts(&mut self, ctx: &egui::Context, inputs: &CentralPanelInputs) {
+        if inputs.delete_roi {
             self.roi_state.delete_selected();
         }
-        if exit_edit_mode {
+        if inputs.exit_edit_mode {
             self.roi_state.clear_edit_mode();
             self.roi_state.cancel_draft();
         }
-        if commit_polygon {
+        if inputs.commit_polygon {
             self.commit_polygon_draft(ctx);
         }
+    }
 
+    fn render_central_panel_body(
+        &mut self,
+        ctx: &egui::Context,
+        colors: &ThemeColors,
+        inputs: &CentralPanelInputs,
+        state: &mut CentralPanelState,
+    ) {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -159,774 +298,871 @@ impl RustpixApp {
                     .inner_margin(egui::Margin::same(16.0)),
             )
             .show(ctx, |ui| {
-                // Calculate available height for layout
-                let available_height = ui.available_height();
-                let slicer_height = if slicer_enabled && n_bins > 0 {
-                    48.0
-                } else {
-                    0.0
-                };
-                let has_legend = self.ui_state.full_fov_visible
-                    || self.roi_state.rois.iter().any(|roi| roi.spectrum_visible);
-                let spectrum_height = if show_spectrum {
-                    if has_legend { 260.0 } else { 220.0 }
-                } else {
-                    0.0
-                };
-                let image_height = available_height - slicer_height - spectrum_height - 8.0;
-
-                // Main 2D histogram view with colorbar
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), image_height.max(200.0)),
-                    egui::Layout::left_to_right(egui::Align::TOP),
-                    |ui| {
-                        // Main plot area (takes most of the width)
-                        let plot_width = ui.available_width() - 60.0; // Reserve space for colorbar
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(plot_width, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                let colors = ThemeColors::from_ui(ui);
-                                let texture_id = self.texture.as_ref().map(egui::TextureHandle::id);
-                                if let Some(tex_id) = texture_id {
-                                    // Toolbar row above the plot
-                                    ui.horizontal(|ui| {
-                                        self.render_roi_toolbar(ui);
-
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                let colors = ThemeColors::from_ui(ui);
-                                                // Reset View button
-                                                let reset_btn = egui::Button::new(
-                                                    egui::RichText::new("↺ Reset View")
-                                                        .size(10.0)
-                                                        .color(colors.text_muted),
-                                                )
-                                                .fill(Color32::TRANSPARENT)
-                                                .stroke(Stroke::new(1.0, colors.border_light))
-                                                .rounding(Rounding::same(4.0));
-
-                                                if ui
-                                                    .add(reset_btn)
-                                                    .on_hover_text(
-                                                        "Reset view to fit data (or double-click)",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    reset_view_clicked = true;
-                                                }
-
-                                                ui.add_space(6.0);
-                                                self.render_histogram_zoom_group(ui);
-
-                                                ui.add_space(8.0);
-
-                                                // Grid toggle
-                                                let grid_btn = egui::Button::new(
-                                                    egui::RichText::new("▦ Grid").size(10.0).color(
-                                                        if self.ui_state.show_grid {
-                                                            Color32::WHITE
-                                                        } else {
-                                                            colors.text_muted
-                                                        },
-                                                    ),
-                                                )
-                                                .fill(if self.ui_state.show_grid {
-                                                    accent::BLUE
-                                                } else {
-                                                    Color32::TRANSPARENT
-                                                })
-                                                .stroke(Stroke::new(1.0, colors.border_light))
-                                                .rounding(Rounding::same(4.0));
-
-                                                if ui
-                                                    .add(grid_btn)
-                                                    .on_hover_text("Toggle grid")
-                                                    .clicked()
-                                                {
-                                                    self.ui_state.show_grid =
-                                                        !self.ui_state.show_grid;
-                                                }
-                                            },
-                                        );
-                                    });
-                                    ui.add_space(4.0);
-
-                                    let half_x = data_width_f64 / 2.0;
-                                    let half_y = data_height_f64 / 2.0;
-                                    #[allow(clippy::cast_possible_truncation)]
-                                    let data_width_f32 = data_width_f64 as f32;
-                                    #[allow(clippy::cast_possible_truncation)]
-                                    let data_height_f32 = data_height_f64 as f32;
-
-                                    // Determine if we need to reset the plot view
-                                    let should_reset = needs_plot_reset || reset_view_clicked;
-                                    let plot_rect = ui.available_rect_before_wrap();
-                                    let shift_down = ctx.input(|i| i.modifiers.shift);
-                                    let zoom_mode = self.ui_state.hist_zoom_mode;
-                                    let zoom_active = zoom_mode != ZoomMode::None;
-                                    let handle_radius = 3.0;
-                                    let pre_drag_hit = if !shift_down
-                                        && !zoom_active
-                                        && ctx.input(|i| {
-                                            i.pointer
-                                                .button_down(egui::PointerButton::Primary)
-                                        }) {
-                                        if let (Some(bounds), Some(rect), Some(pos)) = (
-                                            self.ui_state.roi_last_plot_bounds,
-                                            self.ui_state.roi_last_plot_rect,
-                                            ctx.input(|i| i.pointer.interact_pos()),
-                                        ) {
-                                            if rect.contains(pos) && rect.width() > 0.0 && rect.height() > 0.0 {
-                                                let x_frac = f64::from(pos.x - rect.left())
-                                                    / f64::from(rect.width());
-                                                let y_frac = f64::from(pos.y - rect.top())
-                                                    / f64::from(rect.height());
-                                                if (0.0..=1.0).contains(&x_frac)
-                                                    && (0.0..=1.0).contains(&y_frac)
-                                                {
-                                                    let plot_x = bounds.min()[0]
-                                                        + x_frac
-                                                            * (bounds.max()[0] - bounds.min()[0]);
-                                                    let plot_y = bounds.max()[1]
-                                                        - y_frac
-                                                            * (bounds.max()[1] - bounds.min()[1]);
-                                                    let point = PlotPoint::new(plot_x, plot_y);
-                                                    self.roi_state
-                                                        .hit_test_handle(point, handle_radius)
-                                                        .is_some()
-                                                        || self.roi_state
-                                                            .hit_test_vertex(point, handle_radius)
-                                                            .is_some()
-                                                        || self.roi_state
-                                                            .hit_test_edge(point, handle_radius)
-                                                            .is_some()
-                                                        || self.roi_state.hit_test(point).is_some()
-                                                } else {
-                                                    false
-                                                }
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    };
-                                    let roi_drag_active = self.roi_state.is_dragging()
-                                        || self.roi_state.is_edit_dragging();
-                                    let roi_drawing_active = self.roi_state.draft.is_some()
-                                        || self.roi_state.polygon_draft.is_some();
-                                    let disable_plot_drag = shift_down
-                                        || roi_drag_active
-                                        || roi_drawing_active
-                                        || pre_drag_hit
-                                        || zoom_active;
-
-                                    // Build the base plot
-                                    let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
-                                        .data_aspect(1.0)
-                                        .auto_bounds(Vec2b::new(false, false))
-                                        .include_x(0.0)
-                                        .include_x(data_width_f64)
-                                        .include_y(0.0)
-                                        .include_y(data_height_f64)
-                                        .show_grid(Vec2b::new(show_grid, show_grid))
-                                        .x_axis_label("X (pixels)")
-                                        .y_axis_label("Y (pixels)")
-                                        .allow_drag(!disable_plot_drag);
-
-                                    // Apply reset if needed
-                                    if should_reset {
-                                        plot = plot.reset();
-                                    }
-
-                                    let roi_mode = self.roi_state.mode;
-                                    let min_roi_size = 2.0;
-                                    plot.show(ui, |plot_ui| {
-                                        // Set explicit bounds on reset or double-click
-                                        if should_reset || plot_ui.response().double_clicked() {
-                                            let pad_x = (data_width_f64 * 0.05).max(16.0);
-                                            let pad_y = (data_height_f64 * 0.05).max(16.0);
-
-                                            // Fit the full detector + padding to the current plot aspect.
-                                            let plot_w = f64::from(plot_rect.width().max(1.0));
-                                            let plot_h = f64::from(plot_rect.height().max(1.0));
-                                            let available_aspect = plot_w / plot_h;
-                                            let data_span_x = data_width_f64 + pad_x * 2.0;
-                                            let data_span_y = data_height_f64 + pad_y * 2.0;
-                                            let data_aspect = data_span_x / data_span_y;
-                                            let mut x_half = data_span_x / 2.0;
-                                            let mut y_half = data_span_y / 2.0;
-
-                                            if available_aspect >= data_aspect {
-                                                x_half = y_half * available_aspect;
-                                            } else {
-                                                y_half = x_half / available_aspect;
-                                            }
-
-                                            let center_x = data_width_f64 / 2.0;
-                                            let center_y = data_height_f64 / 2.0;
-                                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                                [center_x - x_half, center_y - y_half],
-                                                [center_x + x_half, center_y + y_half],
-                                            ));
-                                        }
-                                        plot_ui.image(PlotImage::new(
-                                            tex_id,
-                                            PlotPoint::new(half_x, half_y),
-                                            [data_width_f32, data_height_f32],
-                                        ));
-
-                                        if self.ui_state.view_mode == ViewMode::Hits
-                                            && self.ui_state.show_hot_pixels
-                                        {
-                                            if let Some(mask) = &self.pixel_masks {
-                                                if !mask.hot_points.is_empty() {
-                                                    let hot_points = Points::new(
-                                                        PlotPoints::new(mask.hot_points.clone()),
-                                                    )
-                                                    .shape(MarkerShape::Square)
-                                                    .radius(2.0)
-                                                    .color(accent::RED)
-                                                    .allow_hover(false);
-                                                    plot_ui.points(hot_points);
-                                                }
-                                            }
-                                        }
-
-                                        let clamp_point = |point: PlotPoint| {
-                                            PlotPoint::new(
-                                                point.x.clamp(0.0, data_width_f64),
-                                                point.y.clamp(0.0, data_height_f64),
-                                            )
-                                        };
-
-                                        let response = plot_ui.response().clone();
-                                        let pointer_pos =
-                                            plot_ui.pointer_coordinate().map(clamp_point);
-
-                                        let rect_drawing = !zoom_active
-                                            && roi_mode == RoiSelectionMode::Rectangle
-                                            && (shift_down || self.roi_state.draft.is_some());
-                                        let poly_drawing = !zoom_active
-                                            && roi_mode == RoiSelectionMode::Polygon
-                                            && (shift_down
-                                                || self.roi_state.polygon_draft.is_some());
-                                        if response.hovered() {
-                                            if zoom_active {
-                                                let icon = match zoom_mode {
-                                                    ZoomMode::In => egui::CursorIcon::ZoomIn,
-                                                    ZoomMode::Out => egui::CursorIcon::ZoomOut,
-                                                    ZoomMode::Box => egui::CursorIcon::Crosshair,
-                                                    ZoomMode::None => egui::CursorIcon::Default,
-                                                };
-                                                plot_ui.ctx().set_cursor_icon(icon);
-                                            } else if rect_drawing || poly_drawing {
-                                                plot_ui
-                                                    .ctx()
-                                                    .set_cursor_icon(egui::CursorIcon::Crosshair);
-                                            } else if let Some(pos) = pointer_pos {
-                                                if let Some((_, handle)) = self
-                                                    .roi_state
-                                                    .hit_test_handle(pos, handle_radius)
-                                                {
-                                                    let icon = match handle {
-                                                        crate::viewer::RoiHandle::North
-                                                        | crate::viewer::RoiHandle::South => {
-                                                            egui::CursorIcon::ResizeVertical
-                                                        }
-                                                        crate::viewer::RoiHandle::East
-                                                        | crate::viewer::RoiHandle::West => {
-                                                            egui::CursorIcon::ResizeHorizontal
-                                                        }
-                                                        crate::viewer::RoiHandle::NorthEast
-                                                        | crate::viewer::RoiHandle::SouthWest => {
-                                                            egui::CursorIcon::ResizeNeSw
-                                                        }
-                                                        crate::viewer::RoiHandle::NorthWest
-                                                        | crate::viewer::RoiHandle::SouthEast => {
-                                                            egui::CursorIcon::ResizeNwSe
-                                                        }
-                                                    };
-                                                    plot_ui.ctx().set_cursor_icon(icon);
-                                                } else if self
-                                                    .roi_state
-                                                    .hit_test_vertex(pos, handle_radius)
-                                                    .is_some()
-                                                {
-                                                    plot_ui.ctx().set_cursor_icon(
-                                                        egui::CursorIcon::Crosshair,
-                                                    );
-                                                } else if self
-                                                    .roi_state
-                                                    .hit_test_edge(pos, handle_radius)
-                                                    .is_some()
-                                                {
-                                                    plot_ui.ctx().set_cursor_icon(
-                                                        egui::CursorIcon::PointingHand,
-                                                    );
-                                                } else if self.roi_state.hit_test(pos).is_some() {
-                                                    plot_ui
-                                                        .ctx()
-                                                        .set_cursor_icon(egui::CursorIcon::Grab);
-                                                }
-                                            }
-                                        }
-
-                                        if zoom_active {
-                                            match zoom_mode {
-                                                ZoomMode::In | ZoomMode::Out => {
-                                                    if response.clicked() {
-                                                        let center = pointer_pos.unwrap_or_else(|| {
-                                                            let bounds = plot_ui.plot_bounds();
-                                                            let min = bounds.min();
-                                                            let max = bounds.max();
-                                                            PlotPoint::new(
-                                                                (min[0] + max[0]) * 0.5,
-                                                                (min[1] + max[1]) * 0.5,
-                                                            )
-                                                        });
-                                                        let factor = if zoom_mode == ZoomMode::In {
-                                                            1.25
-                                                        } else {
-                                                            0.8
-                                                        };
-                                                        plot_ui.zoom_bounds(
-                                                            Vec2::splat(zoom_factor_to_f32(factor)),
-                                                            center,
-                                                        );
-                                                    }
-                                                }
-                                                ZoomMode::Box => {
-                                                    if response.drag_started() {
-                                                        self.ui_state.hist_zoom_start = pointer_pos;
-                                                    }
-                                                    if response.dragged() {
-                                                        if let (Some(start), Some(current)) = (
-                                                            self.ui_state.hist_zoom_start,
-                                                            pointer_pos,
-                                                        ) {
-                                                            let start_screen =
-                                                                plot_ui.screen_from_plot(start);
-                                                            let current_screen =
-                                                                plot_ui.screen_from_plot(current);
-                                                            let rect = Rect::from_two_pos(
-                                                                start_screen,
-                                                                current_screen,
-                                                            );
-                                                            let painter = plot_ui
-                                                                .ctx()
-                                                                .layer_painter(LayerId::new(
-                                                                    Order::Foreground,
-                                                                    response.id,
-                                                                ))
-                                                                .with_clip_rect(response.rect);
-                                                            painter.rect_filled(
-                                                                rect,
-                                                                Rounding::same(2.0),
-                                                                Color32::from_rgba_unmultiplied(
-                                                                    58, 130, 246, 32,
-                                                                ),
-                                                            );
-                                                            painter.rect_stroke(
-                                                                rect,
-                                                                Rounding::same(2.0),
-                                                                Stroke::new(
-                                                                    1.0,
-                                                                    Color32::from_rgb(
-                                                                        58, 130, 246,
-                                                                    ),
-                                                                ),
-                                                            );
-                                                        }
-                                                    }
-                                                    if response.drag_stopped() {
-                                                        if let (Some(start), Some(end)) = (
-                                                            self.ui_state.hist_zoom_start,
-                                                            pointer_pos,
-                                                        ) {
-                                                            let min_x = start.x.min(end.x);
-                                                            let max_x = start.x.max(end.x);
-                                                            let min_y = start.y.min(end.y);
-                                                            let max_y = start.y.max(end.y);
-                                                            if (max_x - min_x) > 1.0
-                                                                && (max_y - min_y) > 1.0
-                                                            {
-                                                                plot_ui.set_plot_bounds(
-                                                                    PlotBounds::from_min_max(
-                                                                        [min_x, min_y],
-                                                                        [max_x, max_y],
-                                                                    ),
-                                                                );
-                                                            }
-                                                        }
-                                                        self.ui_state.hist_zoom_start = None;
-                                                    }
-                                                }
-                                                ZoomMode::None => {}
-                                            }
-                                        } else if rect_drawing {
-                                            if response.drag_started() {
-                                                if let Some(pos) = pointer_pos {
-                                                    self.roi_state.begin_rectangle(pos);
-                                                }
-                                            }
-                                            if response.dragged() {
-                                                if let Some(pos) = pointer_pos {
-                                                    self.roi_state.update_rectangle(pos);
-                                                }
-                                            }
-                                            if response.drag_stopped() {
-                                                self.roi_state.commit_rectangle(min_roi_size);
-                                            }
-                                        } else if poly_drawing {
-                                            self.roi_state.update_polygon_hover(pointer_pos);
-                                            if response.clicked() {
-                                                if let Some(pos) = pointer_pos {
-                                                    self.roi_state.add_polygon_point(pos);
-                                                }
-                                            }
-                                        } else {
-                                            if response.drag_started() {
-                                                if let Some(pos) = pointer_pos {
-                                                    if let Some((roi_id, index)) = self
-                                                        .roi_state
-                                                        .hit_test_vertex(pos, handle_radius)
-                                                    {
-                                                        let bounds = plot_ui.plot_bounds();
-                                                        self.roi_state.start_vertex_drag(
-                                                            roi_id, index, pos, bounds,
-                                                        );
-                                                    } else if let Some((hit_id, handle)) = self
-                                                        .roi_state
-                                                        .hit_test_handle(pos, handle_radius)
-                                                    {
-                                                        let bounds = plot_ui.plot_bounds();
-                                                        self.roi_state.start_edit_drag(
-                                                            hit_id, handle, pos, bounds,
-                                                        );
-                                                    } else if let Some(hit_id) =
-                                                        self.roi_state.hit_test(pos)
-                                                    {
-                                                        let bounds = plot_ui.plot_bounds();
-                                                        self.roi_state
-                                                            .start_drag(hit_id, pos, bounds);
-                                                    }
-                                                }
-                                            }
-                                            if response.dragged() {
-                                                if let Some(pos) = pointer_pos {
-                                                    if self.roi_state.is_edit_dragging() {
-                                                        self.roi_state.update_vertex_drag(pos);
-                                                        self.roi_state.update_edit_drag(
-                                                            pos,
-                                                            min_roi_size,
-                                                            0.0,
-                                                            data_extent,
-                                                        );
-                                                    } else {
-                                                        self.roi_state
-                                                            .update_drag(pos, 0.0, data_extent);
-                                                    }
-                                                }
-                                            }
-                                            if response.drag_stopped() {
-                                                if let Err(err) =
-                                                    self.roi_state.end_vertex_drag()
-                                                {
-                                                    let message = match err {
-                                                        crate::viewer::RoiCommitError::TooFewPoints => {
-                                                            "Polygon needs at least 3 points".to_string()
-                                                        }
-                                                        crate::viewer::RoiCommitError::SelfIntersecting => {
-                                                            "Polygon edges cannot self-intersect".to_string()
-                                                        }
-                                                    };
-                                                    let expires_at = ctx.input(|i| i.time) + 2.5;
-                                                    self.ui_state.roi_warning =
-                                                        Some((message, expires_at));
-                                                }
-                                                self.roi_state.end_edit_drag();
-                                                self.roi_state.end_drag();
-                                            }
-
-                                            // Plot dragging is disabled during ROI interactions; no bounds reset needed.
-                                        }
-
-                                        if let Some(curr) = plot_ui.pointer_coordinate() {
-                                            let x = curr.x;
-                                            let y = curr.y;
-                                            if x >= 0.0
-                                                && y >= 0.0
-                                                && x < data_width_f64
-                                                && y < data_height_f64
-                                            {
-                                                #[allow(
-                                                    clippy::cast_possible_truncation,
-                                                    clippy::cast_sign_loss
-                                                )]
-                                                let (Some(xi), Some(yi)) = (
-                                                    f64_to_usize_bounded(x, data_width),
-                                                    f64_to_usize_bounded(y, data_height),
-                                                ) else {
-                                                    self.cursor_info = None;
-                                                    return;
-                                                };
-                                                let count = counts_for_cursor
-                                                    .as_ref()
-                                                    .map_or(0, |c| c[yi * data_width + xi]);
-                                                self.cursor_info = Some((xi, yi, count));
-                                            } else {
-                                                self.cursor_info = None;
-                                            }
-                                        } else {
-                                            self.cursor_info = None;
-                                        }
-
-                                        if response.clicked()
-                                            && self.roi_state.draft.is_none()
-                                            && self.roi_state.polygon_draft.is_none()
-                                            && !shift_down
-                                            && !self.roi_state.is_dragging()
-                                            && !self.roi_state.is_edit_dragging()
-                                        {
-                                            if let Some(pos) = pointer_pos {
-                                                match self
-                                                    .roi_state
-                                                    .insert_vertex_at(pos, handle_radius)
-                                                {
-                                                    Ok(true) => {
-                                                        self.roi_state.select_at(pos);
-                                                    }
-                                                    Ok(false) => {
-                                                        if self.roi_state.hit_test(pos).is_some() {
-                                                            self.roi_state.select_at(pos);
-                                                        } else {
-                                                            self.roi_state.clear_edit_mode();
-                                                        }
-                                                    }
-                                                    Err(err) => {
-                                                        let message = match err {
-                                                            crate::viewer::RoiCommitError::TooFewPoints => {
-                                                                "Polygon needs at least 3 points".to_string()
-                                                            }
-                                                            crate::viewer::RoiCommitError::SelfIntersecting => {
-                                                                "Polygon edges cannot self-intersect".to_string()
-                                                            }
-                                                        };
-                                                        let expires_at =
-                                                            ctx.input(|i| i.time) + 2.5;
-                                                        self.ui_state.roi_warning =
-                                                            Some((message, expires_at));
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if response.double_clicked()
-                                            && self.roi_state.draft.is_none()
-                                        {
-                                            if let Some(pos) = pointer_pos {
-                                                if let Some(hit_id) = self.roi_state.hit_test(pos) {
-                                                    self.roi_state.set_edit_mode(hit_id, true);
-                                                } else {
-                                                    self.roi_state.clear_edit_mode();
-                                                }
-                                            }
-                                        }
-
-                                        let mut suppress_context_menu = false;
-                                        if response.secondary_clicked() {
-                                            let mut target = None;
-                                            if let Some(pos) = pointer_pos {
-                                                if self
-                                                    .roi_state
-                                                    .delete_vertex_at(pos, handle_radius)
-                                                {
-                                                    self.roi_state.set_context_menu(None);
-                                                    suppress_context_menu = true;
-                                                } else if let Some(hit_id) =
-                                                    self.roi_state.hit_test(pos)
-                                                {
-                                                    self.roi_state.select_id(hit_id);
-                                                    target = Some(hit_id);
-                                                }
-                                            }
-                                            self.roi_state.set_context_menu(target);
-                                        }
-
-                                        response.context_menu(|ui| {
-                                            if suppress_context_menu {
-                                                ui.close_menu();
-                                                return;
-                                            }
-                                            if let Some(target) =
-                                                self.roi_state.context_menu_target()
-                                            {
-                                                if ui.button("Edit").clicked() {
-                                                    self.roi_state.set_edit_mode(target, true);
-                                                    ui.close_menu();
-                                                }
-                                                if ui.button("Delete").clicked() {
-                                                    self.roi_state.delete_id(target);
-                                                    ui.close_menu();
-                                                }
-                                            } else {
-                                                ui.label("No ROI");
-                                            }
-                                        });
-
-                                        self.roi_state.draw(plot_ui);
-                                        self.roi_state.draw_draft(plot_ui);
-
-                                        self.ui_state.roi_last_plot_bounds =
-                                            Some(plot_ui.plot_bounds());
-                                        self.ui_state.roi_last_plot_rect =
-                                            Some(plot_ui.response().rect);
-                                    });
-                                } else {
-                                    // "No Data" placeholder - use theme-aware background
-                                    let no_data_bg =
-                                        if colors.bg_dark == super::theme::dark::BG_DARK {
-                                            Color32::from_rgb(0x0d, 0x0d, 0x0d)
-                                        } else {
-                                            Color32::from_rgb(0xe8, 0xe8, 0xe8)
-                                        };
-                                    egui::Frame::none()
-                                        .fill(no_data_bg)
-                                        .stroke(Stroke::new(1.0, colors.border))
-                                        .rounding(Rounding::same(4.0))
-                                        .show(ui, |ui| {
-                                            ui.set_min_size(ui.available_size());
-                                            ui.centered_and_justified(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new("No Data")
-                                                        .size(14.0)
-                                                        .color(colors.text_dim),
-                                                );
-                                            });
-                                        });
-                                }
-                            },
-                        );
-
-                        // Colorbar (right side)
-                        ui.add_space(8.0);
-                        self.render_colorbar(ui);
-                    },
-                );
-
-                // TOF Slicer (below image)
-                if slicer_enabled && n_bins > 0 {
-                    let colors = ThemeColors::from_ui(ui);
-                    ui.add_space(8.0);
-                    let margin = egui::Margin::symmetric(16.0, 12.0);
-                    let content_height = ui.spacing().interact_size.y.max(20.0);
-                    let frame_height = content_height + margin.top + margin.bottom;
-
-                    let left = ui.max_rect().left();
-                    let right = ui.max_rect().right();
-                    let top = ui.cursor().top();
-                    let rect = egui::Rect::from_min_max(
-                        egui::pos2(left, top),
-                        egui::pos2(right, top + frame_height),
-                    );
-                    let _ = ui.allocate_rect(rect, egui::Sense::hover());
-
-                    // Draw frame manually at full width.
-                    ui.painter().rect_filled(rect, 4.0, colors.bg_panel);
-                    ui.painter()
-                        .rect_stroke(rect, 4.0, Stroke::new(1.0, colors.border));
-
-                    let inner_rect = rect.shrink2(egui::vec2(margin.left, margin.top));
-                    let mut slicer_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(inner_rect)
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-
-                    let colors = ThemeColors::from_ui(&slicer_ui);
-                    slicer_ui.set_width(inner_rect.width());
-
-                    // Clamp to valid range
-                    let clamped_bin = current_tof_bin.min(n_bins - 1);
-                    let mut bin = clamped_bin;
-
-                    // Use horizontal layout with fixed label widths
-                    let total_width = inner_rect.width();
-                    let label_width = 70.0;
-                    let value_width = 70.0;
-                    let spacing = slicer_ui.spacing().item_spacing.x;
-                    let slider_width =
-                        (total_width - label_width - value_width - spacing * 2.0).max(120.0);
-
-                    let prev_slider_width = slicer_ui.spacing().slider_width;
-                    slicer_ui.spacing_mut().slider_width = slider_width;
-                    slicer_ui.allocate_ui_with_layout(
-                        egui::vec2(label_width, slicer_ui.available_height()),
-                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new("TOF Slice")
-                                    .size(11.0)
-                                    .color(colors.text_muted),
-                            );
-                        },
-                    );
-
-                    let slider = slicer_ui.add(
-                        egui::Slider::new(&mut bin, 0..=(n_bins - 1))
-                            .show_value(false)
-                            .clamping(egui::SliderClamping::Always),
-                    );
-                    slicer_ui.spacing_mut().slider_width = prev_slider_width;
-
-                    slicer_ui.allocate_ui_with_layout(
-                        egui::vec2(value_width, slicer_ui.available_height()),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            let colors = ThemeColors::from_ui(ui);
-                            ui.label(
-                                egui::RichText::new(format!("{} / {}", bin + 1, n_bins))
-                                    .size(11.0)
-                                    .color(colors.text_primary),
-                            );
-                        },
-                    );
-
-                    if slider.changed() && bin != current_tof_bin {
-                        new_tof_bin = Some(bin);
-                    }
-                }
-
-                // Spectrum viewer (at bottom)
-                if show_spectrum {
-                    ui.add_space(8.0);
-                    self.render_spectrum_panel(
-                        ctx,
-                        ui,
-                        &spectrum,
-                        slicer_enabled,
-                        current_tof_bin,
-                        n_bins,
-                        &mut new_tof_bin,
-                    );
-                }
+                let layout = self.central_panel_layout(ui, inputs);
+                self.render_histogram_section(ctx, ui, colors, inputs, state, layout.image_height);
+                self.render_slicer_section(ui, inputs, state);
+                self.render_spectrum_section(ctx, ui, inputs, state);
             });
+    }
 
-        // Update slicer state if bin changed
-        if let Some(bin) = new_tof_bin {
+    fn finish_central_panel(&mut self, inputs: &CentralPanelInputs, state: &CentralPanelState) {
+        if let Some(bin) = state.new_tof_bin {
             self.ui_state.current_tof_bin = bin;
             self.texture = None;
         }
 
-        // Clear the reset flag after rendering
-        if needs_plot_reset || reset_view_clicked {
+        if inputs.needs_plot_reset || state.reset_view_clicked {
             self.ui_state.needs_plot_reset = false;
         }
+    }
+
+    fn central_panel_layout(
+        &self,
+        ui: &egui::Ui,
+        inputs: &CentralPanelInputs,
+    ) -> CentralPanelLayout {
+        let available_height = ui.available_height();
+        let slicer_height = if inputs.slicer_enabled && inputs.n_bins > 0 {
+            48.0
+        } else {
+            0.0
+        };
+        let spectrum_height = if inputs.show_spectrum {
+            if self.spectrum_has_legend() {
+                260.0
+            } else {
+                220.0
+            }
+        } else {
+            0.0
+        };
+        let image_height = available_height - slicer_height - spectrum_height - 8.0;
+        CentralPanelLayout { image_height }
+    }
+
+    fn spectrum_has_legend(&self) -> bool {
+        self.ui_state.full_fov_visible || self.roi_state.rois.iter().any(|roi| roi.spectrum_visible)
+    }
+
+    fn render_histogram_section(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        inputs: &CentralPanelInputs,
+        state: &mut CentralPanelState,
+        image_height: f32,
+    ) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), image_height.max(200.0)),
+            egui::Layout::left_to_right(egui::Align::TOP),
+            |ui| {
+                let plot_width = ui.available_width() - 60.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(plot_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        self.render_histogram_plot_area(ctx, ui, colors, inputs, state);
+                    },
+                );
+
+                ui.add_space(8.0);
+                self.render_colorbar(ui);
+            },
+        );
+    }
+
+    fn render_slicer_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        inputs: &CentralPanelInputs,
+        state: &mut CentralPanelState,
+    ) {
+        if inputs.slicer_enabled && inputs.n_bins > 0 {
+            let colors = ThemeColors::from_ui(ui);
+            ui.add_space(8.0);
+            let margin = egui::Margin::symmetric(16.0, 12.0);
+            let content_height = ui.spacing().interact_size.y.max(20.0);
+            let frame_height = content_height + margin.top + margin.bottom;
+
+            let left = ui.max_rect().left();
+            let right = ui.max_rect().right();
+            let top = ui.cursor().top();
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(left, top),
+                egui::pos2(right, top + frame_height),
+            );
+            let _ = ui.allocate_rect(rect, egui::Sense::hover());
+
+            ui.painter().rect_filled(rect, 4.0, colors.bg_panel);
+            ui.painter()
+                .rect_stroke(rect, 4.0, Stroke::new(1.0, colors.border));
+
+            let inner_rect = rect.shrink2(egui::vec2(margin.left, margin.top));
+            let mut slicer_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(inner_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+
+            let colors = ThemeColors::from_ui(&slicer_ui);
+            slicer_ui.set_width(inner_rect.width());
+
+            let clamped_bin = inputs.current_tof_bin.min(inputs.n_bins - 1);
+            let mut bin = clamped_bin;
+
+            let total_width = inner_rect.width();
+            let label_width = 70.0;
+            let value_width = 70.0;
+            let spacing = slicer_ui.spacing().item_spacing.x;
+            let slider_width = (total_width - label_width - value_width - spacing * 2.0).max(120.0);
+
+            let prev_slider_width = slicer_ui.spacing().slider_width;
+            slicer_ui.spacing_mut().slider_width = slider_width;
+            slicer_ui.allocate_ui_with_layout(
+                egui::vec2(label_width, slicer_ui.available_height()),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new("TOF Slice")
+                            .size(11.0)
+                            .color(colors.text_muted),
+                    );
+                },
+            );
+
+            let slider = slicer_ui.add(
+                egui::Slider::new(&mut bin, 0..=(inputs.n_bins - 1))
+                    .show_value(false)
+                    .clamping(egui::SliderClamping::Always),
+            );
+            slicer_ui.spacing_mut().slider_width = prev_slider_width;
+
+            slicer_ui.allocate_ui_with_layout(
+                egui::vec2(value_width, slicer_ui.available_height()),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let colors = ThemeColors::from_ui(ui);
+                    ui.label(
+                        egui::RichText::new(format!("{} / {}", bin + 1, inputs.n_bins))
+                            .size(11.0)
+                            .color(colors.text_primary),
+                    );
+                },
+            );
+
+            if slider.changed() && bin != inputs.current_tof_bin {
+                state.new_tof_bin = Some(bin);
+            }
+        }
+    }
+
+    fn render_spectrum_section(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        inputs: &CentralPanelInputs,
+        state: &mut CentralPanelState,
+    ) {
+        if inputs.show_spectrum {
+            ui.add_space(8.0);
+            let mut new_tof_bin = state.new_tof_bin;
+            let mut spectrum_inputs = SpectrumPanelInputs {
+                spectrum: &inputs.spectrum,
+                slicer_enabled: inputs.slicer_enabled,
+                current_tof_bin: inputs.current_tof_bin,
+                n_bins: inputs.n_bins,
+                new_tof_bin: &mut new_tof_bin,
+            };
+            self.render_spectrum_panel(ctx, ui, &mut spectrum_inputs);
+            state.new_tof_bin = new_tof_bin;
+        }
+    }
+
+    fn render_histogram_plot_area(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        inputs: &CentralPanelInputs,
+        state: &mut CentralPanelState,
+    ) {
+        let texture_id = self.texture.as_ref().map(egui::TextureHandle::id);
+        if let Some(tex_id) = texture_id {
+            self.render_histogram_toolbar(ui, colors, state);
+            ui.add_space(4.0);
+            self.render_histogram_plot(ctx, ui, inputs, state, tex_id);
+        } else {
+            self.render_histogram_empty(ui, colors);
+        }
+    }
+
+    fn render_histogram_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        state: &mut CentralPanelState,
+    ) {
+        ui.horizontal(|ui| {
+            self.render_roi_toolbar(ui);
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let reset_btn = egui::Button::new(
+                    egui::RichText::new("↺ Reset View")
+                        .size(10.0)
+                        .color(colors.text_muted),
+                )
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::new(1.0, colors.border_light))
+                .rounding(Rounding::same(4.0));
+
+                if ui
+                    .add(reset_btn)
+                    .on_hover_text("Reset view to fit data (or double-click)")
+                    .clicked()
+                {
+                    state.reset_view_clicked = true;
+                }
+
+                ui.add_space(6.0);
+                self.render_histogram_zoom_group(ui);
+
+                ui.add_space(8.0);
+                let grid_btn = egui::Button::new(egui::RichText::new("▦ Grid").size(10.0).color(
+                    if self.ui_state.show_grid {
+                        Color32::WHITE
+                    } else {
+                        colors.text_muted
+                    },
+                ))
+                .fill(if self.ui_state.show_grid {
+                    accent::BLUE
+                } else {
+                    Color32::TRANSPARENT
+                })
+                .stroke(Stroke::new(1.0, colors.border_light))
+                .rounding(Rounding::same(4.0));
+
+                if ui.add(grid_btn).on_hover_text("Toggle grid").clicked() {
+                    self.ui_state.show_grid = !self.ui_state.show_grid;
+                }
+            });
+        });
+    }
+
+    fn render_histogram_plot(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        inputs: &CentralPanelInputs,
+        state: &mut CentralPanelState,
+        tex_id: egui::TextureId,
+    ) {
+        let geometry = self.histogram_geometry(inputs);
+        let should_reset = inputs.needs_plot_reset || state.reset_view_clicked;
+        let plot_rect = ui.available_rect_before_wrap();
+        let interaction = self.compute_histogram_interaction(ctx);
+
+        let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
+            .data_aspect(1.0)
+            .auto_bounds(Vec2b::new(false, false))
+            .include_x(0.0)
+            .include_x(inputs.data_width_f64)
+            .include_y(0.0)
+            .include_y(inputs.data_height_f64)
+            .show_grid(Vec2b::new(inputs.show_grid, inputs.show_grid))
+            .x_axis_label("X (pixels)")
+            .y_axis_label("Y (pixels)")
+            .allow_drag(!interaction.disable_plot_drag);
+
+        if should_reset {
+            plot = plot.reset();
+        }
+
+        let min_roi_size = 2.0;
+        let roi_mode = self.roi_state.mode;
+        plot.show(ui, |plot_ui| {
+            self.maybe_reset_histogram_bounds(plot_ui, should_reset, plot_rect, &geometry);
+            self.draw_histogram_texture(plot_ui, tex_id, &geometry);
+            self.draw_hot_pixel_overlay(plot_ui);
+
+            let response = plot_ui.response().clone();
+            let pointer_pos = self.histogram_pointer_pos(plot_ui, &geometry);
+            let rect_drawing = !interaction.zoom_active
+                && roi_mode == RoiSelectionMode::Rectangle
+                && (interaction.shift_down || self.roi_state.draft.is_some());
+            let poly_drawing = !interaction.zoom_active
+                && roi_mode == RoiSelectionMode::Polygon
+                && (interaction.shift_down || self.roi_state.polygon_draft.is_some());
+
+            self.update_histogram_cursor_icon(
+                plot_ui,
+                pointer_pos,
+                &interaction,
+                rect_drawing,
+                poly_drawing,
+            );
+
+            if interaction.zoom_active {
+                self.handle_histogram_zoom(plot_ui, &interaction, &response, pointer_pos);
+            } else if rect_drawing || poly_drawing {
+                self.handle_histogram_roi_drawing(
+                    &response,
+                    pointer_pos,
+                    rect_drawing,
+                    poly_drawing,
+                    min_roi_size,
+                );
+            } else {
+                self.handle_histogram_roi_drag(
+                    ctx,
+                    plot_ui,
+                    &response,
+                    pointer_pos,
+                    interaction.handle_radius,
+                    min_roi_size,
+                    geometry.data_extent,
+                );
+            }
+
+            self.update_histogram_cursor_info(plot_ui, inputs);
+            self.handle_histogram_roi_clicks(
+                ctx,
+                &response,
+                pointer_pos,
+                interaction.handle_radius,
+                interaction.shift_down,
+            );
+            self.handle_histogram_roi_context_menu(
+                &response,
+                pointer_pos,
+                interaction.handle_radius,
+            );
+            self.finalize_histogram_plot(plot_ui);
+        });
+    }
+
+    fn render_histogram_empty(&self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let no_data_bg = if colors.bg_dark == super::theme::dark::BG_DARK {
+            Color32::from_rgb(0x0d, 0x0d, 0x0d)
+        } else {
+            Color32::from_rgb(0xe8, 0xe8, 0xe8)
+        };
+        egui::Frame::none()
+            .fill(no_data_bg)
+            .stroke(Stroke::new(1.0, colors.border))
+            .rounding(Rounding::same(4.0))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new("No Data")
+                            .size(14.0)
+                            .color(colors.text_dim),
+                    );
+                });
+            });
+    }
+
+    fn histogram_geometry(&self, inputs: &CentralPanelInputs) -> HistogramGeometry {
+        let half_x = inputs.data_width_f64 / 2.0;
+        let half_y = inputs.data_height_f64 / 2.0;
+        #[allow(clippy::cast_possible_truncation)]
+        let data_width_f32 = inputs.data_width_f64 as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let data_height_f32 = inputs.data_height_f64 as f32;
+        HistogramGeometry {
+            data_width_f64: inputs.data_width_f64,
+            data_height_f64: inputs.data_height_f64,
+            data_extent: inputs.data_extent,
+            half_x,
+            half_y,
+            data_width_f32,
+            data_height_f32,
+        }
+    }
+
+    fn compute_histogram_interaction(&self, ctx: &egui::Context) -> HistogramInteraction {
+        let shift_down = ctx.input(|i| i.modifiers.shift);
+        let zoom_mode = self.ui_state.hist_zoom_mode;
+        let zoom_active = zoom_mode != ZoomMode::None;
+        let handle_radius = 3.0;
+        let pre_drag_hit = if !shift_down
+            && !zoom_active
+            && ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary))
+        {
+            self.histogram_pre_drag_hit(ctx, handle_radius)
+        } else {
+            false
+        };
+        let roi_drag_active = self.roi_state.is_dragging() || self.roi_state.is_edit_dragging();
+        let roi_drawing_active =
+            self.roi_state.draft.is_some() || self.roi_state.polygon_draft.is_some();
+        let disable_plot_drag =
+            shift_down || roi_drag_active || roi_drawing_active || pre_drag_hit || zoom_active;
+        HistogramInteraction {
+            shift_down,
+            zoom_mode,
+            zoom_active,
+            handle_radius,
+            disable_plot_drag,
+        }
+    }
+
+    fn histogram_pre_drag_hit(&self, ctx: &egui::Context, handle_radius: f64) -> bool {
+        if let (Some(bounds), Some(rect), Some(pos)) = (
+            self.ui_state.roi_last_plot_bounds,
+            self.ui_state.roi_last_plot_rect,
+            ctx.input(|i| i.pointer.interact_pos()),
+        ) {
+            if rect.contains(pos) && rect.width() > 0.0 && rect.height() > 0.0 {
+                let x_frac = f64::from(pos.x - rect.left()) / f64::from(rect.width());
+                let y_frac = f64::from(pos.y - rect.top()) / f64::from(rect.height());
+                if (0.0..=1.0).contains(&x_frac) && (0.0..=1.0).contains(&y_frac) {
+                    let plot_x = bounds.min()[0] + x_frac * (bounds.max()[0] - bounds.min()[0]);
+                    let plot_y = bounds.max()[1] - y_frac * (bounds.max()[1] - bounds.min()[1]);
+                    let point = PlotPoint::new(plot_x, plot_y);
+                    return self
+                        .roi_state
+                        .hit_test_handle(point, handle_radius)
+                        .is_some()
+                        || self
+                            .roi_state
+                            .hit_test_vertex(point, handle_radius)
+                            .is_some()
+                        || self.roi_state.hit_test_edge(point, handle_radius).is_some()
+                        || self.roi_state.hit_test(point).is_some();
+                }
+            }
+        }
+        false
+    }
+
+    fn maybe_reset_histogram_bounds(
+        &self,
+        plot_ui: &mut egui_plot::PlotUi,
+        should_reset: bool,
+        plot_rect: Rect,
+        geometry: &HistogramGeometry,
+    ) {
+        if should_reset || plot_ui.response().double_clicked() {
+            let pad_x = (geometry.data_width_f64 * 0.05).max(16.0);
+            let pad_y = (geometry.data_height_f64 * 0.05).max(16.0);
+
+            let plot_w = f64::from(plot_rect.width().max(1.0));
+            let plot_h = f64::from(plot_rect.height().max(1.0));
+            let available_aspect = plot_w / plot_h;
+            let data_span_x = geometry.data_width_f64 + pad_x * 2.0;
+            let data_span_y = geometry.data_height_f64 + pad_y * 2.0;
+            let data_aspect = data_span_x / data_span_y;
+            let mut x_half = data_span_x / 2.0;
+            let mut y_half = data_span_y / 2.0;
+
+            if available_aspect >= data_aspect {
+                x_half = y_half * available_aspect;
+            } else {
+                y_half = x_half / available_aspect;
+            }
+
+            let center_x = geometry.data_width_f64 / 2.0;
+            let center_y = geometry.data_height_f64 / 2.0;
+            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                [center_x - x_half, center_y - y_half],
+                [center_x + x_half, center_y + y_half],
+            ));
+        }
+    }
+
+    fn draw_histogram_texture(
+        &self,
+        plot_ui: &mut egui_plot::PlotUi,
+        tex_id: egui::TextureId,
+        geometry: &HistogramGeometry,
+    ) {
+        plot_ui.image(PlotImage::new(
+            tex_id,
+            PlotPoint::new(geometry.half_x, geometry.half_y),
+            [geometry.data_width_f32, geometry.data_height_f32],
+        ));
+    }
+
+    fn draw_hot_pixel_overlay(&self, plot_ui: &mut egui_plot::PlotUi) {
+        if self.ui_state.view_mode == ViewMode::Hits && self.ui_state.show_hot_pixels {
+            if let Some(mask) = &self.pixel_masks {
+                if !mask.hot_points.is_empty() {
+                    let hot_points = Points::new(PlotPoints::new(mask.hot_points.clone()))
+                        .shape(MarkerShape::Square)
+                        .radius(2.0)
+                        .color(accent::RED)
+                        .allow_hover(false);
+                    plot_ui.points(hot_points);
+                }
+            }
+        }
+    }
+
+    fn histogram_pointer_pos(
+        &self,
+        plot_ui: &egui_plot::PlotUi,
+        geometry: &HistogramGeometry,
+    ) -> Option<PlotPoint> {
+        plot_ui.pointer_coordinate().map(|point| {
+            PlotPoint::new(
+                point.x.clamp(0.0, geometry.data_width_f64),
+                point.y.clamp(0.0, geometry.data_height_f64),
+            )
+        })
+    }
+
+    fn update_histogram_cursor_icon(
+        &self,
+        plot_ui: &mut egui_plot::PlotUi,
+        pointer_pos: Option<PlotPoint>,
+        interaction: &HistogramInteraction,
+        rect_drawing: bool,
+        poly_drawing: bool,
+    ) {
+        let response = plot_ui.response();
+        if !response.hovered() {
+            return;
+        }
+        if interaction.zoom_active {
+            let icon = match interaction.zoom_mode {
+                ZoomMode::In => egui::CursorIcon::ZoomIn,
+                ZoomMode::Out => egui::CursorIcon::ZoomOut,
+                ZoomMode::Box => egui::CursorIcon::Crosshair,
+                ZoomMode::None => egui::CursorIcon::Default,
+            };
+            plot_ui.ctx().set_cursor_icon(icon);
+            return;
+        }
+        if rect_drawing || poly_drawing {
+            plot_ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            return;
+        }
+        if let Some(pos) = pointer_pos {
+            if let Some((_, handle)) = self
+                .roi_state
+                .hit_test_handle(pos, interaction.handle_radius)
+            {
+                let icon =
+                    match handle {
+                        crate::viewer::RoiHandle::North | crate::viewer::RoiHandle::South => {
+                            egui::CursorIcon::ResizeVertical
+                        }
+                        crate::viewer::RoiHandle::East | crate::viewer::RoiHandle::West => {
+                            egui::CursorIcon::ResizeHorizontal
+                        }
+                        crate::viewer::RoiHandle::NorthEast
+                        | crate::viewer::RoiHandle::SouthWest => egui::CursorIcon::ResizeNeSw,
+                        crate::viewer::RoiHandle::NorthWest
+                        | crate::viewer::RoiHandle::SouthEast => egui::CursorIcon::ResizeNwSe,
+                    };
+                plot_ui.ctx().set_cursor_icon(icon);
+            } else if self
+                .roi_state
+                .hit_test_vertex(pos, interaction.handle_radius)
+                .is_some()
+            {
+                plot_ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            } else if self
+                .roi_state
+                .hit_test_edge(pos, interaction.handle_radius)
+                .is_some()
+            {
+                plot_ui
+                    .ctx()
+                    .set_cursor_icon(egui::CursorIcon::PointingHand);
+            } else if self.roi_state.hit_test(pos).is_some() {
+                plot_ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        }
+    }
+
+    fn handle_histogram_zoom(
+        &mut self,
+        plot_ui: &mut egui_plot::PlotUi,
+        interaction: &HistogramInteraction,
+        response: &egui::Response,
+        pointer_pos: Option<PlotPoint>,
+    ) {
+        match interaction.zoom_mode {
+            ZoomMode::In | ZoomMode::Out => {
+                if response.clicked() {
+                    let center = pointer_pos.unwrap_or_else(|| {
+                        let bounds = plot_ui.plot_bounds();
+                        let min = bounds.min();
+                        let max = bounds.max();
+                        PlotPoint::new((min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5)
+                    });
+                    let factor = if interaction.zoom_mode == ZoomMode::In {
+                        1.25
+                    } else {
+                        0.8
+                    };
+                    plot_ui.zoom_bounds(Vec2::splat(zoom_factor_to_f32(factor)), center);
+                }
+            }
+            ZoomMode::Box => {
+                if response.drag_started() {
+                    self.ui_state.hist_zoom_start = pointer_pos;
+                }
+                if response.dragged() {
+                    if let (Some(start), Some(current)) =
+                        (self.ui_state.hist_zoom_start, pointer_pos)
+                    {
+                        let start_screen = plot_ui.screen_from_plot(start);
+                        let current_screen = plot_ui.screen_from_plot(current);
+                        let rect = Rect::from_two_pos(start_screen, current_screen);
+                        let painter = plot_ui
+                            .ctx()
+                            .layer_painter(LayerId::new(Order::Foreground, response.id))
+                            .with_clip_rect(response.rect);
+                        painter.rect_filled(
+                            rect,
+                            Rounding::same(2.0),
+                            Color32::from_rgba_unmultiplied(58, 130, 246, 32),
+                        );
+                        painter.rect_stroke(
+                            rect,
+                            Rounding::same(2.0),
+                            Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
+                        );
+                    }
+                }
+                if response.drag_stopped() {
+                    if let (Some(start), Some(end)) = (self.ui_state.hist_zoom_start, pointer_pos) {
+                        let min_x = start.x.min(end.x);
+                        let max_x = start.x.max(end.x);
+                        let min_y = start.y.min(end.y);
+                        let max_y = start.y.max(end.y);
+                        if (max_x - min_x) > 1.0 && (max_y - min_y) > 1.0 {
+                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                                [min_x, min_y],
+                                [max_x, max_y],
+                            ));
+                        }
+                    }
+                    self.ui_state.hist_zoom_start = None;
+                }
+            }
+            ZoomMode::None => {}
+        }
+    }
+
+    fn handle_histogram_roi_drawing(
+        &mut self,
+        response: &egui::Response,
+        pointer_pos: Option<PlotPoint>,
+        rect_drawing: bool,
+        poly_drawing: bool,
+        min_roi_size: f64,
+    ) {
+        if rect_drawing {
+            if response.drag_started() {
+                if let Some(pos) = pointer_pos {
+                    self.roi_state.begin_rectangle(pos);
+                }
+            }
+            if response.dragged() {
+                if let Some(pos) = pointer_pos {
+                    self.roi_state.update_rectangle(pos);
+                }
+            }
+            if response.drag_stopped() {
+                self.roi_state.commit_rectangle(min_roi_size);
+            }
+        } else if poly_drawing {
+            self.roi_state.update_polygon_hover(pointer_pos);
+            if response.clicked() {
+                if let Some(pos) = pointer_pos {
+                    self.roi_state.add_polygon_point(pos);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_histogram_roi_drag(
+        &mut self,
+        ctx: &egui::Context,
+        plot_ui: &mut egui_plot::PlotUi,
+        response: &egui::Response,
+        pointer_pos: Option<PlotPoint>,
+        handle_radius: f64,
+        min_roi_size: f64,
+        data_extent: f64,
+    ) {
+        if response.drag_started() {
+            if let Some(pos) = pointer_pos {
+                if let Some((roi_id, index)) = self.roi_state.hit_test_vertex(pos, handle_radius) {
+                    let bounds = plot_ui.plot_bounds();
+                    self.roi_state.start_vertex_drag(roi_id, index, pos, bounds);
+                } else if let Some((hit_id, handle)) =
+                    self.roi_state.hit_test_handle(pos, handle_radius)
+                {
+                    let bounds = plot_ui.plot_bounds();
+                    self.roi_state.start_edit_drag(hit_id, handle, pos, bounds);
+                } else if let Some(hit_id) = self.roi_state.hit_test(pos) {
+                    let bounds = plot_ui.plot_bounds();
+                    self.roi_state.start_drag(hit_id, pos, bounds);
+                }
+            }
+        }
+        if response.dragged() {
+            if let Some(pos) = pointer_pos {
+                if self.roi_state.is_edit_dragging() {
+                    self.roi_state.update_vertex_drag(pos);
+                    self.roi_state
+                        .update_edit_drag(pos, min_roi_size, 0.0, data_extent);
+                } else {
+                    self.roi_state.update_drag(pos, 0.0, data_extent);
+                }
+            }
+        }
+        if response.drag_stopped() {
+            if let Err(err) = self.roi_state.end_vertex_drag() {
+                self.notify_roi_error(ctx, err);
+            }
+            self.roi_state.end_edit_drag();
+            self.roi_state.end_drag();
+        }
+    }
+
+    fn update_histogram_cursor_info(
+        &mut self,
+        plot_ui: &egui_plot::PlotUi,
+        inputs: &CentralPanelInputs,
+    ) {
+        if let Some(curr) = plot_ui.pointer_coordinate() {
+            let x = curr.x;
+            let y = curr.y;
+            if x >= 0.0 && y >= 0.0 && x < inputs.data_width_f64 && y < inputs.data_height_f64 {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (Some(xi), Some(yi)) = (
+                    f64_to_usize_bounded(x, inputs.data_width),
+                    f64_to_usize_bounded(y, inputs.data_height),
+                ) else {
+                    self.cursor_info = None;
+                    return;
+                };
+                let count = inputs
+                    .counts_for_cursor
+                    .as_ref()
+                    .map_or(0, |c| c[yi * inputs.data_width + xi]);
+                self.cursor_info = Some((xi, yi, count));
+            } else {
+                self.cursor_info = None;
+            }
+        } else {
+            self.cursor_info = None;
+        }
+    }
+
+    fn handle_histogram_roi_clicks(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        pointer_pos: Option<PlotPoint>,
+        handle_radius: f64,
+        shift_down: bool,
+    ) {
+        if response.clicked()
+            && self.roi_state.draft.is_none()
+            && self.roi_state.polygon_draft.is_none()
+            && !shift_down
+            && !self.roi_state.is_dragging()
+            && !self.roi_state.is_edit_dragging()
+        {
+            if let Some(pos) = pointer_pos {
+                match self.roi_state.insert_vertex_at(pos, handle_radius) {
+                    Ok(true) => {
+                        self.roi_state.select_at(pos);
+                    }
+                    Ok(false) => {
+                        if self.roi_state.hit_test(pos).is_some() {
+                            self.roi_state.select_at(pos);
+                        } else {
+                            self.roi_state.clear_edit_mode();
+                        }
+                    }
+                    Err(err) => {
+                        self.notify_roi_error(ctx, err);
+                    }
+                }
+            }
+        }
+
+        if response.double_clicked() && self.roi_state.draft.is_none() {
+            if let Some(pos) = pointer_pos {
+                if let Some(hit_id) = self.roi_state.hit_test(pos) {
+                    self.roi_state.set_edit_mode(hit_id, true);
+                } else {
+                    self.roi_state.clear_edit_mode();
+                }
+            }
+        }
+    }
+
+    fn handle_histogram_roi_context_menu(
+        &mut self,
+        response: &egui::Response,
+        pointer_pos: Option<PlotPoint>,
+        handle_radius: f64,
+    ) {
+        let mut suppress_context_menu = false;
+        if response.secondary_clicked() {
+            let mut target = None;
+            if let Some(pos) = pointer_pos {
+                if self.roi_state.delete_vertex_at(pos, handle_radius) {
+                    self.roi_state.set_context_menu(None);
+                    suppress_context_menu = true;
+                } else if let Some(hit_id) = self.roi_state.hit_test(pos) {
+                    self.roi_state.select_id(hit_id);
+                    target = Some(hit_id);
+                }
+            }
+            self.roi_state.set_context_menu(target);
+        }
+
+        response.context_menu(|ui| {
+            if suppress_context_menu {
+                ui.close_menu();
+                return;
+            }
+            if let Some(target) = self.roi_state.context_menu_target() {
+                if ui.button("Edit").clicked() {
+                    self.roi_state.set_edit_mode(target, true);
+                    ui.close_menu();
+                }
+                if ui.button("Delete").clicked() {
+                    self.roi_state.delete_id(target);
+                    ui.close_menu();
+                }
+            } else {
+                ui.label("No ROI");
+            }
+        });
+    }
+
+    fn finalize_histogram_plot(&mut self, plot_ui: &mut egui_plot::PlotUi) {
+        self.roi_state.draw(plot_ui);
+        self.roi_state.draw_draft(plot_ui);
+        self.ui_state.roi_last_plot_bounds = Some(plot_ui.plot_bounds());
+        self.ui_state.roi_last_plot_rect = Some(plot_ui.response().rect);
+    }
+
+    fn notify_roi_error(&mut self, ctx: &egui::Context, err: crate::viewer::RoiCommitError) {
+        let message = match err {
+            crate::viewer::RoiCommitError::TooFewPoints => {
+                "Polygon needs at least 3 points".to_string()
+            }
+            crate::viewer::RoiCommitError::SelfIntersecting => {
+                "Polygon edges cannot self-intersect".to_string()
+            }
+        };
+        let expires_at = ctx.input(|i| i.time) + 2.5;
+        self.ui_state.roi_warning = Some((message, expires_at));
     }
 
     /// Render the colorbar legend.
@@ -1103,43 +1339,65 @@ impl RustpixApp {
     }
 
     /// Render the spectrum panel with toolbar.
-    #[allow(
-        clippy::too_many_arguments,
-        clippy::similar_names,
-        clippy::too_many_lines,
-        clippy::ref_option
-    )]
     fn render_spectrum_panel(
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
-        spectrum: &Option<Vec<u64>>,
-        slicer_enabled: bool,
-        current_tof_bin: usize,
-        n_bins: usize,
-        new_tof_bin: &mut Option<usize>,
+        inputs: &mut SpectrumPanelInputs,
     ) {
         let colors = ThemeColors::from_ui(ui);
         self.update_roi_spectra(ctx);
 
-        // Track if spectrum reset was clicked
-        let mut spectrum_reset_clicked = false;
+        let mut spectrum_reset_clicked = self.ensure_energy_axis();
+        let has_full_spectrum = inputs.spectrum.as_ref().is_some_and(|s| !s.is_empty());
+        let has_visible_spectrum = self.has_visible_spectrum(inputs.spectrum.as_deref());
+
+        let toolbar_actions =
+            self.render_spectrum_toolbar(ui, &colors, has_full_spectrum, has_visible_spectrum);
+        spectrum_reset_clicked |= toolbar_actions.reset_clicked;
+
+        ui.add_space(4.0);
+        self.render_roi_data_panel(ctx);
+        self.render_spectrum_range_panel(ctx);
+
+        let Some(plot_data) = self.build_spectrum_plot_data(&colors, inputs) else {
+            self.render_spectrum_empty(ui);
+            return;
+        };
+
+        self.render_spectrum_plot(ui, &plot_data, inputs, spectrum_reset_clicked);
+        self.handle_spectrum_exports(&plot_data, inputs, &toolbar_actions, colors);
+        self.render_spectrum_legend_if_needed(ui, &plot_data.legend_items);
+    }
+
+    fn ensure_energy_axis(&mut self) -> bool {
         if self.ui_state.spectrum_x_axis == SpectrumXAxis::EnergyEv && self.flight_path_m <= 0.0 {
             self.ui_state.spectrum_x_axis = SpectrumXAxis::ToFMs;
-            spectrum_reset_clicked = true;
+            return true;
         }
-        let has_full_spectrum = spectrum.as_ref().is_some_and(|s| !s.is_empty());
-        let has_visible_spectrum = (self.ui_state.full_fov_visible && has_full_spectrum)
+        false
+    }
+
+    fn has_visible_spectrum(&self, spectrum: Option<&[u64]>) -> bool {
+        let has_full_spectrum = spectrum.is_some_and(|s| !s.is_empty());
+        (self.ui_state.full_fov_visible && has_full_spectrum)
             || self.roi_state.rois.iter().any(|roi| {
                 roi.spectrum_visible
                     && self
                         .roi_spectrum_data(roi.id)
                         .is_some_and(|data| !data.counts.is_empty())
-            });
-        let mut export_png_clicked = false;
-        let mut export_csv_clicked = false;
+            })
+    }
 
-        // Spectrum toolbar
+    #[allow(clippy::too_many_lines)]
+    fn render_spectrum_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        has_full_spectrum: bool,
+        has_visible_spectrum: bool,
+    ) -> SpectrumToolbarActions {
+        let mut actions = SpectrumToolbarActions::default();
         egui::Frame::none()
             .fill(colors.bg_panel)
             .stroke(Stroke::new(1.0, colors.border))
@@ -1151,7 +1409,6 @@ impl RustpixApp {
                     let energy_available = self.flight_path_m > 0.0;
                     let prev_axis = self.ui_state.spectrum_x_axis;
 
-                    // TOF/Energy selector
                     egui::ComboBox::from_id_salt("tof_unit")
                         .selected_text(self.ui_state.spectrum_x_axis.to_string())
                         .width(90.0)
@@ -1186,10 +1443,9 @@ impl RustpixApp {
                         });
 
                     if prev_axis != self.ui_state.spectrum_x_axis {
-                        spectrum_reset_clicked = true;
+                        actions.reset_clicked = true;
                     }
 
-                    // Spectrum settings
                     if ui
                         .add(
                             egui::Button::new("⚙")
@@ -1227,44 +1483,8 @@ impl RustpixApp {
                     }
 
                     ui.add_space(8.0);
-
-                    // Log axis toggles
-                    let logx_btn = egui::Button::new(egui::RichText::new("logX").size(10.0).color(
-                        if self.ui_state.log_x {
-                            Color32::WHITE
-                        } else {
-                            colors.text_dim
-                        },
-                    ))
-                    .fill(if self.ui_state.log_x {
-                        accent::BLUE
-                    } else {
-                        Color32::TRANSPARENT
-                    })
-                    .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0));
-                    if ui.add(logx_btn).clicked() {
-                        self.ui_state.log_x = !self.ui_state.log_x;
-                        spectrum_reset_clicked = true;
-                    }
-
-                    let logy_btn = egui::Button::new(egui::RichText::new("logY").size(10.0).color(
-                        if self.ui_state.log_y {
-                            Color32::WHITE
-                        } else {
-                            colors.text_dim
-                        },
-                    ))
-                    .fill(if self.ui_state.log_y {
-                        accent::BLUE
-                    } else {
-                        Color32::TRANSPARENT
-                    })
-                    .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0));
-                    if ui.add(logy_btn).clicked() {
-                        self.ui_state.log_y = !self.ui_state.log_y;
-                        spectrum_reset_clicked = true;
+                    if self.render_spectrum_log_toggles(ui, &colors) {
+                        actions.reset_clicked = true;
                     }
 
                     let range_btn = egui::Button::new(
@@ -1287,7 +1507,6 @@ impl RustpixApp {
                     Self::toolbar_divider(ui);
                     ui.add_space(8.0);
 
-                    // Export buttons
                     let png_btn = egui::Button::new(
                         egui::RichText::new("📷 PNG")
                             .size(10.0)
@@ -1301,7 +1520,7 @@ impl RustpixApp {
                         .on_hover_text("Export spectrum as PNG")
                         .clicked()
                     {
-                        export_png_clicked = true;
+                        actions.export_png_clicked = true;
                     }
 
                     let csv_btn = egui::Button::new(
@@ -1317,14 +1536,13 @@ impl RustpixApp {
                         .on_hover_text("Export spectrum as CSV")
                         .clicked()
                     {
-                        export_csv_clicked = true;
+                        actions.export_csv_clicked = true;
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let colors = ThemeColors::from_ui(ui);
                         self.render_spectrum_zoom_group(ui);
                         ui.add_space(6.0);
-                        // Reset button
                         if ui
                             .add(
                                 egui::Button::new(
@@ -1339,93 +1557,95 @@ impl RustpixApp {
                             .on_hover_text("Reset spectrum view (or double-click)")
                             .clicked()
                         {
-                            spectrum_reset_clicked = true;
+                            actions.reset_clicked = true;
                         }
                     });
                 });
             });
+        actions
+    }
 
-        ui.add_space(4.0);
-        self.render_roi_data_panel(ctx);
-        self.render_spectrum_range_panel(ctx);
+    #[allow(clippy::similar_names)]
+    fn render_spectrum_log_toggles(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) -> bool {
+        let mut reset = false;
+        let log_x_button = egui::Button::new(egui::RichText::new("logX").size(10.0).color(
+            if self.ui_state.log_x {
+                Color32::WHITE
+            } else {
+                colors.text_dim
+            },
+        ))
+        .fill(if self.ui_state.log_x {
+            accent::BLUE
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(Stroke::new(1.0, colors.border_light))
+        .rounding(Rounding::same(4.0));
+        if ui.add(log_x_button).clicked() {
+            self.ui_state.log_x = !self.ui_state.log_x;
+            reset = true;
+        }
 
-        // Spectrum plot
+        let log_y_button = egui::Button::new(egui::RichText::new("logY").size(10.0).color(
+            if self.ui_state.log_y {
+                Color32::WHITE
+            } else {
+                colors.text_dim
+            },
+        ))
+        .fill(if self.ui_state.log_y {
+            accent::BLUE
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(Stroke::new(1.0, colors.border_light))
+        .rounding(Rounding::same(4.0));
+        if ui.add(log_y_button).clicked() {
+            self.ui_state.log_y = !self.ui_state.log_y;
+            reset = true;
+        }
+        reset
+    }
+
+    fn build_spectrum_plot_data(
+        &self,
+        colors: &ThemeColors,
+        inputs: &SpectrumPanelInputs,
+    ) -> Option<SpectrumPlotData> {
         let log_x = self.ui_state.log_x;
         let log_y = self.ui_state.log_y;
-        let tdc_period = 1.0 / self.tdc_frequency;
-        let max_ms = tdc_period * 1e3;
-        let spec_bins = spectrum.as_ref().map_or(n_bins, Vec::len);
-        let bin_width_ms = if spec_bins > 0 {
-            max_ms / usize_to_f64(spec_bins)
-        } else {
-            0.0
-        };
         let axis = self.ui_state.spectrum_x_axis;
         let flight_path_m = self.flight_path_m;
         let tof_offset_ns = self.tof_offset_ns;
 
+        let (spec_bins, max_ms, bin_width_ms) =
+            self.spectrum_bin_params(inputs.spectrum.as_deref(), inputs.n_bins);
+
         let mut lines: Vec<(String, Color32, Vec<[f64; 2]>)> = Vec::new();
         let mut legend_items: Vec<(String, Color32)> = Vec::new();
-        let mut x_min: f64 = f64::INFINITY;
-        let mut x_max: f64 = f64::NEG_INFINITY;
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
         let mut y_max: f64 = 0.0;
 
-        let mut push_line = |name: String, color: Color32, counts: &[u64]| {
-            if counts.is_empty() || spec_bins == 0 {
-                return;
-            }
-            let mut points = Vec::with_capacity(counts.len());
-            let mut local_y_max: f64 = 0.0;
-            let mut local_x_min: f64 = f64::INFINITY;
-            let mut local_x_max: f64 = f64::NEG_INFINITY;
-            for (i, &c) in counts.iter().enumerate() {
-                let tof_ms = usize_to_f64(i) * bin_width_ms;
-                let mut x = match axis {
-                    SpectrumXAxis::ToFMs => tof_ms,
-                    SpectrumXAxis::EnergyEv => {
-                        let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns)
-                        else {
-                            continue;
-                        };
-                        e
-                    }
-                };
-                if log_x {
-                    if x <= 0.0 {
-                        continue;
-                    }
-                    x = x.log10();
-                }
-
-                let mut y = u64_to_f64(c);
-                if log_y {
-                    y = u64_to_f64(c.max(1)).log10();
-                }
-                if y > local_y_max {
-                    local_y_max = y;
-                }
-                if x < local_x_min {
-                    local_x_min = x;
-                }
-                if x > local_x_max {
-                    local_x_max = x;
-                }
-                points.push([x, y]);
-            }
-
-            if points.is_empty() {
-                return;
-            }
-            x_min = x_min.min(local_x_min);
-            x_max = x_max.max(local_x_max);
-            y_max = y_max.max(local_y_max);
-            legend_items.push((name.clone(), color));
-            lines.push((name, color, points));
-        };
-
         if self.ui_state.full_fov_visible {
-            if let Some(full) = spectrum.as_ref() {
-                push_line("Full FOV".to_string(), colors.text_muted, full);
+            if let Some(full) = inputs.spectrum.as_ref() {
+                if let Some((points, stats)) = Self::build_spectrum_line(
+                    full,
+                    axis,
+                    log_x,
+                    log_y,
+                    bin_width_ms,
+                    spec_bins,
+                    flight_path_m,
+                    tof_offset_ns,
+                ) {
+                    x_min = x_min.min(stats.x_min);
+                    x_max = x_max.max(stats.x_max);
+                    y_max = y_max.max(stats.y_max);
+                    legend_items.push(("Full FOV".to_string(), colors.text_muted));
+                    lines.push(("Full FOV".to_string(), colors.text_muted, points));
+                }
             }
         }
 
@@ -1436,37 +1656,131 @@ impl RustpixApp {
             let Some(data) = self.roi_spectrum_data(roi.id) else {
                 continue;
             };
-            push_line(roi.name.clone(), roi.color, &data.counts);
+            if let Some((points, stats)) = Self::build_spectrum_line(
+                &data.counts,
+                axis,
+                log_x,
+                log_y,
+                bin_width_ms,
+                spec_bins,
+                flight_path_m,
+                tof_offset_ns,
+            ) {
+                x_min = x_min.min(stats.x_min);
+                x_max = x_max.max(stats.x_max);
+                y_max = y_max.max(stats.y_max);
+                legend_items.push((roi.name.clone(), roi.color));
+                lines.push((roi.name.clone(), roi.color, points));
+            }
         }
 
         if lines.is_empty() {
-            let colors = ThemeColors::from_ui(ui);
-            // "No Data" placeholder - use theme-aware background
-            let no_data_bg = if colors.bg_dark == super::theme::dark::BG_DARK {
-                Color32::from_rgb(0x0d, 0x0d, 0x0d)
-            } else {
-                Color32::from_rgb(0xe8, 0xe8, 0xe8)
-            };
-            egui::Frame::none()
-                .fill(no_data_bg)
-                .stroke(Stroke::new(1.0, colors.border))
-                .rounding(Rounding::same(4.0))
-                .inner_margin(egui::Margin::same(16.0))
-                .show(ui, |ui| {
-                    let colors = ThemeColors::from_ui(ui);
-                    ui.set_min_height(140.0);
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            egui::RichText::new("Spectrum: No visible data")
-                                .size(11.0)
-                                .color(colors.text_dim),
-                        );
-                    });
-                });
-            return;
+            return None;
         }
 
+        let (x_min, x_max, y_max) = Self::sanitize_spectrum_bounds(x_min, x_max, y_max);
+        let (x_label, y_label) = Self::spectrum_axis_labels(axis, log_x, log_y);
+        let manual_bounds = self.spectrum_manual_bounds(log_x, log_y, x_min, x_max, y_max);
+        let export_bounds =
+            manual_bounds.unwrap_or_else(|| PlotBounds::from_min_max([x_min, 0.0], [x_max, y_max]));
+
+        Some(SpectrumPlotData {
+            axis,
+            log_x,
+            log_y,
+            bin_width_ms,
+            spec_bins,
+            max_ms,
+            x_min,
+            x_max,
+            y_max,
+            x_label,
+            y_label,
+            lines,
+            legend_items,
+            manual_bounds,
+            export_bounds,
+            flight_path_m,
+            tof_offset_ns,
+        })
+    }
+
+    fn spectrum_bin_params(&self, spectrum: Option<&[u64]>, n_bins: usize) -> (usize, f64, f64) {
+        let tdc_period = 1.0 / self.tdc_frequency;
+        let max_ms = tdc_period * 1e3;
+        let spec_bins = spectrum.map_or(n_bins, <[u64]>::len);
+        let bin_width_ms = if spec_bins > 0 {
+            max_ms / usize_to_f64(spec_bins)
+        } else {
+            0.0
+        };
+        (spec_bins, max_ms, bin_width_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_spectrum_line(
+        counts: &[u64],
+        axis: SpectrumXAxis,
+        log_x: bool,
+        log_y: bool,
+        bin_width_ms: f64,
+        spec_bins: usize,
+        flight_path_m: f64,
+        tof_offset_ns: f64,
+    ) -> Option<(Vec<[f64; 2]>, SpectrumLineStats)> {
+        if counts.is_empty() || spec_bins == 0 {
+            return None;
+        }
+        let mut points = Vec::with_capacity(counts.len());
+        let mut local_y_max: f64 = 0.0;
+        let mut x_min_local = f64::INFINITY;
+        let mut x_max_local = f64::NEG_INFINITY;
+        for (i, &c) in counts.iter().enumerate() {
+            let tof_ms = usize_to_f64(i) * bin_width_ms;
+            let mut x = match axis {
+                SpectrumXAxis::ToFMs => tof_ms,
+                SpectrumXAxis::EnergyEv => {
+                    let Some(e) = tof_ms_to_energy_ev(tof_ms, flight_path_m, tof_offset_ns) else {
+                        continue;
+                    };
+                    e
+                }
+            };
+            if log_x {
+                if x <= 0.0 {
+                    continue;
+                }
+                x = x.log10();
+            }
+
+            let mut y = u64_to_f64(c);
+            if log_y {
+                y = u64_to_f64(c.max(1)).log10();
+            }
+            local_y_max = local_y_max.max(y);
+            x_min_local = x_min_local.min(x);
+            x_max_local = x_max_local.max(x);
+            points.push([x, y]);
+        }
+
+        if points.is_empty() {
+            return None;
+        }
+        Some((
+            points,
+            SpectrumLineStats {
+                x_min: x_min_local,
+                x_max: x_max_local,
+                y_max: local_y_max,
+            },
+        ))
+    }
+
+    fn sanitize_spectrum_bounds(x_min: f64, x_max: f64, y_max: f64) -> (f64, f64, f64) {
         let x_span = x_max - x_min;
+        let mut x_min = x_min;
+        let mut x_max = x_max;
+        let mut y_max = y_max;
         if !x_min.is_finite() || !x_max.is_finite() || x_span.abs() <= f64::EPSILON {
             x_min = 0.0;
             x_max = 1.0;
@@ -1476,7 +1790,10 @@ impl RustpixApp {
         } else {
             y_max *= 1.05;
         }
+        (x_min, x_max, y_max)
+    }
 
+    fn spectrum_axis_labels(axis: SpectrumXAxis, log_x: bool, log_y: bool) -> (String, String) {
         let x_label = match axis {
             SpectrumXAxis::ToFMs => {
                 if log_x {
@@ -1494,7 +1811,17 @@ impl RustpixApp {
             }
         };
         let y_label = if log_y { "log10(Counts)" } else { "Counts" };
+        (x_label.to_string(), y_label.to_string())
+    }
 
+    fn spectrum_manual_bounds(
+        &self,
+        log_x: bool,
+        log_y: bool,
+        x_min: f64,
+        x_max: f64,
+        y_max: f64,
+    ) -> Option<PlotBounds> {
         let x_override = self
             .ui_state
             .spectrum_x_range
@@ -1527,7 +1854,7 @@ impl RustpixApp {
                     Some((min_val, max_val))
                 }
             });
-        let manual_bounds = if x_override.is_some() || y_override.is_some() {
+        if x_override.is_some() || y_override.is_some() {
             let mut min = [x_min, 0.0];
             let mut max = [x_max, y_max];
             if let Some((min_val, max_val)) = x_override {
@@ -1541,39 +1868,45 @@ impl RustpixApp {
             Some(PlotBounds::from_min_max(min, max))
         } else {
             None
-        };
-        let export_bounds =
-            manual_bounds.unwrap_or_else(|| PlotBounds::from_min_max([x_min, 0.0], [x_max, y_max]));
+        }
+    }
 
+    fn render_spectrum_plot(
+        &mut self,
+        ui: &mut egui::Ui,
+        data: &SpectrumPlotData,
+        inputs: &mut SpectrumPanelInputs,
+        spectrum_reset_clicked: bool,
+    ) {
         let zoom_mode = self.ui_state.spectrum_zoom_mode;
         let zoom_active = zoom_mode != ZoomMode::None;
         let mut zoom_start = self.ui_state.spectrum_zoom_start;
 
-        // Build the base spectrum plot
         let mut spectrum_plot = Plot::new("spectrum")
             .height(140.0)
-            .x_axis_label(x_label)
-            .y_axis_label(y_label)
-            .include_x(x_min)
-            .include_x(x_max)
+            .x_axis_label(&data.x_label)
+            .y_axis_label(&data.y_label)
+            .include_x(data.x_min)
+            .include_x(data.x_max)
             .include_y(0.0)
             .allow_drag(!zoom_active);
 
-        // Apply reset if needed
         if spectrum_reset_clicked {
             spectrum_plot = spectrum_plot.reset();
         }
 
         let plot_response = spectrum_plot.show(ui, |plot_ui| {
-            if let Some(bounds) = manual_bounds {
+            if let Some(bounds) = data.manual_bounds {
                 plot_ui.set_plot_bounds(bounds);
             }
-            // Reset on button click or double-click - show ALL data
             if spectrum_reset_clicked || plot_ui.response().double_clicked() {
-                plot_ui.set_plot_bounds(PlotBounds::from_min_max([x_min, 0.0], [x_max, y_max]));
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                    [data.x_min, 0.0],
+                    [data.x_max, data.y_max],
+                ));
             }
 
-            for (name, color, points) in &lines {
+            for (name, color, points) in &data.lines {
                 plot_ui.line(
                     Line::new(PlotPoints::new(points.clone()))
                         .color(*color)
@@ -1581,7 +1914,7 @@ impl RustpixApp {
                 );
             }
 
-            let response = plot_ui.response();
+            let response = plot_ui.response().clone();
             if response.hovered() && zoom_active {
                 let icon = match zoom_mode {
                     ZoomMode::In => egui::CursorIcon::ZoomIn,
@@ -1592,204 +1925,284 @@ impl RustpixApp {
                 plot_ui.ctx().set_cursor_icon(icon);
             }
 
-            if zoom_active {
-                match zoom_mode {
-                    ZoomMode::In | ZoomMode::Out => {
-                        if response.clicked() {
-                            let center = plot_ui.pointer_coordinate().unwrap_or_else(|| {
-                                let bounds = plot_ui.plot_bounds();
-                                let min = bounds.min();
-                                let max = bounds.max();
-                                PlotPoint::new((min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5)
-                            });
-                            let factor = if zoom_mode == ZoomMode::In { 1.25 } else { 0.8 };
-                            plot_ui.zoom_bounds(Vec2::splat(zoom_factor_to_f32(factor)), center);
-                        }
-                    }
-                    ZoomMode::Box => {
-                        if response.drag_started() {
-                            zoom_start = plot_ui.pointer_coordinate();
-                        }
-                        if response.dragged() {
-                            if let (Some(start), Some(current)) =
-                                (zoom_start, plot_ui.pointer_coordinate())
-                            {
-                                let start_screen = plot_ui.screen_from_plot(start);
-                                let current_screen = plot_ui.screen_from_plot(current);
-                                let rect = Rect::from_two_pos(start_screen, current_screen);
-                                let painter = plot_ui
-                                    .ctx()
-                                    .layer_painter(LayerId::new(Order::Foreground, response.id))
-                                    .with_clip_rect(response.rect);
-                                painter.rect_filled(
-                                    rect,
-                                    Rounding::same(2.0),
-                                    Color32::from_rgba_unmultiplied(58, 130, 246, 32),
-                                );
-                                painter.rect_stroke(
-                                    rect,
-                                    Rounding::same(2.0),
-                                    Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
-                                );
-                            }
-                        }
-                        if response.drag_stopped() {
-                            if let (Some(start), Some(end)) =
-                                (zoom_start, plot_ui.pointer_coordinate())
-                            {
-                                let min_x = start.x.min(end.x);
-                                let max_x = start.x.max(end.x);
-                                let min_y = start.y.min(end.y);
-                                let max_y = start.y.max(end.y);
-                                if (max_x - min_x) > f64::EPSILON && (max_y - min_y) > f64::EPSILON
-                                {
-                                    plot_ui.set_plot_bounds(PlotBounds::from_min_max(
-                                        [min_x, min_y],
-                                        [max_x, max_y],
-                                    ));
-                                }
-                            }
-                            zoom_start = None;
-                        }
-                    }
-                    ZoomMode::None => {}
-                }
-            }
-
-            // Slice marker
-            if slicer_enabled && current_tof_bin < spec_bins {
-                let slice_tof_ms = usize_to_f64(current_tof_bin) * bin_width_ms;
-                let slice_x = match axis {
-                    SpectrumXAxis::ToFMs => Some(slice_tof_ms),
-                    SpectrumXAxis::EnergyEv => {
-                        tof_ms_to_energy_ev(slice_tof_ms, flight_path_m, tof_offset_ns)
-                    }
-                };
-
-                if let Some(mut slice_x) = slice_x {
-                    if log_x {
-                        if slice_x > 0.0 {
-                            slice_x = slice_x.log10();
-                        } else {
-                            slice_x = x_min;
-                        }
-                    }
-                    plot_ui.vline(
-                        VLine::new(slice_x)
-                            .color(accent::RED)
-                            .width(1.0)
-                            .style(egui_plot::LineStyle::Dashed { length: 4.0 })
-                            .name(format!("Slice {}", current_tof_bin + 1)),
-                    );
-                }
-            }
-
-            // Handle drag to move slice marker
-            if !zoom_active && slicer_enabled && spec_bins > 0 {
-                let drag_delta = plot_ui.pointer_coordinate_drag_delta();
-                if drag_delta.x.abs() > 0.0 {
-                    if let Some(coord) = plot_ui.pointer_coordinate() {
-                        let mut x_axis = coord.x;
-                        if log_x {
-                            x_axis = 10_f64.powf(x_axis);
-                        }
-                        let x_ms = match axis {
-                            SpectrumXAxis::ToFMs => Some(x_axis),
-                            SpectrumXAxis::EnergyEv => {
-                                energy_ev_to_tof_ms(x_axis, flight_path_m, tof_offset_ns)
-                            }
-                        };
-                        let Some(x_ms) = x_ms else {
-                            return;
-                        };
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let bin = if x_ms <= 0.0 {
-                            0
-                        } else if x_ms >= max_ms {
-                            spec_bins - 1
-                        } else {
-                            ((x_ms / bin_width_ms) as usize).min(spec_bins - 1)
-                        };
-                        if bin != current_tof_bin {
-                            *new_tof_bin = Some(bin);
-                        }
-                    }
-                }
-            }
+            self.handle_spectrum_zoom(plot_ui, &response, zoom_mode, &mut zoom_start);
+            self.draw_spectrum_slice_marker(plot_ui, data, inputs);
+            self.handle_spectrum_slice_drag(plot_ui, data, inputs, zoom_active);
         });
 
         self.ui_state.spectrum_zoom_start = zoom_start;
         self.ui_state.spectrum_last_plot_bounds = Some(*plot_response.transform.bounds());
         self.ui_state.spectrum_last_plot_rect = Some(plot_response.response.rect);
 
-        // Click to set slice position
-        if !zoom_active && slicer_enabled && spec_bins > 0 && plot_response.response.clicked() {
-            if let Some(pos) = plot_response.response.interact_pointer_pos() {
-                let plot_bounds = plot_response.transform.bounds();
-                let plot_rect = plot_response.response.rect;
-                let x_frac = f64::from(pos.x - plot_rect.left()) / f64::from(plot_rect.width());
-                let x_plot =
-                    plot_bounds.min()[0] + x_frac * (plot_bounds.max()[0] - plot_bounds.min()[0]);
-                let mut x_axis = x_plot;
-                if log_x {
+        self.handle_spectrum_slice_click(&plot_response, data, inputs, zoom_active);
+    }
+
+    fn handle_spectrum_zoom(
+        &self,
+        plot_ui: &mut egui_plot::PlotUi,
+        response: &egui::Response,
+        zoom_mode: ZoomMode,
+        zoom_start: &mut Option<PlotPoint>,
+    ) {
+        if zoom_mode == ZoomMode::None {
+            return;
+        }
+        match zoom_mode {
+            ZoomMode::In | ZoomMode::Out => {
+                if response.clicked() {
+                    let center = plot_ui.pointer_coordinate().unwrap_or_else(|| {
+                        let bounds = plot_ui.plot_bounds();
+                        let min = bounds.min();
+                        let max = bounds.max();
+                        PlotPoint::new((min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5)
+                    });
+                    let factor = if zoom_mode == ZoomMode::In { 1.25 } else { 0.8 };
+                    plot_ui.zoom_bounds(Vec2::splat(zoom_factor_to_f32(factor)), center);
+                }
+            }
+            ZoomMode::Box => {
+                if response.drag_started() {
+                    *zoom_start = plot_ui.pointer_coordinate();
+                }
+                if response.dragged() {
+                    if let (Some(start), Some(current)) =
+                        (*zoom_start, plot_ui.pointer_coordinate())
+                    {
+                        let start_screen = plot_ui.screen_from_plot(start);
+                        let current_screen = plot_ui.screen_from_plot(current);
+                        let rect = Rect::from_two_pos(start_screen, current_screen);
+                        let painter = plot_ui
+                            .ctx()
+                            .layer_painter(LayerId::new(Order::Foreground, response.id))
+                            .with_clip_rect(response.rect);
+                        painter.rect_filled(
+                            rect,
+                            Rounding::same(2.0),
+                            Color32::from_rgba_unmultiplied(58, 130, 246, 32),
+                        );
+                        painter.rect_stroke(
+                            rect,
+                            Rounding::same(2.0),
+                            Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
+                        );
+                    }
+                }
+                if response.drag_stopped() {
+                    if let (Some(start), Some(end)) = (*zoom_start, plot_ui.pointer_coordinate()) {
+                        let min_x = start.x.min(end.x);
+                        let max_x = start.x.max(end.x);
+                        let min_y = start.y.min(end.y);
+                        let max_y = start.y.max(end.y);
+                        if (max_x - min_x) > f64::EPSILON && (max_y - min_y) > f64::EPSILON {
+                            plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                                [min_x, min_y],
+                                [max_x, max_y],
+                            ));
+                        }
+                    }
+                    *zoom_start = None;
+                }
+            }
+            ZoomMode::None => {}
+        }
+    }
+
+    fn draw_spectrum_slice_marker(
+        &self,
+        plot_ui: &mut egui_plot::PlotUi,
+        data: &SpectrumPlotData,
+        inputs: &SpectrumPanelInputs,
+    ) {
+        if inputs.slicer_enabled && inputs.current_tof_bin < data.spec_bins {
+            let slice_tof_ms = usize_to_f64(inputs.current_tof_bin) * data.bin_width_ms;
+            let slice_x = match data.axis {
+                SpectrumXAxis::ToFMs => Some(slice_tof_ms),
+                SpectrumXAxis::EnergyEv => {
+                    tof_ms_to_energy_ev(slice_tof_ms, data.flight_path_m, data.tof_offset_ns)
+                }
+            };
+
+            if let Some(mut slice_x) = slice_x {
+                if data.log_x {
+                    if slice_x > 0.0 {
+                        slice_x = slice_x.log10();
+                    } else {
+                        slice_x = data.x_min;
+                    }
+                }
+                plot_ui.vline(
+                    VLine::new(slice_x)
+                        .color(accent::RED)
+                        .width(1.0)
+                        .style(egui_plot::LineStyle::Dashed { length: 4.0 })
+                        .name(format!("Slice {}", inputs.current_tof_bin + 1)),
+                );
+            }
+        }
+    }
+
+    fn handle_spectrum_slice_drag(
+        &self,
+        plot_ui: &mut egui_plot::PlotUi,
+        data: &SpectrumPlotData,
+        inputs: &mut SpectrumPanelInputs,
+        zoom_active: bool,
+    ) {
+        if zoom_active || !inputs.slicer_enabled || data.spec_bins == 0 {
+            return;
+        }
+        let drag_delta = plot_ui.pointer_coordinate_drag_delta();
+        if drag_delta.x.abs() > 0.0 {
+            if let Some(coord) = plot_ui.pointer_coordinate() {
+                let mut x_axis = coord.x;
+                if data.log_x {
                     x_axis = 10_f64.powf(x_axis);
                 }
-                let x_ms = match axis {
+                let x_ms = match data.axis {
                     SpectrumXAxis::ToFMs => Some(x_axis),
                     SpectrumXAxis::EnergyEv => {
-                        energy_ev_to_tof_ms(x_axis, flight_path_m, tof_offset_ns)
+                        energy_ev_to_tof_ms(x_axis, data.flight_path_m, data.tof_offset_ns)
                     }
                 };
                 let Some(x_ms) = x_ms else {
                     return;
                 };
-
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let bin = if x_ms <= 0.0 {
                     0
-                } else if x_ms >= max_ms {
-                    spec_bins - 1
+                } else if x_ms >= data.max_ms {
+                    data.spec_bins - 1
                 } else {
-                    ((x_ms / bin_width_ms) as usize).min(spec_bins - 1)
+                    ((x_ms / data.bin_width_ms) as usize).min(data.spec_bins - 1)
                 };
-                if bin != current_tof_bin {
-                    *new_tof_bin = Some(bin);
+                if bin != inputs.current_tof_bin {
+                    *inputs.new_tof_bin = Some(bin);
                 }
             }
         }
+    }
 
-        if export_csv_clicked {
+    fn handle_spectrum_slice_click(
+        &self,
+        plot_response: &egui_plot::PlotResponse<()>,
+        data: &SpectrumPlotData,
+        inputs: &mut SpectrumPanelInputs,
+        zoom_active: bool,
+    ) {
+        if zoom_active
+            || !inputs.slicer_enabled
+            || data.spec_bins == 0
+            || !plot_response.response.clicked()
+        {
+            return;
+        }
+        if let Some(pos) = plot_response.response.interact_pointer_pos() {
+            let plot_bounds = plot_response.transform.bounds();
+            let plot_rect = plot_response.response.rect;
+            let x_frac = f64::from(pos.x - plot_rect.left()) / f64::from(plot_rect.width());
+            let x_plot =
+                plot_bounds.min()[0] + x_frac * (plot_bounds.max()[0] - plot_bounds.min()[0]);
+            let mut x_axis = x_plot;
+            if data.log_x {
+                x_axis = 10_f64.powf(x_axis);
+            }
+            let x_ms = match data.axis {
+                SpectrumXAxis::ToFMs => Some(x_axis),
+                SpectrumXAxis::EnergyEv => {
+                    energy_ev_to_tof_ms(x_axis, data.flight_path_m, data.tof_offset_ns)
+                }
+            };
+            let Some(x_ms) = x_ms else {
+                return;
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let bin = if x_ms <= 0.0 {
+                0
+            } else if x_ms >= data.max_ms {
+                data.spec_bins - 1
+            } else {
+                ((x_ms / data.bin_width_ms) as usize).min(data.spec_bins - 1)
+            };
+            if bin != inputs.current_tof_bin {
+                *inputs.new_tof_bin = Some(bin);
+            }
+        }
+    }
+
+    fn render_spectrum_empty(&self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let no_data_bg = if colors.bg_dark == super::theme::dark::BG_DARK {
+            Color32::from_rgb(0x0d, 0x0d, 0x0d)
+        } else {
+            Color32::from_rgb(0xe8, 0xe8, 0xe8)
+        };
+        egui::Frame::none()
+            .fill(no_data_bg)
+            .stroke(Stroke::new(1.0, colors.border))
+            .rounding(Rounding::same(4.0))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                let colors = ThemeColors::from_ui(ui);
+                ui.set_min_height(140.0);
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new("Spectrum: No visible data")
+                            .size(11.0)
+                            .color(colors.text_dim),
+                    );
+                });
+            });
+    }
+
+    fn handle_spectrum_exports(
+        &mut self,
+        data: &SpectrumPlotData,
+        inputs: &SpectrumPanelInputs,
+        actions: &SpectrumToolbarActions,
+        colors: ThemeColors,
+    ) {
+        if actions.export_csv_clicked {
             self.force_roi_spectra_update();
-            let full = spectrum.as_ref().map(Vec::as_slice);
+            let full = inputs.spectrum.as_ref().map(Vec::as_slice);
             let axis_config = SpectrumAxisConfig {
-                axis,
-                flight_path_m,
-                tof_offset_ns,
+                axis: data.axis,
+                flight_path_m: data.flight_path_m,
+                tof_offset_ns: data.tof_offset_ns,
             };
             if let Err(err) = Self::export_spectrum_csv(
                 full,
                 &self.roi_state.rois,
                 self.roi_spectra_map(),
                 self.ui_state.full_fov_visible,
-                bin_width_ms,
+                data.bin_width_ms,
                 axis_config,
             ) {
                 log::error!("Failed to export spectrum CSV: {err}");
             }
         }
 
-        if export_png_clicked && !lines.is_empty() {
-            let export_config = SpectrumExportConfig { axis, log_x, log_y };
+        if actions.export_png_clicked && !data.lines.is_empty() {
+            let export_config = SpectrumExportConfig {
+                axis: data.axis,
+                log_x: data.log_x,
+                log_y: data.log_y,
+            };
             if let Err(err) =
-                Self::export_spectrum_png(&lines, export_bounds, colors, &export_config)
+                Self::export_spectrum_png(&data.lines, data.export_bounds, colors, &export_config)
             {
                 log::error!("Failed to export spectrum PNG: {err}");
             }
         }
+    }
 
+    fn render_spectrum_legend_if_needed(
+        &self,
+        ui: &mut egui::Ui,
+        legend_items: &[(String, Color32)],
+    ) {
         if !legend_items.is_empty() {
             ui.add_space(4.0);
-            Self::render_spectrum_legend(ui, &legend_items);
+            Self::render_spectrum_legend(ui, legend_items);
         }
     }
 
@@ -2338,7 +2751,6 @@ impl RustpixApp {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     fn export_spectrum_png(
         lines: &[(String, Color32, Vec<[f64; 2]>)],
         bounds: PlotBounds,
@@ -2348,7 +2760,22 @@ impl RustpixApp {
         let Some(path) = FileDialog::new().set_file_name("spectrum.png").save_file() else {
             return Ok(());
         };
+        let (mut img, geometry) = Self::spectrum_export_canvas(bounds, colors);
+        Self::draw_spectrum_grid(&mut img, &geometry);
+        Self::draw_spectrum_axes(&mut img, &geometry);
+        Self::draw_spectrum_ticks(&mut img, &geometry);
+        Self::draw_spectrum_axis_labels(&mut img, &geometry, export);
+        Self::draw_spectrum_lines(&mut img, &geometry, lines);
+        Self::draw_spectrum_legend(&mut img, &geometry, lines);
 
+        img.save(path)?;
+        Ok(())
+    }
+
+    fn spectrum_export_canvas(
+        bounds: PlotBounds,
+        colors: ThemeColors,
+    ) -> (RgbaImage, SpectrumExportGeometry) {
         let width: u32 = 800;
         let height: u32 = 240;
         let pad: i32 = 32;
@@ -2363,8 +2790,9 @@ impl RustpixApp {
             colors.border_light.b(),
             80,
         ));
+        let label_color = Self::color32_to_rgba(colors.text_muted);
 
-        let mut img = RgbaImage::from_pixel(width, height, bg);
+        let img = RgbaImage::from_pixel(width, height, bg);
 
         let min = bounds.min();
         let max = bounds.max();
@@ -2387,45 +2815,139 @@ impl RustpixApp {
         let x_scale = plot_w / (x_max - x_min).max(1e-9);
         let y_scale = plot_h / (y_max - y_min).max(1e-9);
 
-        // Grid (simple 5x5)
-        for i in 1..5 {
-            let t = f64::from(i) / 5.0;
-            let x = pad_f64 + t * plot_w;
-            let y = pad_f64 + t * plot_h;
-            Self::draw_line(
-                &mut img,
-                round_to_i32_clamped(x),
-                pad,
-                round_to_i32_clamped(x),
-                height_i32 - pad,
-                grid_color,
-            );
-            Self::draw_line(
-                &mut img,
-                pad,
-                round_to_i32_clamped(y),
-                width_i32 - pad,
-                round_to_i32_clamped(y),
-                grid_color,
-            );
-        }
-
-        // Axes
-        Self::draw_line(
-            &mut img,
-            pad,
-            height_i32 - pad,
-            width_i32 - pad,
-            height_i32 - pad,
-            axis_color,
-        );
-        Self::draw_line(&mut img, pad, pad, pad, height_i32 - pad, axis_color);
-
         let plot_left = pad;
         let plot_right = width_i32 - pad;
         let plot_top = pad;
         let plot_bottom = height_i32 - pad;
 
+        (
+            img,
+            SpectrumExportGeometry {
+                width,
+                height,
+                pad,
+                pad_f64,
+                plot_left,
+                plot_right,
+                plot_top,
+                plot_bottom,
+                plot_w,
+                plot_h,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                x_scale,
+                y_scale,
+                axis_color,
+                grid_color,
+                label_color,
+            },
+        )
+    }
+
+    fn draw_spectrum_grid(img: &mut RgbaImage, geo: &SpectrumExportGeometry) {
+        let width_i32 = i32::try_from(geo.width).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(geo.height).unwrap_or(i32::MAX);
+        for i in 1..5 {
+            let t = f64::from(i) / 5.0;
+            let x = geo.pad_f64 + t * geo.plot_w;
+            let y = geo.pad_f64 + t * geo.plot_h;
+            Self::draw_line(
+                img,
+                round_to_i32_clamped(x),
+                geo.pad,
+                round_to_i32_clamped(x),
+                height_i32 - geo.pad,
+                geo.grid_color,
+            );
+            Self::draw_line(
+                img,
+                geo.pad,
+                round_to_i32_clamped(y),
+                width_i32 - geo.pad,
+                round_to_i32_clamped(y),
+                geo.grid_color,
+            );
+        }
+    }
+
+    fn draw_spectrum_axes(img: &mut RgbaImage, geo: &SpectrumExportGeometry) {
+        let width_i32 = i32::try_from(geo.width).unwrap_or(i32::MAX);
+        let height_i32 = i32::try_from(geo.height).unwrap_or(i32::MAX);
+        Self::draw_line(
+            img,
+            geo.pad,
+            height_i32 - geo.pad,
+            width_i32 - geo.pad,
+            height_i32 - geo.pad,
+            geo.axis_color,
+        );
+        Self::draw_line(
+            img,
+            geo.pad,
+            geo.pad,
+            geo.pad,
+            height_i32 - geo.pad,
+            geo.axis_color,
+        );
+    }
+
+    fn draw_spectrum_ticks(img: &mut RgbaImage, geo: &SpectrumExportGeometry) {
+        let tick_count: i32 = 5;
+        for i in 0..=tick_count {
+            let t = f64::from(i) / f64::from(tick_count);
+            let x_val = geo.x_min + t * (geo.x_max - geo.x_min);
+            let y_val = geo.y_min + t * (geo.y_max - geo.y_min);
+            let x_pos = geo.pad_f64 + t * geo.plot_w;
+            let y_pos = geo.pad_f64 + (1.0 - t) * geo.plot_h;
+
+            let x_i = round_to_i32_clamped(x_pos);
+            let y_i = round_to_i32_clamped(y_pos);
+
+            Self::draw_line(
+                img,
+                x_i,
+                geo.plot_bottom,
+                x_i,
+                geo.plot_bottom + 4,
+                geo.axis_color,
+            );
+            let x_label = Self::format_tick(x_val);
+            let x_label_width = text_width_px(&x_label);
+            Self::draw_text(
+                img,
+                x_i - (x_label_width / 2),
+                geo.plot_bottom + 8,
+                &x_label,
+                geo.label_color,
+            );
+
+            Self::draw_line(
+                img,
+                geo.plot_left - 4,
+                y_i,
+                geo.plot_left,
+                y_i,
+                geo.axis_color,
+            );
+            let y_label = Self::format_tick(y_val);
+            let y_label_width = text_width_px(&y_label);
+            Self::draw_text(
+                img,
+                geo.plot_left - 6 - y_label_width,
+                y_i - 4,
+                &y_label,
+                geo.label_color,
+            );
+        }
+    }
+
+    fn draw_spectrum_axis_labels(
+        img: &mut RgbaImage,
+        geo: &SpectrumExportGeometry,
+        export: &SpectrumExportConfig,
+    ) {
         let axis_label = match export.axis {
             SpectrumXAxis::ToFMs => "TOF (MS)",
             SpectrumXAxis::EnergyEv => "ENERGY (EV)",
@@ -2441,110 +2963,79 @@ impl RustpixApp {
             "COUNTS".to_string()
         };
 
-        // Axis ticks + labels
-        let tick_color = axis_color;
-        let label_color = Self::color32_to_rgba(colors.text_muted);
-        let tick_count: i32 = 5;
-        for i in 0..=tick_count {
-            let t = f64::from(i) / f64::from(tick_count);
-            let x_val = x_min + t * (x_max - x_min);
-            let y_val = y_min + t * (y_max - y_min);
-            let x_pos = pad_f64 + t * plot_w;
-            let y_pos = pad_f64 + (1.0 - t) * plot_h;
-
-            let x_i = round_to_i32_clamped(x_pos);
-            let y_i = round_to_i32_clamped(y_pos);
-
-            // X ticks
-            Self::draw_line(&mut img, x_i, plot_bottom, x_i, plot_bottom + 4, tick_color);
-            let x_label = Self::format_tick(x_val);
-            let x_label_width = text_width_px(&x_label);
-            Self::draw_text(
-                &mut img,
-                x_i - (x_label_width / 2),
-                plot_bottom + 8,
-                &x_label,
-                label_color,
-            );
-
-            // Y ticks
-            Self::draw_line(&mut img, plot_left - 4, y_i, plot_left, y_i, tick_color);
-            let y_label = Self::format_tick(y_val);
-            let y_label_width = text_width_px(&y_label);
-            Self::draw_text(
-                &mut img,
-                plot_left - 6 - y_label_width,
-                y_i - 4,
-                &y_label,
-                label_color,
-            );
-        }
-
-        // Axis labels
         let x_label = x_label_text.to_ascii_uppercase();
         let y_label = y_label_text.to_ascii_uppercase();
         let x_label_width = text_width_px(&x_label);
         Self::draw_text(
-            &mut img,
-            i32::midpoint(plot_left, plot_right) - (x_label_width / 2),
-            plot_bottom + 20,
+            img,
+            i32::midpoint(geo.plot_left, geo.plot_right) - (x_label_width / 2),
+            geo.plot_bottom + 20,
             &x_label,
-            label_color,
+            geo.label_color,
         );
         Self::draw_text_vertical(
-            &mut img,
-            plot_left - 24,
-            i32::midpoint(plot_top, plot_bottom) - 18,
+            img,
+            geo.plot_left - 24,
+            i32::midpoint(geo.plot_top, geo.plot_bottom) - 18,
             &y_label,
-            label_color,
+            geo.label_color,
         );
+    }
 
+    fn draw_spectrum_lines(
+        img: &mut RgbaImage,
+        geo: &SpectrumExportGeometry,
+        lines: &[(String, Color32, Vec<[f64; 2]>)],
+    ) {
+        let height_i32 = i32::try_from(geo.height).unwrap_or(i32::MAX);
         for (_, color, points) in lines {
             let line_color = Self::color32_to_rgba(*color);
             let mut prev: Option<(i32, i32)> = None;
             for point in points {
-                let px = pad_f64 + (point[0] - x_min) * x_scale;
-                let py = f64::from(height_i32) - pad_f64 - (point[1] - y_min) * y_scale;
+                let px = geo.pad_f64 + (point[0] - geo.x_min) * geo.x_scale;
+                let py = f64::from(height_i32) - geo.pad_f64 - (point[1] - geo.y_min) * geo.y_scale;
                 let pixel = (round_to_i32_clamped(px), round_to_i32_clamped(py));
-                if pixel.0 < plot_left
-                    || pixel.0 > plot_right
-                    || pixel.1 < plot_top
-                    || pixel.1 > plot_bottom
+                if pixel.0 < geo.plot_left
+                    || pixel.0 > geo.plot_right
+                    || pixel.1 < geo.plot_top
+                    || pixel.1 > geo.plot_bottom
                 {
                     prev = None;
                     continue;
                 }
                 if let Some((prev_x, prev_y)) = prev {
-                    Self::draw_line(&mut img, prev_x, prev_y, pixel.0, pixel.1, line_color);
+                    Self::draw_line(img, prev_x, prev_y, pixel.0, pixel.1, line_color);
                 }
                 prev = Some(pixel);
             }
         }
+    }
 
-        // Legend
-        let legend_x = plot_left + 6;
-        let legend_y = plot_top + 6;
+    fn draw_spectrum_legend(
+        img: &mut RgbaImage,
+        geo: &SpectrumExportGeometry,
+        lines: &[(String, Color32, Vec<[f64; 2]>)],
+    ) {
+        let legend_x = geo.plot_left + 6;
+        let legend_y = geo.plot_top + 6;
         let cursor_x = legend_x;
         let mut cursor_y = legend_y;
-        Self::draw_text(&mut img, cursor_x, cursor_y, "LEGEND", label_color);
+        Self::draw_text(img, cursor_x, cursor_y, "LEGEND", geo.label_color);
         cursor_y += 10;
         for (name, color, _) in lines {
             let name = name.to_ascii_uppercase();
             let box_color = Self::color32_to_rgba(*color);
             Self::draw_rect_filled(
-                &mut img,
+                img,
                 cursor_x,
                 cursor_y + 2,
                 cursor_x + 8,
                 cursor_y + 10,
                 box_color,
             );
-            Self::draw_text(&mut img, cursor_x + 12, cursor_y, &name, label_color);
+            Self::draw_text(img, cursor_x + 12, cursor_y, &name, geo.label_color);
             cursor_y += 10;
         }
-
-        img.save(path)?;
-        Ok(())
     }
 
     fn format_tick(value: f64) -> String {
