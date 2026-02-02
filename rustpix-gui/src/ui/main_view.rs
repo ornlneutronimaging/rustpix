@@ -362,7 +362,12 @@ impl RustpixApp {
     }
 
     fn spectrum_has_legend(&self) -> bool {
-        self.ui_state.full_fov_visible || self.roi_state.rois.iter().any(|roi| roi.spectrum_visible)
+        self.ui_state.full_fov_visible
+            || self
+                .roi_state
+                .rois
+                .iter()
+                .any(|roi| roi.visibility.spectrum_visible)
     }
 
     fn render_histogram_section(
@@ -1391,7 +1396,7 @@ impl RustpixApp {
         let has_full_spectrum = spectrum.is_some_and(|s| !s.is_empty());
         (self.ui_state.full_fov_visible && has_full_spectrum)
             || self.roi_state.rois.iter().any(|roi| {
-                roi.spectrum_visible
+                roi.visibility.spectrum_visible
                     && self
                         .roi_spectrum_data(roi.id)
                         .is_some_and(|data| !data.counts.is_empty())
@@ -1686,7 +1691,7 @@ impl RustpixApp {
         }
 
         for roi in &self.roi_state.rois {
-            if !roi.spectrum_visible {
+            if !roi.visibility.spectrum_visible {
                 continue;
             }
             let Some(data) = self.roi_spectrum_data(roi.id) else {
@@ -2278,7 +2283,7 @@ impl RustpixApp {
         ui.add_space(6.0);
         for roi in &mut roi_state.rois {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut roi.spectrum_visible, "");
+                ui.checkbox(&mut roi.visibility.spectrum_visible, "");
                 ui.add(Self::legend_box(roi.color));
                 if ui_state.roi_rename_id == Some(roi.id) {
                     let response = ui.add(
@@ -2326,17 +2331,17 @@ impl RustpixApp {
             if ui.button("Show Full FOV Only").clicked() {
                 ui_state.full_fov_visible = true;
                 for roi in &mut roi_state.rois {
-                    roi.spectrum_visible = false;
+                    roi.visibility.spectrum_visible = false;
                 }
             }
             if ui.button("Show All ROIs").clicked() {
                 for roi in &mut roi_state.rois {
-                    roi.spectrum_visible = true;
+                    roi.visibility.spectrum_visible = true;
                 }
             }
             if ui.button("Hide All ROIs").clicked() {
                 for roi in &mut roi_state.rois {
-                    roi.spectrum_visible = false;
+                    roi.visibility.spectrum_visible = false;
                 }
             }
         });
@@ -2665,7 +2670,7 @@ impl RustpixApp {
         let full = full.unwrap_or(&[]);
         let mut visible_rois = Vec::new();
         for roi in rois {
-            if !roi.spectrum_visible {
+            if !roi.visibility.spectrum_visible {
                 continue;
             }
             let Some(entry) = roi_spectra.get(&roi.id) else {

@@ -15,14 +15,23 @@ pub enum RoiSelectionMode {
 
 /// Region of interest definition.
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct Roi {
     pub id: usize,
     pub name: String,
     pub color: Color32,
     pub shape: RoiShape,
+    pub visibility: RoiVisibility,
+    pub selection: RoiSelection,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoiVisibility {
     pub visible: bool,
     pub spectrum_visible: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoiSelection {
     pub selected: bool,
     pub edit_mode: bool,
 }
@@ -136,7 +145,12 @@ impl RoiState {
 
     /// Delete the currently selected ROI.
     pub fn delete_selected(&mut self) -> bool {
-        let Some(selected_id) = self.rois.iter().find(|roi| roi.selected).map(|roi| roi.id) else {
+        let Some(selected_id) = self
+            .rois
+            .iter()
+            .find(|roi| roi.selection.selected)
+            .map(|roi| roi.id)
+        else {
             return false;
         };
         self.rois.retain(|roi| roi.id != selected_id);
@@ -171,10 +185,10 @@ impl RoiState {
     pub fn set_edit_mode(&mut self, roi_id: usize, enabled: bool) {
         for roi in &mut self.rois {
             if roi.id == roi_id {
-                roi.edit_mode = enabled;
-                roi.selected = true;
+                roi.selection.edit_mode = enabled;
+                roi.selection.selected = true;
             } else if enabled {
-                roi.edit_mode = false;
+                roi.selection.edit_mode = false;
             }
         }
     }
@@ -182,7 +196,7 @@ impl RoiState {
     /// Clear edit mode for all ROIs.
     pub fn clear_edit_mode(&mut self) {
         for roi in &mut self.rois {
-            roi.edit_mode = false;
+            roi.selection.edit_mode = false;
         }
         self.edit_drag = None;
         self.vertex_drag = None;
@@ -243,10 +257,14 @@ impl RoiState {
                 x2: max_x,
                 y2: max_y,
             },
-            visible: true,
-            spectrum_visible: true,
-            selected: false,
-            edit_mode: false,
+            visibility: RoiVisibility {
+                visible: true,
+                spectrum_visible: true,
+            },
+            selection: RoiSelection {
+                selected: false,
+                edit_mode: false,
+            },
         };
 
         self.rois.push(roi);
@@ -297,10 +315,14 @@ impl RoiState {
             shape: RoiShape::Polygon {
                 vertices: draft.vertices,
             },
-            visible: true,
-            spectrum_visible: true,
-            selected: false,
-            edit_mode: false,
+            visibility: RoiVisibility {
+                visible: true,
+                spectrum_visible: true,
+            },
+            selection: RoiSelection {
+                selected: false,
+                edit_mode: false,
+            },
         };
 
         self.rois.push(roi);
@@ -332,7 +354,7 @@ impl RoiState {
             .rois
             .iter()
             .find(|roi| roi.id == roi_id)
-            .is_some_and(|roi| roi.selected);
+            .is_some_and(|roi| roi.selection.selected);
         if !already_selected {
             self.set_selected(Some(roi_id));
             let _ = bounds;
@@ -529,7 +551,7 @@ impl RoiState {
     /// Find resize handle hit for selected ROI in edit mode.
     pub fn hit_test_handle(&self, point: PlotPoint, threshold: f64) -> Option<(usize, RoiHandle)> {
         for roi in self.rois.iter().rev() {
-            if !roi.edit_mode {
+            if !roi.selection.edit_mode {
                 continue;
             }
             if let Some(handle) = roi.handle_hit(point, threshold) {
@@ -542,7 +564,7 @@ impl RoiState {
     /// Hit test polygon vertices in edit mode.
     pub fn hit_test_vertex(&self, point: PlotPoint, threshold: f64) -> Option<(usize, usize)> {
         for roi in self.rois.iter().rev() {
-            if !roi.edit_mode {
+            if !roi.selection.edit_mode {
                 continue;
             }
             if let Some(index) = roi.vertex_hit(point, threshold) {
@@ -555,7 +577,7 @@ impl RoiState {
     /// Hit test polygon edges in edit mode.
     pub fn hit_test_edge(&self, point: PlotPoint, threshold: f64) -> Option<(usize, usize)> {
         for roi in self.rois.iter().rev() {
-            if !roi.edit_mode {
+            if !roi.selection.edit_mode {
                 continue;
             }
             if let Some(index) = roi.edge_hit(point, threshold) {
@@ -568,10 +590,10 @@ impl RoiState {
     /// Render all ROIs to the plot.
     pub fn draw(&self, plot_ui: &mut PlotUi) {
         for roi in &self.rois {
-            if !roi.visible {
+            if !roi.visibility.visible {
                 continue;
             }
-            let stroke_width = if roi.selected { 2.0 } else { 1.0 };
+            let stroke_width = if roi.selection.selected { 2.0 } else { 1.0 };
             let stroke = Stroke::new(stroke_width, roi.color);
             let fill = roi_fill_color(roi.color);
 
@@ -616,7 +638,7 @@ impl RoiState {
                     .anchor(Align2::LEFT_TOP),
             );
 
-            if roi.edit_mode {
+            if roi.selection.edit_mode {
                 let handle_points = roi.handle_points();
                 if !handle_points.is_empty() {
                     plot_ui.points(
@@ -663,7 +685,7 @@ impl RoiState {
 
     fn set_selected(&mut self, id: Option<usize>) {
         for roi in &mut self.rois {
-            roi.selected = Some(roi.id) == id;
+            roi.selection.selected = Some(roi.id) == id;
         }
     }
 
