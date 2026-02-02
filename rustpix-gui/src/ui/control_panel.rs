@@ -116,7 +116,8 @@ impl RustpixApp {
             let scroll_len = text_width + gap;
             let t = ui.input(|i| i.time);
             #[allow(clippy::cast_possible_truncation)]
-            let offset = ((t as f32) * speed) % scroll_len;
+            let t_f32 = if t.is_finite() { t as f32 } else { f32::MAX };
+            let offset = (t_f32 * speed) % scroll_len;
             let x1 = status_rect.left() - offset;
             painter.galley(egui::pos2(x1, text_y), galley.clone(), status_color);
             painter.galley(
@@ -321,8 +322,7 @@ impl RustpixApp {
                     .size(11.0)
                     .color(colors.text_muted),
             );
-            #[allow(clippy::cast_possible_truncation)]
-            let count_usize = count as usize;
+            let count_usize = usize::try_from(count).unwrap_or(usize::MAX);
             ui.label(
                 egui::RichText::new(format_number(count_usize))
                     .size(11.0)
@@ -1586,7 +1586,7 @@ impl RustpixApp {
                         neutron_count,
                         view_mode,
                     );
-                    if !availability.deflate_ok {
+                    if !availability.deflate.is_available() {
                         Self::render_export_deflate_warning(ui);
                     }
                     if options.advanced {
@@ -1619,11 +1619,11 @@ impl RustpixApp {
         let masks_available = self.pixel_masks.is_some();
         let deflate_ok = hdf5::filters::deflate_available();
         ExportAvailability {
-            hits_available,
-            neutrons_available,
-            histogram_available,
-            masks_available,
-            deflate_ok,
+            hits: Availability::from(hits_available),
+            neutrons: Availability::from(neutrons_available),
+            histogram: Availability::from(histogram_available),
+            masks: Availability::from(masks_available),
+            deflate: Availability::from(deflate_ok),
         }
     }
 
@@ -1631,16 +1631,16 @@ impl RustpixApp {
         options: &mut Hdf5ExportOptions,
         availability: ExportAvailability,
     ) {
-        if !availability.hits_available {
+        if !availability.hits.is_available() {
             options.include_hits = false;
         }
-        if !availability.neutrons_available {
+        if !availability.neutrons.is_available() {
             options.include_neutrons = false;
         }
-        if !availability.histogram_available {
+        if !availability.histogram.is_available() {
             options.include_histogram = false;
         }
-        if !availability.masks_available {
+        if !availability.masks.is_available() {
             options.include_pixel_masks = false;
         }
     }
@@ -1683,7 +1683,7 @@ impl RustpixApp {
             "Hits".to_string()
         };
         ui.add_enabled(
-            availability.hits_available,
+            availability.hits.is_available(),
             egui::Checkbox::new(&mut options.include_hits, hits_label),
         );
 
@@ -1693,18 +1693,18 @@ impl RustpixApp {
             "Neutrons".to_string()
         };
         ui.add_enabled(
-            availability.neutrons_available,
+            availability.neutrons.is_available(),
             egui::Checkbox::new(&mut options.include_neutrons, neutrons_label),
         );
 
         let hist_label = format!("Histogram ({view_mode})");
         ui.add_enabled(
-            availability.histogram_available,
+            availability.histogram.is_available(),
             egui::Checkbox::new(&mut options.include_histogram, hist_label),
         );
 
         ui.add_enabled(
-            availability.masks_available,
+            availability.masks.is_available(),
             egui::Checkbox::new(&mut options.include_pixel_masks, "Pixel masks"),
         );
     }
@@ -1791,7 +1791,7 @@ impl RustpixApp {
             || options.include_neutrons
             || options.include_histogram
             || options.include_pixel_masks;
-        let can_export = any_selected && availability.deflate_ok && !export_in_progress;
+        let can_export = any_selected && availability.deflate.is_available() && !export_in_progress;
 
         ui.add_enabled(can_export, egui::Button::new("Save HDF5..."))
             .clicked()
@@ -1826,11 +1826,32 @@ enum CacheModeIcon {
 }
 
 #[derive(Clone, Copy)]
-#[allow(clippy::struct_excessive_bools)]
+enum Availability {
+    Available,
+    Unavailable,
+}
+
+impl Availability {
+    fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
+impl From<bool> for Availability {
+    fn from(value: bool) -> Self {
+        if value {
+            Self::Available
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct ExportAvailability {
-    hits_available: bool,
-    neutrons_available: bool,
-    histogram_available: bool,
-    masks_available: bool,
-    deflate_ok: bool,
+    hits: Availability,
+    neutrons: Availability,
+    histogram: Availability,
+    masks: Availability,
+    deflate: Availability,
 }

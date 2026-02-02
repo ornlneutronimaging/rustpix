@@ -1607,47 +1607,41 @@ impl RustpixApp {
         });
     }
 
-    #[allow(clippy::similar_names)]
     fn render_spectrum_log_toggles(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) -> bool {
         let mut reset = false;
-        let log_x_button = egui::Button::new(egui::RichText::new("logX").size(10.0).color(
-            if self.ui_state.log_x {
-                Color32::WHITE
-            } else {
-                colors.text_dim
-            },
-        ))
-        .fill(if self.ui_state.log_x {
-            accent::BLUE
-        } else {
-            Color32::TRANSPARENT
-        })
-        .stroke(Stroke::new(1.0, colors.border_light))
-        .rounding(Rounding::same(4.0));
-        if ui.add(log_x_button).clicked() {
+        if Self::render_log_toggle(ui, colors, "logX", self.ui_state.log_x) {
             self.ui_state.log_x = !self.ui_state.log_x;
             reset = true;
         }
 
-        let log_y_button = egui::Button::new(egui::RichText::new("logY").size(10.0).color(
-            if self.ui_state.log_y {
-                Color32::WHITE
-            } else {
-                colors.text_dim
-            },
-        ))
-        .fill(if self.ui_state.log_y {
-            accent::BLUE
-        } else {
-            Color32::TRANSPARENT
-        })
-        .stroke(Stroke::new(1.0, colors.border_light))
-        .rounding(Rounding::same(4.0));
-        if ui.add(log_y_button).clicked() {
+        if Self::render_log_toggle(ui, colors, "logY", self.ui_state.log_y) {
             self.ui_state.log_y = !self.ui_state.log_y;
             reset = true;
         }
         reset
+    }
+
+    fn render_log_toggle(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        label: &str,
+        enabled: bool,
+    ) -> bool {
+        let text_color = if enabled {
+            Color32::WHITE
+        } else {
+            colors.text_dim
+        };
+        let fill = if enabled {
+            accent::BLUE
+        } else {
+            Color32::TRANSPARENT
+        };
+        let button = egui::Button::new(egui::RichText::new(label).size(10.0).color(text_color))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        ui.add(button).clicked()
     }
 
     fn build_spectrum_plot_data(
