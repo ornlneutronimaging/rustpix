@@ -159,6 +159,8 @@ pub struct UiPanelPopups {
     pub show_roi_panel: bool,
     /// Whether the spectrum range panel is open.
     pub show_spectrum_range: bool,
+    /// Whether the ROI help panel is open.
+    pub show_roi_help: bool,
 }
 
 #[derive(Clone, Copy, Default)]

@@ -342,6 +342,7 @@ impl RustpixApp {
             .show(ctx, |ui| {
                 let layout = self.central_panel_layout(ui, inputs);
                 self.render_histogram_section(ctx, ui, colors, inputs, state, layout.image_height);
+                self.render_roi_help_panel(ctx);
                 self.render_slicer_section(ui, inputs, state);
                 self.render_spectrum_section(ctx, ui, inputs, state);
             });
@@ -1282,6 +1283,7 @@ impl RustpixApp {
                     }
 
                     self.render_roi_settings_menu(ui, &colors);
+                    self.render_roi_help_button(ui, &colors);
                 });
             });
 
@@ -1367,6 +1369,53 @@ impl RustpixApp {
         let image = Self::roi_icon_image(RoiToolbarIcon::Gear, colors.text_muted);
         image.paint_at(ui, gear_response.response.rect.shrink(4.0));
         gear_response.response.on_hover_text("ROI settings");
+    }
+
+    fn render_roi_help_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let help_button = egui::Button::new("?")
+            .min_size(egui::vec2(24.0, 22.0))
+            .fill(Color32::TRANSPARENT)
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        let response = ui.add(help_button);
+        if response.clicked() {
+            self.ui_state.panel_popups.show_roi_help = !self.ui_state.panel_popups.show_roi_help;
+        }
+        response.on_hover_text("ROI help");
+    }
+
+    fn render_roi_help_panel(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.panel_popups.show_roi_help {
+            return;
+        }
+        let mut open = self.ui_state.panel_popups.show_roi_help;
+        egui::Window::new("ROI Help")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Create").strong());
+                ui.label("• Shift + drag: rectangle ROI");
+                ui.label("• Shift + click: add polygon vertex");
+                ui.label("• Enter: close polygon (min 3 points)");
+                ui.label("• Esc: cancel draft");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Select & move").strong());
+                ui.label("• Click ROI to select");
+                ui.label("• Drag ROI to move");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Edit & delete").strong());
+                ui.label("• Double-click or right-click → Edit");
+                ui.label("• Drag handles/vertices to reshape");
+                ui.label("• Delete/Backspace removes selected ROI");
+                ui.label("• Right-click → Delete, Clear removes all");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Tips").strong());
+                ui.label("• ROIs stick to the image during pan/zoom");
+                ui.label("• Use ROI settings to debounce spectrum updates");
+            });
+        self.ui_state.panel_popups.show_roi_help = open;
     }
 
     fn commit_polygon_draft(&mut self, ctx: &egui::Context) {
