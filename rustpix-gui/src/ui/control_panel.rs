@@ -499,8 +499,8 @@ impl RustpixApp {
             .fit_to_exact_size(egui::vec2(14.0, 14.0));
 
         let cache_tooltip =
-            "Cache hits in RAM (supports rebuild/export, slower load). Applies on next load.";
-        let stream_tooltip = "Stream only (faster load, lower memory). Applies on next load.";
+            "Cache hits in RAM (enables rebuild + HDF5 export). Higher memory, slower load.";
+        let stream_tooltip = "Stream only (faster load, lower memory). Rebuild/export disabled.";
 
         egui::Frame::none()
             .fill(colors.bg_dark)
@@ -1294,7 +1294,8 @@ impl RustpixApp {
                 egui::RichText::new("Super-res")
                     .size(10.0)
                     .color(colors.text_muted),
-            );
+            )
+            .on_hover_text("Sub-pixel centroid scale (affects neutron coordinates + export)");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let step = 0.1;
                 let min = 1.0;
@@ -1313,7 +1314,8 @@ impl RustpixApp {
                         .range(min..=max)
                         .speed(step)
                         .suffix("×"),
-                );
+                )
+                .on_hover_text("Higher values increase spatial precision (more sub-pixels)");
                 if ui
                     .add_enabled(
                         self.super_resolution_factor > min,
@@ -1336,13 +1338,15 @@ impl RustpixApp {
         );
         ui.add_space(2.0);
 
-        ui.checkbox(&mut self.weighted_by_tot, "Weighted by TOT");
+        ui.checkbox(&mut self.weighted_by_tot, "Weighted by TOT")
+            .on_hover_text("Use TOT as weights for centroiding (more stable positions)");
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("Min TOT")
                     .size(10.0)
                     .color(colors.text_muted),
-            );
+            )
+            .on_hover_text("Ignore hits with very low TOT (reduces noise)");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let min = 0;
                 let max = 200;

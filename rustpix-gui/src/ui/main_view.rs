@@ -1526,7 +1526,7 @@ impl RustpixApp {
 
     fn render_spectrum_axis_selector(&mut self, ui: &mut egui::Ui, energy_available: bool) -> bool {
         let prev_axis = self.ui_state.spectrum_x_axis;
-        egui::ComboBox::from_id_salt("tof_unit")
+        let response = egui::ComboBox::from_id_salt("tof_unit")
             .selected_text(self.ui_state.spectrum_x_axis.to_string())
             .width(90.0)
             .show_ui(ui, |ui| {
@@ -1558,6 +1558,9 @@ impl RustpixApp {
                     self.ui_state.spectrum_x_axis = SpectrumXAxis::EnergyEv;
                 }
             });
+        response
+            .response
+            .on_hover_text("X-axis units (Energy requires flight path + TOF offset)");
         prev_axis != self.ui_state.spectrum_x_axis
     }
 
@@ -1591,7 +1594,7 @@ impl RustpixApp {
         let data_icon = Self::roi_icon_image(RoiToolbarIcon::Data, colors.text_muted);
         data_icon.paint_at(ui, data_response.rect.shrink(4.0));
         if data_response
-            .on_hover_text("Spectrum data selection")
+            .on_hover_text("Choose Full FOV / ROI curves to display")
             .clicked()
         {
             self.ui_state.panel_popups.show_roi_panel = !self.ui_state.panel_popups.show_roi_panel;
