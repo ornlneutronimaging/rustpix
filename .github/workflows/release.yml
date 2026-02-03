@@ -191,10 +191,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdist
-          path: dist
+          path: dist-sdist
 
-      - name: List artifacts
-        run: ls -la dist/
+      - name: Move sdist to dist directory
+        run: |
+          mv dist-sdist/*.tar.gz dist/
+          ls -la dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -259,7 +261,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdist
-          path: dist/wheels
+          path: dist-sdist
+
+      - name: Move sdist to wheels directory
+        run: mv dist-sdist/*.tar.gz dist/wheels/
 
       - name: Download CLI artifacts
         uses: actions/download-artifact@v4
