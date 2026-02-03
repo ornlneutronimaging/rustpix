@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="128" y1="128" x2="896" y2="896" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d7d7d7"/>
+      <stop offset="1" stop-color="#f0f0f0"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+
+  <!-- Grid (6x6 squares) -->
+  <g stroke="#0b78d1" stroke-width="10" stroke-linecap="round">
+    <line x1="120" y1="150" x2="904" y2="150"/>
+    <line x1="120" y1="250" x2="904" y2="250"/>
+    <line x1="120" y1="350" x2="904" y2="350"/>
+    <line x1="120" y1="450" x2="904" y2="450"/>
+    <line x1="120" y1="550" x2="904" y2="550"/>
+    <line x1="120" y1="650" x2="904" y2="650"/>
+    <line x1="120" y1="750" x2="904" y2="750"/>
+
+    <line x1="120" y1="150" x2="120" y2="750"/>
+    <line x1="250.6667" y1="150" x2="250.6667" y2="750"/>
+    <line x1="381.3333" y1="150" x2="381.3333" y2="750"/>
+    <line x1="512" y1="150" x2="512" y2="750"/>
+    <line x1="642.6667" y1="150" x2="642.6667" y2="750"/>
+    <line x1="773.3333" y1="150" x2="773.3333" y2="750"/>
+    <line x1="904" y1="150" x2="904" y2="750"/>
+  </g>
+
+  <!-- Neutron motif -->
+  <g stroke="#0b78d1" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="520" cy="520" r="18" fill="#0b78d1"/>
+
+    <line x1="520" y1="520" x2="458" y2="470"/>
+    <line x1="520" y1="520" x2="430" y2="540"/>
+    <line x1="520" y1="520" x2="458" y2="610"/>
+
+    <circle cx="458" cy="470" r="12" fill="#e9f2fb"/>
+    <circle cx="430" cy="540" r="12" fill="#e9f2fb"/>
+    <circle cx="458" cy="610" r="12" fill="#e9f2fb"/>
+  </g>
+
+  <!-- Signal arcs -->
+  <g stroke="#0b78d1" stroke-width="10" stroke-linecap="round" fill="none">
+    <path d="M 563 504 A 40 40 0 0 1 563 536"/>
+    <path d="M 582 492 A 65 65 0 0 1 582 548"/>
+    <path d="M 604 476 A 90 90 0 0 1 604 564"/>
+  </g>
+
+  <!-- Large arc -->
+  <path d="M 610 364 A 180 180 0 0 1 658 636" stroke="#0b78d1" stroke-width="12" stroke-linecap="round" fill="none"/>
+
+  <!-- Histogram curve -->
+  <path d="M 160 900 C 230 892 270 860 320 872 C 390 888 420 820 460 800 C 500 770 580 830 640 865 C 700 896 780 896 864 896" stroke="#0b78d1" stroke-width="12" stroke-linecap="round" fill="none"/>
+</svg>

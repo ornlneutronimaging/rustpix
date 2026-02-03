@@ -5,7 +5,7 @@ use crate::reader::EventBatch;
 use crate::{Error, Result};
 use hdf5::types::{H5Type, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
-use ndarray::{s, Array4, ArrayView, ArrayView1, ArrayView4, Zip};
+use ndarray::{s, Array4, ArrayView, ArrayView1, ArrayView2, ArrayView4, Zip};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_tpx::DetectorConfig;
 use std::collections::{HashMap, HashSet};
@@ -174,6 +174,8 @@ pub struct NeutronWriteOptions {
     pub x_size: u32,
     /// Detector Y size in pixels.
     pub y_size: u32,
+    /// Super-resolution factor used for neutron coordinates.
+    pub super_resolution_factor: f64,
     /// Chunk size along the event dimension.
     pub chunk_events: usize,
     /// Optional gzip compression level (0-9).
@@ -204,6 +206,7 @@ impl NeutronWriteOptions {
         Self {
             x_size,
             y_size,
+            super_resolution_factor: 1.0,
             chunk_events: 100_000,
             compression: Some(1),
             shuffle: true,
@@ -216,6 +219,45 @@ impl NeutronWriteOptions {
             include_n_hits: true,
         }
     }
+}
+
+/// Pixel mask write configuration.
+#[derive(Clone, Debug)]
+pub struct PixelMaskWriteOptions {
+    /// Optional gzip compression level (0-9).
+    pub compression: Option<u8>,
+    /// Enable shuffle filter before compression.
+    pub shuffle: bool,
+}
+
+impl Default for PixelMaskWriteOptions {
+    fn default() -> Self {
+        Self {
+            compression: Some(1),
+            shuffle: true,
+        }
+    }
+}
+
+/// Pixel mask data (dead/hot) for export.
+#[derive(Clone, Debug)]
+pub struct PixelMaskWriteData {
+    /// Detector X size in pixels.
+    pub width: usize,
+    /// Detector Y size in pixels.
+    pub height: usize,
+    /// Dead pixel mask (1 = dead, 0 = ok), row-major [y * width + x].
+    pub dead_mask: Vec<u8>,
+    /// Hot pixel mask (1 = hot, 0 = ok), row-major [y * width + x].
+    pub hot_mask: Vec<u8>,
+    /// Sigma threshold used for hot pixel detection.
+    pub hot_sigma: f64,
+    /// Absolute threshold used for hot pixel detection.
+    pub hot_threshold: f64,
+    /// Mean count used for thresholding.
+    pub mean: f64,
+    /// Standard deviation used for thresholding.
+    pub std_dev: f64,
 }
 
 /// Event data loaded from an `NXevent_data` group (hits).
@@ -260,10 +302,10 @@ pub struct NeutronEventData {
     pub chip_id: Option<Vec<u8>>,
     /// Number of hits per neutron.
     pub n_hits: Option<Vec<u16>>,
-    /// X coordinates (pixels).
-    pub x: Option<Vec<u16>>,
-    /// Y coordinates (pixels).
-    pub y: Option<Vec<u16>>,
+    /// X coordinates (pixels, may be super-resolution).
+    pub x: Option<Vec<f64>>,
+    /// Y coordinates (pixels, may be super-resolution).
+    pub y: Option<Vec<f64>>,
     /// Event group attributes.
     pub attrs: EventAttributes,
 }
@@ -281,6 +323,8 @@ pub struct EventAttributes {
     pub tof_offset_ns: Option<f64>,
     /// Energy axis representation (e.g., "tof").
     pub energy_axis_kind: Option<String>,
+    /// Super-resolution factor for neutron coordinates.
+    pub super_resolution_factor: Option<f64>,
 }
 
 /// Neutron event batch with pulse timestamp.
@@ -329,6 +373,100 @@ fn create_entry(
     set_attr_str_group(&entry, "NX_class", "NXentry")?;
     set_conversion_attrs(&entry, flight_path_m, tof_offset_ns, energy_axis_kind)?;
     Ok(entry)
+}
+
+#[derive(Clone, Debug, Default)]
+struct EntryMeta {
+    flight_path_m: Option<f64>,
+    tof_offset_ns: Option<f64>,
+    energy_axis_kind: Option<String>,
+}
+
+fn merge_entry_meta(
+    hits: Option<&HitWriteOptions>,
+    neutrons: Option<&NeutronWriteOptions>,
+    histogram: Option<&HistogramWriteOptions>,
+) -> Result<EntryMeta> {
+    let mut meta = EntryMeta::default();
+
+    if let Some(opts) = hits {
+        merge_meta_from(
+            &mut meta,
+            opts.flight_path_m,
+            opts.tof_offset_ns,
+            opts.energy_axis_kind.as_deref(),
+        )?;
+    }
+    if let Some(opts) = neutrons {
+        merge_meta_from(
+            &mut meta,
+            opts.flight_path_m,
+            opts.tof_offset_ns,
+            opts.energy_axis_kind.as_deref(),
+        )?;
+    }
+    if let Some(opts) = histogram {
+        merge_meta_from(
+            &mut meta,
+            opts.flight_path_m,
+            opts.tof_offset_ns,
+            opts.energy_axis_kind.as_deref(),
+        )?;
+    }
+
+    Ok(meta)
+}
+
+fn merge_meta_from(
+    meta: &mut EntryMeta,
+    flight_path_m: Option<f64>,
+    tof_offset_ns: Option<f64>,
+    energy_axis_kind: Option<&str>,
+) -> Result<()> {
+    fn floats_differ(a: f64, b: f64) -> bool {
+        let diff = (a - b).abs();
+        let scale = a.abs().max(b.abs()).max(1.0);
+        diff > (1e-9f64).max(1e-6f64 * scale)
+    }
+
+    if let Some(value) = flight_path_m {
+        if meta
+            .flight_path_m
+            .is_some_and(|existing| floats_differ(existing, value))
+        {
+            return Err(Error::InvalidFormat(
+                "conflicting flight path metadata".to_string(),
+            ));
+        }
+        meta.flight_path_m = Some(value);
+    }
+
+    if let Some(value) = tof_offset_ns {
+        if meta
+            .tof_offset_ns
+            .is_some_and(|existing| floats_differ(existing, value))
+        {
+            return Err(Error::InvalidFormat(
+                "conflicting TOF offset metadata".to_string(),
+            ));
+        }
+        meta.tof_offset_ns = Some(value);
+    }
+
+    if let Some(value) = energy_axis_kind {
+        if meta
+            .energy_axis_kind
+            .as_deref()
+            .is_some_and(|existing| existing != value)
+        {
+            return Err(Error::InvalidFormat(
+                "conflicting energy axis metadata".to_string(),
+            ));
+        }
+        meta.energy_axis_kind = Some(value.to_string());
+    }
+
+    Ok(())
 }
 
 fn create_event_group(
@@ -442,6 +580,101 @@ where
     Ok(())
 }
 
+/// Writes hits, neutrons, and/or histogram data into a single HDF5/NeXus file.
+///
+/// # Errors
+/// Returns an error if HDF5 I/O fails or metadata options conflict.
+pub fn write_combined_hdf5_batches<P: AsRef<Path>>(
+    path: P,
+    hits: Option<(&[EventBatch], &HitWriteOptions)>,
+    neutrons: Option<(&[NeutronEventBatch], &NeutronWriteOptions)>,
+    histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
+    pixel_masks: Option<(&PixelMaskWriteData, &PixelMaskWriteOptions)>,
+) -> Result<()> {
+    if hits.is_none() && neutrons.is_none() && histogram.is_none() && pixel_masks.is_none() {
+        return Err(Error::InvalidFormat(
+            "no HDF5 payloads selected".to_string(),
+        ));
+    }
+    let meta = merge_entry_meta(
+        hits.map(|(_, opts)| opts),
+        neutrons.map(|(_, opts)| opts),
+        histogram.map(|(_, opts)| opts),
+    )?;
+
+    let file = File::create(path)?;
+    set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
+    let entry = create_entry(
+        &file,
+        meta.flight_path_m,
+        meta.tof_offset_ns,
+        meta.energy_axis_kind.as_deref(),
+    )?;
+
+    if let Some((batches, options)) = hits {
+        let hits_group = create_event_group(
+            &entry,
+            "hits",
+            options.x_size,
+            options.y_size,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+        let mut writer = HitEventWriter::new(&hits_group, options)?;
+        for batch in batches {
+            writer.append_batch(batch, options)?;
+        }
+    }
+
+    if let Some((batches, options)) = neutrons {
+        let neutrons_group = create_event_group(
+            &entry,
+            "neutrons",
+            options.x_size,
+            options.y_size,
+            options.flight_path_m,
+            options.tof_offset_ns,
+            options.energy_axis_kind.as_deref(),
+        )?;
+        let mut writer = NeutronEventWriter::new(&neutrons_group, options)?;
+        for batch in batches {
+            writer.append_batch(batch, options)?;
+        }
+    }
+
+    if let Some((data, options)) = histogram {
+        let histogram_group = create_histogram_group(&entry, options)?;
+        write_histogram_datasets(&histogram_group, data, options)?;
+    }
+
+    if let Some((data, options)) = pixel_masks {
+        write_pixel_masks(&entry, data, options)?;
+    }
+
+    Ok(())
+}
+
+/// Writes combined hit, neutron, histogram, and pixel mask data into a single HDF5/NeXus file.
+///
+/// # Errors
+/// Returns an error if HDF5 I/O fails or if the input data is inconsistent.
+pub fn write_combined_hdf5<P: AsRef<Path>>(
+    path: P,
+    hits: Option<(&EventBatch, &HitWriteOptions)>,
+    neutrons: Option<(&NeutronEventBatch, &NeutronWriteOptions)>,
+    histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
+    pixel_masks: Option<(&PixelMaskWriteData, &PixelMaskWriteOptions)>,
+) -> Result<()> {
+    write_combined_hdf5_batches(
+        path,
+        hits.map(|(batch, options)| (std::slice::from_ref(batch), options)),
+        neutrons.map(|(batch, options)| (std::slice::from_ref(batch), options)),
+        histogram,
+        pixel_masks,
+    )
+}
+
 /// Reads hit events from an HDF5/NeXus file.
 ///
 /// # Errors
@@ -501,8 +734,8 @@ fn read_neutron_event_group(entry: &Group, group: &Group) -> Result<NeutronEvent
     let time_over_threshold_ns = read_dataset_vec_opt::<u64>(group, "time_over_threshold")?;
     let chip_id = read_dataset_vec_opt::<u8>(group, "chip_id")?;
     let n_hits = read_dataset_vec_opt::<u16>(group, "n_hits")?;
-    let x = read_dataset_vec_opt::<u16>(group, "x")?;
-    let y = read_dataset_vec_opt::<u16>(group, "y")?;
+    let x = read_dataset_vec_opt_f64(group, "x")?;
+    let y = read_dataset_vec_opt_f64(group, "y")?;
 
     let attrs = read_event_attrs(entry, group)?;
 
@@ -527,6 +760,7 @@ fn read_event_attrs(entry: &Group, group: &Group) -> Result<EventAttributes> {
         flight_path_m: read_attr_opt::<f64>(entry, "flight_path_m")?,
         tof_offset_ns: read_attr_opt::<f64>(entry, "tof_offset_ns")?,
         energy_axis_kind: read_attr_opt_string(entry, "energy_axis_kind")?,
+        super_resolution_factor: read_attr_opt::<f64>(group, "super_resolution_factor")?,
     };
 
     if let Some(value) = read_attr_opt::<f64>(group, "flight_path_m")? {
@@ -537,6 +771,9 @@ fn read_event_attrs(entry: &Group, group: &Group) -> Result<EventAttributes> {
     }
     if let Some(value) = read_attr_opt_string(group, "energy_axis_kind")? {
         attrs.energy_axis_kind = Some(value);
+    }
+    if let Some(value) = read_attr_opt::<f64>(group, "super_resolution_factor")? {
+        attrs.super_resolution_factor = Some(value);
     }
 
     Ok(attrs)
@@ -764,9 +1001,18 @@ struct NeutronEventWriter {
     pulse_count: usize,
 }
 
+fn normalize_super_resolution(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        1.0
+    }
+}
+
 impl NeutronEventWriter {
     #[allow(clippy::too_many_lines)]
     fn new(group: &Group, options: &NeutronWriteOptions) -> Result<Self> {
+        let super_res = normalize_super_resolution(options.super_resolution_factor);
         let event_id = create_extendable_dataset::<i32>(
             group,
             "event_id",
@@ -833,7 +1079,7 @@ impl NeutronEventWriter {
         };
 
         let x = if options.include_xy {
-            Some(create_extendable_dataset::<u16>(
+            Some(create_extendable_dataset::<f64>(
                 group,
                 "x",
                 options.chunk_events,
@@ -845,7 +1091,7 @@ impl NeutronEventWriter {
         };
 
         let y = if options.include_xy {
-            Some(create_extendable_dataset::<u16>(
+            Some(create_extendable_dataset::<f64>(
                 group,
                 "y",
                 options.chunk_events,
@@ -875,6 +1121,10 @@ impl NeutronEventWriter {
         if let Some(ds) = &y {
             set_dataset_units(ds, "pixel")?;
         }
+        group
+            .new_attr::<f64>()
+            .create("super_resolution_factor")?
+            .write_scalar(&super_res)?;
 
         Ok(Self {
             event_id,
@@ -916,9 +1166,22 @@ impl NeutronEventWriter {
         let mut y_values = Vec::with_capacity(count);
         let mut event_id = Vec::with_capacity(count);
 
+        let super_res = normalize_super_resolution(options.super_resolution_factor);
+
         for (&x, &y) in batch.neutrons.x.iter().zip(batch.neutrons.y.iter()) {
-            let x_pixel = x.round();
-            let y_pixel = y.round();
+            if !x.is_finite() || !y.is_finite() {
+                return Err(Error::InvalidFormat(
+                    "neutron x/y must be finite".to_string(),
+                ));
+            }
+            if x < 0.0 || y < 0.0 {
+                return Err(Error::InvalidFormat(
+                    "neutron x/y must be non-negative for event_id mapping".to_string(),
+                ));
+            }
+
+            let x_pixel = (x / super_res).round();
+            let y_pixel = (y / super_res).round();
 
             if x_pixel < 0.0 || y_pixel < 0.0 {
                 return Err(Error::InvalidFormat(
@@ -945,18 +1208,13 @@ impl NeutronEventWriter {
                 ));
             }
 
-            let x_u16 = u16::try_from(x_u32)
-                .map_err(|_| Error::InvalidFormat("neutron x exceeds u16 range".to_string()))?;
-            let y_u16 = u16::try_from(y_u32)
-                .map_err(|_| Error::InvalidFormat("neutron y exceeds u16 range".to_string()))?;
-
             let id = y_u32 * options.x_size + x_u32;
             let id = i32::try_from(id).map_err(|_| {
                 Error::InvalidFormat("event_id exceeds i32 range; adjust x_size/y_size".to_string())
             })?;
 
-            x_values.push(x_u16);
-            y_values.push(y_u16);
+            x_values.push(x);
+            y_values.push(y);
             event_id.push(id);
         }
 
@@ -1527,6 +1785,107 @@ fn write_histogram_axes(
     Ok(())
 }
 
+fn write_pixel_masks(
+    entry: &Group,
+    data: &PixelMaskWriteData,
+    options: &PixelMaskWriteOptions,
+) -> Result<()> {
+    if data.width == 0 || data.height == 0 {
+        return Err(Error::InvalidFormat(
+            "pixel mask dimensions must be greater than zero".to_string(),
+        ));
+    }
+    let expected = data.width.saturating_mul(data.height);
+    if data.dead_mask.len() != expected || data.hot_mask.len() != expected {
+        return Err(Error::InvalidFormat(
+            "pixel mask size does not match width/height".to_string(),
+        ));
+    }
+
+    let group = entry.create_group("pixel_masks")?;
+    set_attr_str_group(&group, "NX_class", "NXdata")?;
+    let width_u32 = u32::try_from(data.width)
+        .map_err(|_| Error::InvalidFormat("pixel mask width exceeds u32 range".to_string()))?;
+    let height_u32 = u32::try_from(data.height)
+        .map_err(|_| Error::InvalidFormat("pixel mask height exceeds u32 range".to_string()))?;
+    group
+        .new_attr::<u32>()
+        .create("x_size")?
+        .write_scalar(&width_u32)?;
+    group
+        .new_attr::<u32>()
+        .create("y_size")?
+        .write_scalar(&height_u32)?;
+    group
+        .new_attr::<f64>()
+        .create("hot_sigma")?
+        .write_scalar(&data.hot_sigma)?;
+    group
+        .new_attr::<f64>()
+        .create("hot_threshold")?
+        .write_scalar(&data.hot_threshold)?;
+    group
+        .new_attr::<f64>()
+        .create("mean")?
+        .write_scalar(&data.mean)?;
+    group
+        .new_attr::<f64>()
+        .create("std_dev")?
+        .write_scalar(&data.std_dev)?;
+
+    let chunk_y = data.height.clamp(1, 256);
+    let chunk_x = data.width.clamp(1, 256);
+
+    let dead_ds = create_mask_dataset(
+        &group,
+        "dead",
+        data.height,
+        data.width,
+        chunk_y,
+        chunk_x,
+        options,
+    )?;
+    let hot_ds = create_mask_dataset(
+        &group,
+        "hot",
+        data.height,
+        data.width,
+        chunk_y,
+        chunk_x,
+        options,
+    )?;
+
+    let dead_view = ArrayView2::from_shape((data.height, data.width), data.dead_mask.as_slice())
+        .map_err(|e| Error::InvalidFormat(format!("dead mask shape mismatch: {e}")))?;
+    dead_ds.write(dead_view)?;
+
+    let hot_view = ArrayView2::from_shape((data.height, data.width), data.hot_mask.as_slice())
+        .map_err(|e| Error::InvalidFormat(format!("hot mask shape mismatch: {e}")))?;
+    hot_ds.write(hot_view)?;
+
+    Ok(())
+}
+
+fn create_mask_dataset(
+    group: &Group,
+    name: &str,
+    height: usize,
+    width: usize,
+    chunk_y: usize,
+    chunk_x: usize,
+    options: &PixelMaskWriteOptions,
+) -> Result<Dataset> {
+    let mut builder = group.new_dataset::<u8>().shape((height, width));
+    builder = builder.chunk((chunk_y, chunk_x));
+    if options.shuffle {
+        builder = builder.shuffle();
+    }
+    if let Some(level) = options.compression {
+        builder = builder.deflate(level);
+    }
+    Ok(builder.create(name)?)
+}
+
 fn create_histogram_counts_dataset(
     group: &Group,
     shape: HistogramShape,
@@ -1649,12 +2008,12 @@ where
         builder = builder.chunk(chunk_shape);
     }
 
-    if let Some(level) = compression {
-        builder = builder.deflate(level);
-    }
-
     if shuffle {
         builder = builder.shuffle();
+    }
+
+    if let Some(level) = compression {
+        builder = builder.deflate(level);
     }
 
     Ok(builder.create(name)?)
@@ -1731,12 +2090,12 @@ fn create_extendable_dataset<T: H5Type>(
         .shape((0..,))
         .chunk((chunk_events,));
 
-    if let Some(level) = compression {
-        builder = builder.deflate(level);
-    }
-
     if shuffle {
         builder = builder.shuffle();
+    }
+
+    if let Some(level) = compression {
+        builder = builder.deflate(level);
     }
 
     Ok(builder.create(name)?)
@@ -1841,6 +2200,24 @@ fn read_dataset_vec_opt<T: H5Type>(group: &Group, name: &str) -> Result<Option<V
     }
 }
 
+fn read_dataset_vec_opt_f64(group: &Group, name: &str) -> Result<Option<Vec<f64>>> {
+    let Ok(dataset) = group.dataset(name) else {
+        return Ok(None);
+    };
+    if let Ok(values) = dataset.read_raw::<f64>() {
+        return Ok(Some(values));
+    }
+    if let Ok(values) = dataset.read_raw::<f32>() {
+        return Ok(Some(values.into_iter().map(f64::from).collect()));
+    }
+    if let Ok(values) = dataset.read_raw::<u16>() {
+        return Ok(Some(values.into_iter().map(f64::from).collect()));
+    }
+    Err(Error::InvalidFormat(format!(
+        "Unsupported datatype for dataset {name}"
+    )))
+}
+
 fn read_attr_opt<T: H5Type + Clone>(group: &Group, name: &str) -> Result<Option<T>> {
     match group.attr(name) {
         Ok(attr) => Ok(Some(attr.read_scalar::<T>()?)),
@@ -1937,6 +2314,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 512,
             y_size: 512,
+            super_resolution_factor: 1.0,
             chunk_events: 10,
             compression: None,
             shuffle: false,
@@ -1955,8 +2333,14 @@ mod tests {
         assert_eq!(data.event_id.len(), 2);
         assert_eq!(data.event_time_zero_ns, vec![12 * NS_PER_TICK]);
         assert_eq!(data.event_index, vec![0]);
-        assert_eq!(data.x.as_ref().unwrap(), &vec![10, 12]);
-        assert_eq!(data.y.as_ref().unwrap(), &vec![20, 22]);
+        let x = data.x.as_ref().unwrap();
+        let y = data.y.as_ref().unwrap();
+        assert_eq!(x.len(), 2);
+        assert_eq!(y.len(), 2);
+        assert!((x[0] - 10.2).abs() < 1e-6);
+        assert!((x[1] - 11.8).abs() < 1e-6);
+        assert!((y[0] - 20.4).abs() < 1e-6);
+        assert!((y[1] - 21.6).abs() < 1e-6);
         assert_eq!(
             data.time_over_threshold_ns.as_ref().unwrap(),
             &vec![175, 225]
@@ -2059,6 +2443,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 512,
             y_size: 512,
+            super_resolution_factor: 1.0,
             chunk_events: 2,
             compression: None,
             shuffle: false,
@@ -2083,6 +2468,127 @@ mod tests {
             vec![12 * NS_PER_TICK, 13 * NS_PER_TICK]
         );
         assert_eq!(data.event_index, vec![0, 1]);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_hdf5_combined_export_with_masks() {
+        let mut first = HitBatch::with_capacity(1);
+        first.x.extend_from_slice(&[1]);
+        first.y.extend_from_slice(&[3]);
+        first.tof.extend_from_slice(&[10]);
+        first.tot.extend_from_slice(&[5]);
+        first.timestamp.extend_from_slice(&[100]);
+        first.chip_id.extend_from_slice(&[0]);
+        first.cluster_id.extend_from_slice(&[-1]);
+
+        let mut second = HitBatch::with_capacity(1);
+        second.x.extend_from_slice(&[2]);
+        second.y.extend_from_slice(&[4]);
+        second.tof.extend_from_slice(&[20]);
+        second.tot.extend_from_slice(&[6]);
+        second.timestamp.extend_from_slice(&[200]);
+        second.chip_id.extend_from_slice(&[1]);
+        second.cluster_id.extend_from_slice(&[2]);
+
+        let hit_batches = vec![
+            EventBatch {
+                tdc_timestamp_25ns: 7,
+                hits: first,
+            },
+            EventBatch {
+                tdc_timestamp_25ns: 9,
+                hits: second,
+            },
+        ];
+
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.extend_from_slice(&[10.2]);
+        neutrons.y.extend_from_slice(&[20.4]);
+        neutrons.tof.extend_from_slice(&[30]);
+        neutrons.tot.extend_from_slice(&[7]);
+        neutrons.n_hits.extend_from_slice(&[2]);
+        neutrons.chip_id.extend_from_slice(&[1]);
+
+        let neutron_batches = vec![NeutronEventBatch {
+            tdc_timestamp_25ns: 12,
+            neutrons,
+        }];
+
+        let hit_options = HitWriteOptions {
+            x_size: 512,
+            y_size: 512,
+            chunk_events: 2,
+            compression: None,
+            shuffle: false,
+            flight_path_m: Some(2.5),
+            tof_offset_ns: Some(1.0),
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_cluster_id: true,
+        };
+
+        let neutron_options = NeutronWriteOptions {
+            x_size: 512,
+            y_size: 512,
+            super_resolution_factor: 1.0,
+            chunk_events: 2,
+            compression: None,
+            shuffle: false,
+            flight_path_m: Some(2.5 + 5e-10),
+            tof_offset_ns: Some(1.0),
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_n_hits: true,
+        };
+
+        let mask_data = PixelMaskWriteData {
+            width: 2,
+            height: 2,
+            dead_mask: vec![0, 1, 0, 1],
+            hot_mask: vec![1, 0, 1, 0],
+            hot_sigma: 5.0,
+            hot_threshold: 3.0,
+            mean: 1.2,
+            std_dev: 0.4,
+        };
+        let mask_options = PixelMaskWriteOptions {
+            compression: None,
+            shuffle: false,
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        write_combined_hdf5_batches(
+            file.path(),
+            Some((hit_batches.as_slice(), &hit_options)),
+            Some((neutron_batches.as_slice(), &neutron_options)),
+            None,
+            Some((&mask_data, &mask_options)),
+        )
+        .unwrap();
+
+        let hits = read_hits_hdf5(file.path()).unwrap();
+        assert_eq!(
+            hits.event_time_zero_ns,
+            vec![7 * NS_PER_TICK, 9 * NS_PER_TICK]
+        );
+        assert_eq!(hits.event_index, vec![0, 1]);
+
+        let neutrons = read_neutrons_hdf5(file.path()).unwrap();
+        assert_eq!(neutrons.event_time_zero_ns, vec![12 * NS_PER_TICK]);
+        assert_eq!(neutrons.event_index, vec![0]);
+
+        let h5 = File::open(file.path()).unwrap();
+        let masks = h5.group("entry").unwrap().group("pixel_masks").unwrap();
+        let dead = masks.dataset("dead").unwrap();
+        assert_eq!(dead.shape(), vec![2, 2]);
+        let x_size: u32 = masks.attr("x_size").unwrap().read_scalar().unwrap();
+        let y_size: u32 = masks.attr("y_size").unwrap().read_scalar().unwrap();
+        assert_eq!((x_size, y_size), (2, 2));
     }
 
     #[test]
@@ -2225,6 +2731,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 10,
             y_size: 10,
+            super_resolution_factor: 1.0,
             chunk_events: 10,
             compression: None,
             shuffle: false,
@@ -2260,6 +2767,7 @@ mod tests {
         let options = NeutronWriteOptions {
             x_size: 10,
             y_size: 10,
+            super_resolution_factor: 1.0,
             chunk_events: 10,
             compression: None,
             shuffle: false,

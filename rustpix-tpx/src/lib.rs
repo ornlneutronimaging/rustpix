@@ -382,6 +382,41 @@ impl DetectorConfig {
             (x, y)
         }
     }
+
+    /// Calculate detector dimensions from chip layout and transforms.
+    ///
+    /// Returns `(width, height)` in pixels sized to include all transformed
+    /// chip coordinates, preserving gaps/offsets introduced by transforms.
+    #[must_use]
+    pub fn detector_dimensions(&self) -> (usize, usize) {
+        if self.chip_transforms.is_empty() {
+            return (usize::from(self.chip_size_x), usize::from(self.chip_size_y));
+        }
+
+        let max_x = i32::from(self.chip_size_x.saturating_sub(1));
+        let max_y = i32::from(self.chip_size_y.saturating_sub(1));
+        let corners = [(0, 0), (max_x, 0), (0, max_y), (max_x, max_y)];
+
+        let mut max_global_x = 0i32;
+        let mut max_global_y = 0i32;
+
+        for transform in &self.chip_transforms {
+            for (x, y) in corners {
+                let gx = transform.a * x + transform.b * y + transform.tx;
+                let gy = transform.c * x + transform.d * y + transform.ty;
+                if gx > max_global_x {
+                    max_global_x = gx;
+                }
+                if gy > max_global_y {
+                    max_global_y = gy;
+                }
+            }
+        }
+
+        let max_x = usize::try_from(max_global_x.max(0)).unwrap_or(0);
+        let max_y = usize::try_from(max_global_y.max(0)).unwrap_or(0);
+        (max_x.saturating_add(1), max_y.saturating_add(1))
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +436,13 @@ mod tests {
         assert_f64_eq(config.tdc_frequency_hz, 60.0);
         assert!(config.enable_missing_tdc_correction);
         assert_eq!(config.chip_transforms.len(), 4);
+    }
+
+    #[test]
+    fn test_venus_detector_dimensions() {
+        let config = DetectorConfig::venus_defaults();
+        let (width, height) = config.detector_dimensions();
+        assert_eq!((width, height), (514, 514));
     }
 
     #[test]
