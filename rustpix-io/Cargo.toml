@@ -5,7 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation.workspace = true
 description = "Memory-mapped file I/O for rustpix"
+keywords = ["hdf5", "memory-mapped", "file-io", "neutron-imaging", "scientific"]
+categories = ["science", "filesystem"]
+readme = "README.md"
 
 [lints]
 workspace = true

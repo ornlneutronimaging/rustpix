@@ -5,7 +5,17 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation.workspace = true
 description = "Clustering algorithms (ABS, DBSCAN, Graph, Grid) with spatial indexing"
+keywords = [
+  "clustering",
+  "dbscan",
+  "spatial-indexing",
+  "neutron-imaging",
+  "scientific",
+]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true

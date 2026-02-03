@@ -17,14 +17,23 @@ edition = "2021"
 authors = ["ORNL Neutron Imaging <neutronimaging@ornl.gov>"]
 license = "MIT"
 repository = "https://github.com/ornlneutronimaging/rustpix"
+documentation = "https://docs.rs/rustpix-core"
 description = "High-performance Rust library for pixel detector data processing"
+keywords = [
+  "neutron-imaging",
+  "timepix",
+  "pixel-detector",
+  "clustering",
+  "scientific",
+]
+categories = ["science", "data-structures", "parsing"]
 
 [workspace.dependencies]
-# Internal crates
-rustpix-core = { path = "rustpix-core" }
-rustpix-tpx = { path = "rustpix-tpx" }
-rustpix-algorithms = { path = "rustpix-algorithms" }
-rustpix-io = { path = "rustpix-io" }
+# Internal crates (version for crates.io, path for local dev)
+rustpix-core = { version = "0.1.0", path = "rustpix-core" }
+rustpix-tpx = { version = "0.1.0", path = "rustpix-tpx" }
+rustpix-algorithms = { version = "0.1.0", path = "rustpix-algorithms" }
+rustpix-io = { version = "0.1.0", path = "rustpix-io" }
 
 # Parallelism
 rayon = "1.10"
@@ -35,7 +44,10 @@ serde_json = "1.0"
 ndarray = "0.16"
 
 # HDF5 (static build via hdf5-metno)
-hdf5 = { package = "hdf5-metno", version = "0.12", features = ["static", "zlib"] }
+hdf5 = { package = "hdf5-metno", version = "0.12", features = [
+  "static",
+  "zlib",
+] }
 
 # Memory-mapped I/O
 memmap2 = "0.9"

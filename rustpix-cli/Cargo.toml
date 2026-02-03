@@ -5,7 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation.workspace = true
 description = "Command-line interface for rustpix pixel detector processing"
+keywords = ["cli", "timepix", "neutron-imaging", "pixel-detector"]
+categories = ["command-line-utilities", "science"]
+readme = "README.md"
 
 [lints]
 workspace = true

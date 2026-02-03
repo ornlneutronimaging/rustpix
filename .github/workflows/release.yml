@@ -201,6 +201,44 @@ jobs:
         with:
           packages-dir: dist/
 
+  # Publish to crates.io
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crates (in dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish in dependency order with delays for crates.io indexing
+          echo "Publishing rustpix-core..."
+          cargo publish -p rustpix-core --no-verify
+          echo "Waiting for crates.io to index..."
+          sleep 30
+
+          echo "Publishing rustpix-tpx..."
+          cargo publish -p rustpix-tpx --no-verify
+          sleep 30
+
+          echo "Publishing rustpix-algorithms..."
+          cargo publish -p rustpix-algorithms --no-verify
+          sleep 30
+
+          echo "Publishing rustpix-io..."
+          cargo publish -p rustpix-io --no-verify
+          sleep 30
+
+          echo "Publishing rustpix-cli..."
+          cargo publish -p rustpix-cli --no-verify
+
+          echo "All crates published successfully!"
+
   # Create GitHub Release
   github-release:
     name: Create GitHub Release

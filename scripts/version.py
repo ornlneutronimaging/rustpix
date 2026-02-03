@@ -61,13 +61,25 @@ def read_pyproject_version() -> str:
 
 
 def write_workspace_version(version: str) -> None:
-    """Write version to workspace Cargo.toml."""
+    """Write version to workspace Cargo.toml (both package and dependencies)."""
     content = CARGO_WORKSPACE.read_text()
+
+    # Update [workspace.package].version
     new_content = re.sub(
         r'(\[workspace\.package\]\s*\n\s*version\s*=\s*)"[^"]+"',
         f'\\1"{version}"',
         content,
     )
+
+    # Update workspace.dependencies versions for internal crates (for crates.io)
+    internal_crates = ["rustpix-core", "rustpix-tpx", "rustpix-algorithms", "rustpix-io"]
+    for crate in internal_crates:
+        new_content = re.sub(
+            rf'({crate}\s*=\s*\{{\s*version\s*=\s*)"[^"]+"',
+            f'\\1"{version}"',
+            new_content,
+        )
+
     CARGO_WORKSPACE.write_text(new_content)
     print(f"  Updated {CARGO_WORKSPACE.relative_to(REPO_ROOT)}")
 
