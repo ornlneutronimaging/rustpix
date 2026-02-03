@@ -9,7 +9,7 @@ use crate::pipeline::AlgorithmType;
 use crate::state::{Hdf5ExportOptions, ViewMode};
 use crate::util::{format_bytes, format_number};
 use crate::viewer::Colormap;
-use rustpix_tpx::DetectorConfig;
+use rustpix_tpx::{ChipTransform, DetectorConfig};
 
 #[derive(Clone, Copy)]
 enum FileToolbarIcon {
@@ -906,6 +906,7 @@ impl RustpixApp {
             });
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_detector_profile_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let colors = ThemeColors::from_ui(ui);
@@ -955,6 +956,10 @@ impl RustpixApp {
                     match DetectorConfig::from_file(&path) {
                         Ok(config) => {
                             let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+                            if config.tdc_frequency_hz.is_finite() && config.tdc_frequency_hz > 0.0
+                            {
+                                self.tdc_frequency = config.tdc_frequency_hz;
+                            }
                             self.detector_profile.custom_config = Some(config);
                             self.detector_profile.custom_path = Some(path.clone());
                             self.detector_profile.custom_name = name;
@@ -965,6 +970,26 @@ impl RustpixApp {
                                 format!("Detector config load failed: {err}"),
                                 ui.ctx().input(|i| i.time + 6.0),
                             ));
+                        }
+                    }
+                }
+            }
+            if ui.button("Save detector config…").clicked() {
+                if let Some(path) = FileDialog::new()
+                    .add_filter("Detector config", &["json"])
+                    .save_file()
+                {
+                    let config = self.current_detector_config();
+                    if let Err(err) = config.to_file(&path) {
+                        self.ui_state.roi_warning = Some((
+                            format!("Detector config save failed: {err}"),
+                            ui.ctx().input(|i| i.time + 6.0),
+                        ));
+                    } else if self.detector_profile.kind == DetectorProfileKind::Custom {
+                        let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+                        self.detector_profile.custom_path = Some(path.clone());
+                        if let Some(name) = name {
+                            self.detector_profile.custom_name = Some(name);
                         }
                     }
                 }
@@ -988,6 +1013,162 @@ impl RustpixApp {
                 .color(colors.text_dim),
             );
         }
+
+        egui::CollapsingHeader::new("Edit detector config")
+            .default_open(false)
+            .show(ui, |ui| {
+                if self.detector_profile.custom_config.is_none() {
+                    ui.label("No custom config loaded.");
+                    if ui.button("Create custom from VENUS").clicked() {
+                        self.detector_profile.custom_config =
+                            Some(DetectorConfig::venus_defaults());
+                        if self.detector_profile.custom_name.is_none() {
+                            self.detector_profile.custom_name = Some("Custom".to_string());
+                        }
+                        self.detector_profile.custom_path = None;
+                        self.detector_profile.kind = DetectorProfileKind::Custom;
+                    }
+                    return;
+                }
+
+                let mut changed = false;
+                let mut validation_error = None;
+
+                {
+                    let Some(config) = self.detector_profile.custom_config.as_mut() else {
+                        return;
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label("Chip size X");
+                        let mut value = config.chip_size_x;
+                        if ui
+                            .add(egui::DragValue::new(&mut value).range(1..=u16::MAX))
+                            .changed()
+                        {
+                            config.chip_size_x = value;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Chip size Y");
+                        let mut value = config.chip_size_y;
+                        if ui
+                            .add(egui::DragValue::new(&mut value).range(1..=u16::MAX))
+                            .changed()
+                        {
+                            config.chip_size_y = value;
+                            changed = true;
+                        }
+                    });
+
+                    changed |= ui
+                        .checkbox(
+                            &mut config.enable_missing_tdc_correction,
+                            "Enable missing TDC correction",
+                        )
+                        .changed();
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Chip transforms");
+                        let colors = ThemeColors::from_ui(ui);
+                        ui.add(
+                            egui::Button::new("?")
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(Stroke::new(1.0, colors.border_light))
+                                .rounding(Rounding::same(4.0)),
+                        )
+                        .on_hover_text(
+                            "Affine transform per chip:\n\
+global_x = a*x + b*y + tx\n\
+global_y = c*x + d*y + ty\n\
+x,y are local chip coordinates (pixels).",
+                        );
+                    });
+                    egui::Grid::new("chip_transform_grid")
+                        .spacing(egui::vec2(6.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.label("Chip");
+                            ui.label("a");
+                            ui.label("b");
+                            ui.label("c");
+                            ui.label("d");
+                            ui.label("tx");
+                            ui.label("ty");
+                            ui.end_row();
+
+                            let range = -65_535..=65_535;
+                            for (chip_id, transform) in
+                                config.chip_transforms.iter_mut().enumerate()
+                            {
+                                ui.label(chip_id.to_string());
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut transform.a).range(range.clone()),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut transform.b).range(range.clone()),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut transform.c).range(range.clone()),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut transform.d).range(range.clone()),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut transform.tx)
+                                            .range(range.clone()),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut transform.ty)
+                                            .range(range.clone()),
+                                    )
+                                    .changed();
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Add chip").clicked() {
+                            config.chip_transforms.push(ChipTransform::identity());
+                            changed = true;
+                        }
+                        if !config.chip_transforms.is_empty()
+                            && ui.button("Remove last chip").clicked()
+                        {
+                            config.chip_transforms.pop();
+                            changed = true;
+                        }
+                    });
+
+                    if let Err(err) = config.validate_transforms() {
+                        validation_error = Some(err.to_string());
+                    }
+                }
+
+                if changed {
+                    self.detector_profile.kind = DetectorProfileKind::Custom;
+                    self.detector_profile.custom_path = None;
+                    if self.detector_profile.custom_name.is_none() {
+                        self.detector_profile.custom_name = Some("Custom".to_string());
+                    }
+                }
+
+                if let Some(err) = validation_error {
+                    ui.colored_label(Color32::YELLOW, format!("Transform warning: {err}"));
+                }
+            });
     }
 
     fn render_tdc_frequency_control(&mut self, ui: &mut egui::Ui) {

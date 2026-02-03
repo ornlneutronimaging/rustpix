@@ -152,12 +152,12 @@ impl Default for DetectorConfig {
 }
 
 // Intermediate structs for C++ compatible JSON schema
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct JsonConfig {
     detector: JsonDetector,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 #[serde(default)]
 struct JsonDetector {
     timing: JsonTiming,
@@ -165,7 +165,7 @@ struct JsonDetector {
     chip_transformations: Option<Vec<JsonChipTransform>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct JsonTiming {
     tdc_frequency_hz: f64,
@@ -181,7 +181,7 @@ impl Default for JsonTiming {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct JsonChipLayout {
     chip_size_x: u16,
@@ -197,7 +197,7 @@ impl Default for JsonChipLayout {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct JsonChipTransform {
     chip_id: u8,
     matrix: [[i32; 3]; 2],
@@ -283,6 +283,64 @@ impl DetectorConfig {
     pub fn from_json(json: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let json_config: JsonConfig = serde_json::from_str(json)?;
         Self::from_json_config(json_config)
+    }
+
+    /// Serialize configuration to a JSON string (C++ compatible schema).
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn to_json_string(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let transforms = if self.chip_transforms.is_empty() {
+            None
+        } else {
+            let transforms = self
+                .chip_transforms
+                .iter()
+                .enumerate()
+                .map(|(chip_id, transform)| {
+                    let chip_id = u8::try_from(chip_id).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("chip_id {chip_id} exceeds u8"),
+                        )
+                    })?;
+                    Ok(JsonChipTransform {
+                        chip_id,
+                        matrix: [
+                            [transform.a, transform.b, transform.tx],
+                            [transform.c, transform.d, transform.ty],
+                        ],
+                    })
+                })
+                .collect::<Result<Vec<_>, std::io::Error>>()?;
+            Some(transforms)
+        };
+
+        let json_config = JsonConfig {
+            detector: JsonDetector {
+                timing: JsonTiming {
+                    tdc_frequency_hz: self.tdc_frequency_hz,
+                    enable_missing_tdc_correction: self.enable_missing_tdc_correction,
+                },
+                chip_layout: JsonChipLayout {
+                    chip_size_x: self.chip_size_x,
+                    chip_size_y: self.chip_size_y,
+                },
+                chip_transformations: transforms,
+            },
+        };
+
+        Ok(serde_json::to_string_pretty(&json_config)?)
+    }
+
+    /// Save configuration to a JSON file (C++ compatible schema).
+    ///
+    /// # Errors
+    /// Returns an error if serialization or file I/O fails.
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let json = self.to_json_string()?;
+        std::fs::write(path, json)?;
+        Ok(())
     }
 
     fn from_json_config(config: JsonConfig) -> Result<Self, Box<dyn std::error::Error>> {
