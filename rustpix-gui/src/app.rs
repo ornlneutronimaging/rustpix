@@ -20,7 +20,7 @@ use hdf5::File;
 use sysinfo::{get_current_pid, Pid, System};
 
 use crate::histogram::Hyperstack3D;
-use crate::message::AppMessage;
+use crate::message::{AppMessage, PulseBounds};
 use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
@@ -30,7 +30,7 @@ use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState}
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::hdf5::{
-    write_combined_hdf5, HistogramShape, HistogramWriteData, HistogramWriteOptions,
+    write_combined_hdf5_batches, HistogramShape, HistogramWriteData, HistogramWriteOptions,
     HitWriteOptions, NeutronEventBatch, NeutronWriteOptions, PixelMaskWriteData,
     PixelMaskWriteOptions,
 };
@@ -184,6 +184,8 @@ pub struct RustpixApp {
 
     /// Loaded hit batch data.
     pub(crate) hit_batch: Option<Arc<HitBatch>>,
+    /// Pulse boundary metadata for cached hit batches.
+    pub(crate) hit_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
     /// 3D hyperstack histogram (TOF × Y × X).
     pub(crate) hyperstack: Option<Arc<Hyperstack3D>>,
     /// Cached 2D projection for visualization (sum over TOF).
@@ -281,6 +283,7 @@ impl Default for RustpixApp {
             grid_cell_size: 32,
 
             hit_batch: None,
+            hit_pulse_bounds: None,
             hyperstack: None,
             hit_counts: None,
             tof_spectrum: None,
@@ -355,6 +358,7 @@ impl RustpixApp {
         self.processing.status_text.clear();
         self.processing.status_text.push_str("Loading file...");
         self.hit_batch = None;
+        self.hit_pulse_bounds = None;
         self.hyperstack = None;
         self.hit_counts = None;
         self.tof_spectrum = None;
@@ -727,8 +731,10 @@ impl RustpixApp {
 
     /// Get width/height for the active view.
     pub fn current_dimensions(&self) -> (usize, usize) {
-        self.active_hyperstack()
-            .map_or((512, 512), |hs| (hs.width(), hs.height()))
+        self.active_hyperstack().map_or_else(
+            || self.current_detector_config().detector_dimensions(),
+            |hs| (hs.width(), hs.height()),
+        )
     }
 
     pub(crate) fn start_export_hdf5(&mut self, path: PathBuf) {
@@ -741,6 +747,7 @@ impl RustpixApp {
             path,
             options: self.ui_state.export.options.clone(),
             hit_batch: self.hit_batch.clone(),
+            hit_pulse_bounds: self.hit_pulse_bounds.clone(),
             neutrons: Arc::clone(&self.neutrons),
             hyperstack: self.hyperstack.clone(),
             neutron_hyperstack: self.neutron_hyperstack.clone(),
@@ -1146,7 +1153,11 @@ impl RustpixApp {
         };
         let tof_max = self.statistics.tof_max;
         let bins = self.hit_tof_bins.max(1);
-        let hyperstack = Hyperstack3D::from_hits(hit_batch, bins, tof_max, 512, 512);
+        let (width, height) = self.hyperstack.as_deref().map_or_else(
+            || self.current_detector_config().detector_dimensions(),
+            |hs| (hs.width(), hs.height()),
+        );
+        let hyperstack = Hyperstack3D::from_hits(hit_batch, bins, tof_max, width, height);
         self.hit_counts = Some(hyperstack.project_xy());
         self.tof_spectrum = Some(hyperstack.full_spectrum());
         self.hyperstack = Some(Arc::new(hyperstack));
@@ -1173,7 +1184,7 @@ impl RustpixApp {
                     .as_deref()
                     .map(|hs| (hs.width(), hs.height()))
             })
-            .unwrap_or((512, 512));
+            .unwrap_or_else(|| self.current_detector_config().detector_dimensions());
         let neutron_hs = Hyperstack3D::from_neutrons(
             &self.neutrons,
             bins,
@@ -1197,8 +1208,15 @@ impl RustpixApp {
             match msg {
                 AppMessage::LoadProgress(p, s) => self.handle_load_progress(p, s),
                 AppMessage::ProcessingProgress(p, s) => self.handle_processing_progress(p, s),
-                AppMessage::LoadComplete(hit_count, batch, hyperstack, dur, _dbg) => {
-                    self.handle_load_complete(ctx, hit_count, batch, *hyperstack, dur);
+                AppMessage::LoadComplete(hit_count, batch, hyperstack, dur, _dbg, pulse_bounds) => {
+                    self.handle_load_complete(
+                        ctx,
+                        hit_count,
+                        batch,
+                        pulse_bounds,
+                        *hyperstack,
+                        dur,
+                    );
                 }
                 AppMessage::LoadError(e) => self.handle_load_error(&e),
                 AppMessage::ProcessingComplete(neutrons, dur) => {
@@ -1235,6 +1253,7 @@ impl RustpixApp {
         ctx: &egui::Context,
         hit_count: usize,
         batch: Option<Box<HitBatch>>,
+        pulse_bounds: Option<Vec<PulseBounds>>,
         hyperstack: Hyperstack3D,
         dur: Duration,
     ) {
@@ -1253,6 +1272,7 @@ impl RustpixApp {
         self.tof_spectrum = Some(hyperstack.full_spectrum());
         self.hyperstack = Some(Arc::new(hyperstack));
         self.hit_batch = batch.map(|batch| Arc::new(*batch));
+        self.hit_pulse_bounds = pulse_bounds.map(Arc::new);
         self.update_pixel_masks();
         self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
 
@@ -1366,6 +1386,7 @@ struct ExportHdf5Request {
     path: PathBuf,
     options: Hdf5ExportOptions,
     hit_batch: Option<Arc<HitBatch>>,
+    hit_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
     neutrons: Arc<NeutronBatch>,
     hyperstack: Option<Arc<Hyperstack3D>>,
     neutron_hyperstack: Option<Arc<Hyperstack3D>>,
@@ -1388,17 +1409,17 @@ fn export_hdf5_worker(
     let (mask_payload, mask_options) = prepare_mask_export(request, tx)?;
 
     ensure_export_selection(
-        hit_payload.as_ref(),
-        neutron_payload.as_ref(),
+        hit_payload.as_deref(),
+        neutron_payload.as_deref(),
         histogram_payload.as_ref(),
         mask_payload.as_ref(),
     )?;
 
     send_export_progress(tx, 0.85, "Writing HDF5");
-    write_combined_hdf5(
+    write_combined_hdf5_batches(
         &request.path,
-        hit_payload.as_ref().zip(hit_options.as_ref()),
-        neutron_payload.as_ref().zip(neutron_options.as_ref()),
+        hit_payload.as_deref().zip(hit_options.as_ref()),
+        neutron_payload.as_deref().zip(neutron_options.as_ref()),
         histogram_payload.as_ref().zip(histogram_options.as_ref()),
         mask_payload.as_ref().zip(mask_options.as_ref()),
     )
@@ -1427,7 +1448,7 @@ fn send_export_progress(tx: &Sender<AppMessage>, progress: f32, status: &str) {
 fn prepare_hit_export(
     request: &ExportHdf5Request,
     tx: &Sender<AppMessage>,
-) -> Result<(Option<EventBatch>, Option<HitWriteOptions>)> {
+) -> Result<(Option<Vec<EventBatch>>, Option<HitWriteOptions>)> {
     if !request.options.datasets.hits {
         return Ok((None, None));
     }
@@ -1456,17 +1477,41 @@ fn prepare_hit_export(
         include_chip_id: request.options.fields.chip_id,
         include_cluster_id: request.options.cluster_fields.cluster_id,
     };
-    let payload = EventBatch {
-        tdc_timestamp_25ns: 0,
-        hits: (*batch).clone(),
-    };
-    Ok((Some(payload), Some(options)))
+    let mut batches = Vec::new();
+    if let Some(bounds) = request.hit_pulse_bounds.as_deref() {
+        if bounds.is_empty() {
+            return Err(anyhow!("No pulse boundaries available for export"));
+        }
+        for bound in bounds {
+            let end = bound.start.saturating_add(bound.len);
+            if end > batch.len() {
+                return Err(anyhow!("Pulse boundaries exceed cached hit range"));
+            }
+            let hits = slice_hit_batch(batch, bound.start, bound.len);
+            if hits.is_empty() {
+                continue;
+            }
+            batches.push(EventBatch {
+                tdc_timestamp_25ns: bound.tdc_timestamp_25ns,
+                hits,
+            });
+        }
+        if batches.is_empty() {
+            return Err(anyhow!("No hits to export"));
+        }
+    } else {
+        batches.push(EventBatch {
+            tdc_timestamp_25ns: 0,
+            hits: (*batch).clone(),
+        });
+    }
+    Ok((Some(batches), Some(options)))
 }
 
 fn prepare_neutron_export(
     request: &ExportHdf5Request,
     tx: &Sender<AppMessage>,
-) -> Result<(Option<NeutronEventBatch>, Option<NeutronWriteOptions>)> {
+) -> Result<(Option<Vec<NeutronEventBatch>>, Option<NeutronWriteOptions>)> {
     if !request.options.datasets.neutrons {
         return Ok((None, None));
     }
@@ -1501,7 +1546,7 @@ fn prepare_neutron_export(
         tdc_timestamp_25ns: 0,
         neutrons: neutrons.clone(),
     };
-    Ok((Some(payload), Some(options)))
+    Ok((Some(vec![payload]), Some(options)))
 }
 
 fn prepare_histogram_export(
@@ -1571,8 +1616,8 @@ fn prepare_mask_export(
 }
 
 fn ensure_export_selection(
-    hit_payload: Option<&EventBatch>,
-    neutron_payload: Option<&NeutronEventBatch>,
+    hit_payload: Option<&[EventBatch]>,
+    neutron_payload: Option<&[NeutronEventBatch]>,
     histogram_payload: Option<&HistogramWriteData>,
     mask_payload: Option<&PixelMaskWriteData>,
 ) -> Result<()> {
@@ -1826,6 +1871,19 @@ fn f64_to_u32_checked(value: f64) -> Option<u32> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     {
         Some(rounded as u32)
+    }
+}
+
+fn slice_hit_batch(batch: &HitBatch, start: usize, len: usize) -> HitBatch {
+    let end = start.saturating_add(len);
+    HitBatch {
+        x: batch.x[start..end].to_vec(),
+        y: batch.y[start..end].to_vec(),
+        tof: batch.tof[start..end].to_vec(),
+        tot: batch.tot[start..end].to_vec(),
+        timestamp: batch.timestamp[start..end].to_vec(),
+        chip_id: batch.chip_id[start..end].to_vec(),
+        cluster_id: batch.cluster_id[start..end].to_vec(),
     }
 }
 

@@ -17,8 +17,8 @@ mod writer;
 pub use error::{Error, Result};
 #[cfg(feature = "hdf5")]
 pub use hdf5::{
-    write_combined_hdf5, Hdf5HistogramSink, Hdf5HitSink, Hdf5NeutronSink, HistogramAxisData,
-    HistogramBin, PixelMaskWriteData, PixelMaskWriteOptions,
+    write_combined_hdf5, write_combined_hdf5_batches, Hdf5HistogramSink, Hdf5HitSink,
+    Hdf5NeutronSink, HistogramAxisData, HistogramBin, PixelMaskWriteData, PixelMaskWriteOptions,
 };
 pub use out_of_core::{pulse_batches, OutOfCoreConfig, PulseBatchGroup, PulseBatcher, PulseSlice};
 pub use out_of_core_pipeline::{

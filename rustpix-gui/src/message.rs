@@ -11,6 +11,17 @@ use rustpix_core::soa::HitBatch;
 
 use crate::histogram::Hyperstack3D;
 
+/// Pulse boundary metadata for cached hit batches.
+#[derive(Clone, Debug)]
+pub struct PulseBounds {
+    /// Pulse TDC timestamp in 25ns ticks (extended across rollovers).
+    pub tdc_timestamp_25ns: u64,
+    /// Start index into the cached hit batch.
+    pub start: usize,
+    /// Number of hits in this pulse.
+    pub len: usize,
+}
+
 /// Messages sent from background workers to the UI thread.
 pub enum AppMessage {
     /// File loading progress update.
@@ -24,12 +35,14 @@ pub enum AppMessage {
     /// - `Hyperstack3D`: 3D histogram data (TOF × Y × X)
     /// - `Duration`: Time taken to load
     /// - `String`: Debug information
+    /// - `Option<Vec<PulseBounds>>`: Pulse boundaries for cached hits
     LoadComplete(
         usize,
         Option<Box<HitBatch>>,
         Box<Hyperstack3D>,
         Duration,
         String,
+        Option<Vec<PulseBounds>>,
     ),
 
     /// File loading failed.

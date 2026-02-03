@@ -582,10 +582,10 @@ where
 ///
 /// # Errors
 /// Returns an error if HDF5 I/O fails or metadata options conflict.
-pub fn write_combined_hdf5<P: AsRef<Path>>(
+pub fn write_combined_hdf5_batches<P: AsRef<Path>>(
     path: P,
-    hits: Option<(&EventBatch, &HitWriteOptions)>,
-    neutrons: Option<(&NeutronEventBatch, &NeutronWriteOptions)>,
+    hits: Option<(&[EventBatch], &HitWriteOptions)>,
+    neutrons: Option<(&[NeutronEventBatch], &NeutronWriteOptions)>,
     histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
     pixel_masks: Option<(&PixelMaskWriteData, &PixelMaskWriteOptions)>,
 ) -> Result<()> {
@@ -609,7 +609,7 @@ pub fn write_combined_hdf5<P: AsRef<Path>>(
         meta.energy_axis_kind.as_deref(),
     )?;
 
-    if let Some((batch, options)) = hits {
+    if let Some((batches, options)) = hits {
         let hits_group = create_event_group(
             &entry,
             "hits",
@@ -620,10 +620,12 @@ pub fn write_combined_hdf5<P: AsRef<Path>>(
             options.energy_axis_kind.as_deref(),
         )?;
         let mut writer = HitEventWriter::new(&hits_group, options)?;
-        writer.append_batch(batch, options)?;
+        for batch in batches {
+            writer.append_batch(batch, options)?;
+        }
     }
 
-    if let Some((batch, options)) = neutrons {
+    if let Some((batches, options)) = neutrons {
         let neutrons_group = create_event_group(
             &entry,
             "neutrons",
@@ -634,7 +636,9 @@ pub fn write_combined_hdf5<P: AsRef<Path>>(
             options.energy_axis_kind.as_deref(),
         )?;
         let mut writer = NeutronEventWriter::new(&neutrons_group, options)?;
-        writer.append_batch(batch, options)?;
+        for batch in batches {
+            writer.append_batch(batch, options)?;
+        }
     }
 
     if let Some((data, options)) = histogram {
@@ -647,6 +651,26 @@ pub fn write_combined_hdf5<P: AsRef<Path>>(
     }
 
     Ok(())
+}
+
+/// Writes combined hit, neutron, histogram, and pixel mask data into a single HDF5/NeXus file.
+///
+/// # Errors
+/// Returns an error if HDF5 I/O fails or if the input data is inconsistent.
+pub fn write_combined_hdf5<P: AsRef<Path>>(
+    path: P,
+    hits: Option<(&EventBatch, &HitWriteOptions)>,
+    neutrons: Option<(&NeutronEventBatch, &NeutronWriteOptions)>,
+    histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
+    pixel_masks: Option<(&PixelMaskWriteData, &PixelMaskWriteOptions)>,
+) -> Result<()> {
+    write_combined_hdf5_batches(
+        path,
+        hits.map(|(batch, options)| (std::slice::from_ref(batch), options)),
+        neutrons.map(|(batch, options)| (std::slice::from_ref(batch), options)),
+        histogram,
+        pixel_masks,
+    )
 }
 
 /// Reads hit events from an HDF5/NeXus file.

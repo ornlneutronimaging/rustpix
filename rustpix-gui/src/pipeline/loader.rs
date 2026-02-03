@@ -19,11 +19,6 @@ use crate::histogram::Hyperstack3D;
 use crate::message::AppMessage;
 use crate::util::usize_to_f32;
 
-/// Detector width in pixels.
-const DETECTOR_WIDTH: usize = 512;
-/// Detector height in pixels.
-const DETECTOR_HEIGHT: usize = 512;
-
 /// Main entry point for file loading in a background thread.
 ///
 /// Opens a TPX3 file, memory-maps it, scans sections, processes hits,
@@ -86,13 +81,14 @@ pub fn load_file_worker(
         "Processing hits...".to_string(),
     ));
 
+    let (detector_width, detector_height) = det_config.detector_dimensions();
     let mut hyperstack = Hyperstack3D::new(
         n_tof_bins.max(1),
-        DETECTOR_WIDTH,
-        DETECTOR_HEIGHT,
+        detector_width,
+        detector_height,
         tdc_correction,
     );
-    let (full_batch, hit_count) = process_sections_to_batch(
+    let (full_batch, pulse_bounds, hit_count) = process_sections_to_batch(
         &mmap,
         &tpx_sections,
         &det_config,
@@ -111,6 +107,7 @@ pub fn load_file_worker(
         Box::new(hyperstack),
         start.elapsed(),
         debug_str,
+        pulse_bounds,
     ));
 }
 
@@ -245,9 +242,14 @@ fn process_sections_to_batch(
     cancel_flag: &std::sync::atomic::AtomicBool,
     hyperstack: &mut Hyperstack3D,
     cache_hits: bool,
-) -> (Option<HitBatch>, usize) {
+) -> (
+    Option<HitBatch>,
+    Option<Vec<crate::message::PulseBounds>>,
+    usize,
+) {
     let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
     let mut full_batch = cache_hits.then(|| HitBatch::with_capacity(num_packets));
+    let mut pulse_bounds = cache_hits.then(Vec::new);
     let tdc_correction = det_config.tdc_correction_25ns();
 
     let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0) as usize;
@@ -329,7 +331,15 @@ fn process_sections_to_batch(
             if cache_hits {
                 merged.sort_by_tof();
                 if let Some(full_batch) = full_batch.as_mut() {
+                    let start = full_batch.len();
                     full_batch.append(&merged);
+                    if let Some(bounds) = pulse_bounds.as_mut() {
+                        bounds.push(crate::message::PulseBounds {
+                            tdc_timestamp_25ns: min_tdc,
+                            start,
+                            len: merged.len(),
+                        });
+                    }
                 }
             }
             processed_hits = processed_hits.saturating_add(merged.len());
@@ -347,7 +357,7 @@ fn process_sections_to_batch(
         }
     });
 
-    (full_batch, processed_hits)
+    (full_batch, pulse_bounds, processed_hits)
 }
 
 fn recv_batch_with_cancel(
