@@ -424,7 +424,9 @@ fn merge_meta_from(
     energy_axis_kind: Option<&str>,
 ) -> Result<()> {
     fn floats_differ(a: f64, b: f64) -> bool {
-        (a - b).abs() > f64::EPSILON
+        let diff = (a - b).abs();
+        let scale = a.abs().max(b.abs()).max(1.0);
+        diff > (1e-9f64).max(1e-6f64 * scale)
     }
 
     if let Some(value) = flight_path_m {
@@ -1785,6 +1787,11 @@ fn write_pixel_masks(
     data: &PixelMaskWriteData,
     options: &PixelMaskWriteOptions,
 ) -> Result<()> {
+    if data.width == 0 || data.height == 0 {
+        return Err(Error::InvalidFormat(
+            "pixel mask dimensions must be greater than zero".to_string(),
+        ));
+    }
     let expected = data.width.saturating_mul(data.height);
     if data.dead_mask.len() != expected || data.hot_mask.len() != expected {
         return Err(Error::InvalidFormat(
@@ -2458,6 +2465,127 @@ mod tests {
             vec![12 * NS_PER_TICK, 13 * NS_PER_TICK]
         );
         assert_eq!(data.event_index, vec![0, 1]);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_hdf5_combined_export_with_masks() {
+        let mut first = HitBatch::with_capacity(1);
+        first.x.extend_from_slice(&[1]);
+        first.y.extend_from_slice(&[3]);
+        first.tof.extend_from_slice(&[10]);
+        first.tot.extend_from_slice(&[5]);
+        first.timestamp.extend_from_slice(&[100]);
+        first.chip_id.extend_from_slice(&[0]);
+        first.cluster_id.extend_from_slice(&[-1]);
+
+        let mut second = HitBatch::with_capacity(1);
+        second.x.extend_from_slice(&[2]);
+        second.y.extend_from_slice(&[4]);
+        second.tof.extend_from_slice(&[20]);
+        second.tot.extend_from_slice(&[6]);
+        second.timestamp.extend_from_slice(&[200]);
+        second.chip_id.extend_from_slice(&[1]);
+        second.cluster_id.extend_from_slice(&[2]);
+
+        let hit_batches = vec![
+            EventBatch {
+                tdc_timestamp_25ns: 7,
+                hits: first,
+            },
+            EventBatch {
+                tdc_timestamp_25ns: 9,
+                hits: second,
+            },
+        ];
+
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.extend_from_slice(&[10.2]);
+        neutrons.y.extend_from_slice(&[20.4]);
+        neutrons.tof.extend_from_slice(&[30]);
+        neutrons.tot.extend_from_slice(&[7]);
+        neutrons.n_hits.extend_from_slice(&[2]);
+        neutrons.chip_id.extend_from_slice(&[1]);
+
+        let neutron_batches = vec![NeutronEventBatch {
+            tdc_timestamp_25ns: 12,
+            neutrons,
+        }];
+
+        let hit_options = HitWriteOptions {
+            x_size: 512,
+            y_size: 512,
+            chunk_events: 2,
+            compression: None,
+            shuffle: false,
+            flight_path_m: Some(2.5),
+            tof_offset_ns: Some(1.0),
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_cluster_id: true,
+        };
+
+        let neutron_options = NeutronWriteOptions {
+            x_size: 512,
+            y_size: 512,
+            super_resolution_factor: 1.0,
+            chunk_events: 2,
+            compression: None,
+            shuffle: false,
+            flight_path_m: Some(2.5 + 5e-10),
+            tof_offset_ns: Some(1.0),
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_n_hits: true,
+        };
+
+        let mask_data = PixelMaskWriteData {
+            width: 2,
+            height: 2,
+            dead_mask: vec![0, 1, 0, 1],
+            hot_mask: vec![1, 0, 1, 0],
+            hot_sigma: 5.0,
+            hot_threshold: 3.0,
+            mean: 1.2,
+            std_dev: 0.4,
+        };
+        let mask_options = PixelMaskWriteOptions {
+            compression: None,
+            shuffle: false,
+        };
+
+        let file = NamedTempFile::new().unwrap();
+        write_combined_hdf5_batches(
+            file.path(),
+            Some((hit_batches.as_slice(), &hit_options)),
+            Some((neutron_batches.as_slice(), &neutron_options)),
+            None,
+            Some((&mask_data, &mask_options)),
+        )
+        .unwrap();
+
+        let hits = read_hits_hdf5(file.path()).unwrap();
+        assert_eq!(
+            hits.event_time_zero_ns,
+            vec![7 * NS_PER_TICK, 9 * NS_PER_TICK]
+        );
+        assert_eq!(hits.event_index, vec![0, 1]);
+
+        let neutrons = read_neutrons_hdf5(file.path()).unwrap();
+        assert_eq!(neutrons.event_time_zero_ns, vec![12 * NS_PER_TICK]);
+        assert_eq!(neutrons.event_index, vec![0]);
+
+        let h5 = File::open(file.path()).unwrap();
+        let masks = h5.group("entry").unwrap().group("pixel_masks").unwrap();
+        let dead = masks.dataset("dead").unwrap();
+        assert_eq!(dead.shape(), vec![2, 2]);
+        let x_size: u32 = masks.attr("x_size").unwrap().read_scalar().unwrap();
+        let y_size: u32 = masks.attr("y_size").unwrap().read_scalar().unwrap();
+        assert_eq!((x_size, y_size), (2, 2));
     }
 
     #[test]

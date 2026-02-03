@@ -247,8 +247,8 @@ fn process_sections_to_batch(
     Option<Vec<crate::message::PulseBounds>>,
     usize,
 ) {
-    let num_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
-    let mut full_batch = cache_hits.then(|| HitBatch::with_capacity(num_packets));
+    let total_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
+    let mut full_batch = cache_hits.then(|| HitBatch::with_capacity(total_packets));
     let mut pulse_bounds = cache_hits.then(Vec::new);
     let tdc_correction = det_config.tdc_correction_25ns();
 
@@ -258,7 +258,7 @@ fn process_sections_to_batch(
         sections_by_chip[section.chip_id as usize].push(section.clone());
     }
 
-    let total_hits = num_packets.max(1);
+    let progress_denominator = total_packets.max(1);
     let mut processed_hits = 0usize;
     let mut last_update = Instant::now();
     let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
@@ -346,11 +346,11 @@ fn process_sections_to_batch(
             hyperstack.accumulate_hits(&merged);
 
             if last_update.elapsed() > Duration::from_millis(200) {
-                let progress =
-                    0.25 + 0.75 * (usize_to_f32(processed_hits) / usize_to_f32(total_hits));
+                let progress = 0.25
+                    + 0.75 * (usize_to_f32(processed_hits) / usize_to_f32(progress_denominator));
                 let _ = tx.send(AppMessage::LoadProgress(
                     progress.min(0.99),
-                    format!("Processed {processed_hits}/{num_packets} hits..."),
+                    format!("Processed {processed_hits} hits..."),
                 ));
                 last_update = Instant::now();
             }

@@ -34,7 +34,7 @@ pub fn generate_histogram_image(
     let max_count_u64 = counts.iter().max().copied().unwrap_or(1);
     let max_count = u64_to_f32(max_count_u64.max(1));
     let max_log = if log_scale {
-        max_count.log10().max(1.0)
+        (max_count + 1.0).log10()
     } else {
         1.0
     };
@@ -49,7 +49,7 @@ pub fn generate_histogram_image(
             pixels[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
         } else {
             let val = if log_scale {
-                let log_val = u64_to_f32(count.max(1)).log10() / max_log;
+                let log_val = (u64_to_f32(count) + 1.0).log10() / max_log;
                 log_val.clamp(0.0, 1.0)
             } else {
                 (u64_to_f32(count) / max_count).sqrt() // Sqrt scale

@@ -183,10 +183,12 @@ impl RoiState {
 
     /// Set edit mode for a ROI.
     pub fn set_edit_mode(&mut self, roi_id: usize, enabled: bool) {
+        if enabled {
+            self.set_selected(Some(roi_id));
+        }
         for roi in &mut self.rois {
             if roi.id == roi_id {
                 roi.selection.edit_mode = enabled;
-                roi.selection.selected = true;
             } else if enabled {
                 roi.selection.edit_mode = false;
             }
@@ -772,13 +774,13 @@ impl Roi {
     }
 
     fn handle_hit(&self, point: PlotPoint, threshold: f64) -> Option<RoiHandle> {
-        let RoiShape::Rectangle { x1, y1, x2, y2 } = self.shape else {
+        let RoiShape::Rectangle { x1, y1, x2, y2 } = &self.shape else {
             return None;
         };
-        let min_x = x1.min(x2);
-        let max_x = x1.max(x2);
-        let min_y = y1.min(y2);
-        let max_y = y1.max(y2);
+        let min_x = (*x1).min(*x2);
+        let max_x = (*x1).max(*x2);
+        let min_y = (*y1).min(*y2);
+        let max_y = (*y1).max(*y2);
 
         let near_left = (point.x - min_x).abs() <= threshold;
         let near_right = (point.x - max_x).abs() <= threshold;

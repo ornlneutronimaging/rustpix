@@ -55,12 +55,10 @@ impl Statistics {
 
     /// Convert TOF range to milliseconds given TDC frequency.
     #[must_use]
-    pub fn tof_range_ms(&self, tdc_frequency: f64) -> f64 {
-        let tdc_period_seconds = 1.0 / tdc_frequency;
-        let tdc_period_millis = tdc_period_seconds * 1000.0;
+    pub fn tof_range_ms(&self, _tdc_frequency: f64) -> f64 {
         let max_units = f64::from(self.tof_max);
         if max_units > 0.0 {
-            tdc_period_millis
+            max_units * 25.0e-6
         } else {
             0.0
         }
