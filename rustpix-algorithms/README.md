@@ -1,46 +1,57 @@
 # rustpix-algorithms
 
-Clustering algorithms for pixel detector data processing.
+Clustering algorithms with spatial indexing for neutron event detection.
 
-## Overview
+## Algorithms
 
-This crate provides high-performance clustering algorithms optimized for pixel detector data:
-
-- **ABS (Adaptive Box Search)** - Fast grid-based clustering
-- **DBSCAN** - Density-based spatial clustering
-- **Graph Clustering** - Connected component analysis
-- **Grid Clustering** - Regular grid-based grouping
-
-All algorithms support parallel processing via Rayon for maximum performance.
-
-## Usage
+### ABS (Adjacency-Based Search)
+Fast 8-connectivity clustering optimized for pixel detectors.
 
 ```rust
-use rustpix_algorithms::{AbsClustering, ClusteringAlgorithm};
-use rustpix_core::PixelHit;
+use rustpix_algorithms::abs::AbsClustering;
 
-// Create clustering algorithm
-let mut clusterer = AbsClustering::new(5.0, 100.0); // spatial_eps, time_eps
-
-// Process hits
-let hits: Vec<PixelHit> = /* your pixel hits */;
-let clusters = clusterer.cluster(&hits);
-
-println!("Found {} clusters", clusters.len());
+let clustering = AbsClustering::new(5.0, 75.0); // spatial, temporal epsilon
+let clusters = clustering.cluster(&hits);
 ```
 
-## Algorithm Selection Guide
+### DBSCAN
+Density-based clustering with KD-tree spatial indexing.
 
-| Algorithm | Best For | Performance |
-|-----------|----------|-------------|
-| ABS | Dense, uniform data | Very fast |
-| DBSCAN | Variable density | Fast |
-| Graph | Sparse data | Moderate |
-| Grid | Regular patterns | Very fast |
+```rust
+use rustpix_algorithms::dbscan::DbscanClustering;
 
-## Features
+let clustering = DbscanClustering::new(5.0, 75.0, 1); // eps, time_eps, min_pts
+let clusters = clustering.cluster(&hits);
+```
 
-- `serde` - Enable serialization/deserialization support
+### Graph
+Union-find based connected component detection.
+
+```rust
+use rustpix_algorithms::graph::GraphClustering;
+
+let clustering = GraphClustering::new(5.0, 75.0);
+let clusters = clustering.cluster(&hits);
+```
+
+### Grid
+Parallel grid-based clustering with spatial hashing.
+
+```rust
+use rustpix_algorithms::grid::GridClustering;
+
+let clustering = GridClustering::new(5.0, 75.0);
+let clusters = clustering.cluster(&hits);
+```
+
+## Performance
+
+| Algorithm | Speed      | Memory     | Best For                    |
+| --------- | ---------- | ---------- | --------------------------- |
+| ABS       | Fastest    | Low        | Dense clusters              |
+| DBSCAN    | Moderate   | Moderate   | Variable density            |
+| Graph     | Fast       | Low        | General purpose             |
+| Grid      | Very Fast  | Moderate   | Large datasets, parallelism |
 
 ## License
 
