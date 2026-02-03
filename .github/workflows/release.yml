@@ -49,7 +49,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          args: --release --out dist -m rustpix-python/Cargo.toml --compatibility abi3-py311
+          args: --release --out dist -m rustpix-python/Cargo.toml
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
