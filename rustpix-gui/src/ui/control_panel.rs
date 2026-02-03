@@ -1022,6 +1022,7 @@ impl RustpixApp {
                     if ui.button("Create custom from VENUS").clicked() {
                         self.detector_profile.custom_config =
                             Some(DetectorConfig::venus_defaults());
+                        self.tdc_frequency = 60.0;
                         if self.detector_profile.custom_name.is_none() {
                             self.detector_profile.custom_name = Some("Custom".to_string());
                         }
@@ -1033,11 +1034,13 @@ impl RustpixApp {
 
                 let mut changed = false;
                 let mut validation_error = None;
+                let mut reverted_invalid = false;
 
                 {
                     let Some(config) = self.detector_profile.custom_config.as_mut() else {
                         return;
                     };
+                    let before = config.clone();
 
                     ui.horizontal(|ui| {
                         ui.label("Chip size X");
@@ -1154,10 +1157,14 @@ x,y are local chip coordinates (pixels).",
 
                     if let Err(err) = config.validate_transforms() {
                         validation_error = Some(err.to_string());
+                        if changed {
+                            *config = before;
+                            reverted_invalid = true;
+                        }
                     }
                 }
 
-                if changed {
+                if changed && !reverted_invalid {
                     self.detector_profile.kind = DetectorProfileKind::Custom;
                     self.detector_profile.custom_path = None;
                     if self.detector_profile.custom_name.is_none() {
@@ -1166,7 +1173,12 @@ x,y are local chip coordinates (pixels).",
                 }
 
                 if let Some(err) = validation_error {
-                    ui.colored_label(Color32::YELLOW, format!("Transform warning: {err}"));
+                    let message = if reverted_invalid {
+                        format!("Transform warning: {err} (changes reverted)")
+                    } else {
+                        format!("Transform warning: {err}")
+                    };
+                    ui.colored_label(Color32::YELLOW, message);
                 }
             });
     }

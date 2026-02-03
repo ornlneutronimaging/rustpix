@@ -480,6 +480,7 @@ impl DetectorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn assert_f64_eq(actual: f64, expected: f64) {
         assert!(
@@ -630,6 +631,129 @@ mod tests {
 
         assert_f64_eq(config.tdc_frequency_hz, 60.0); // Default
         assert_eq!(config.chip_transforms[0].tx, 260); // Custom
+    }
+
+    fn assert_transform_eq(actual: &ChipTransform, expected: &ChipTransform) {
+        assert_eq!(actual.a, expected.a);
+        assert_eq!(actual.b, expected.b);
+        assert_eq!(actual.c, expected.c);
+        assert_eq!(actual.d, expected.d);
+        assert_eq!(actual.tx, expected.tx);
+        assert_eq!(actual.ty, expected.ty);
+    }
+
+    #[test]
+    fn test_json_roundtrip_serialization() {
+        let config = DetectorConfig {
+            tdc_frequency_hz: 14.0,
+            enable_missing_tdc_correction: false,
+            chip_size_x: 128,
+            chip_size_y: 64,
+            chip_transforms: vec![
+                ChipTransform {
+                    a: 1,
+                    b: 0,
+                    c: 0,
+                    d: 1,
+                    tx: 10,
+                    ty: 20,
+                },
+                ChipTransform {
+                    a: -1,
+                    b: 0,
+                    c: 0,
+                    d: -1,
+                    tx: 30,
+                    ty: 40,
+                },
+            ],
+        };
+
+        let json = config.to_json_string().expect("serialize config");
+        let decoded = DetectorConfig::from_json(&json).expect("roundtrip decode");
+
+        assert_f64_eq(decoded.tdc_frequency_hz, config.tdc_frequency_hz);
+        assert_eq!(
+            decoded.enable_missing_tdc_correction,
+            config.enable_missing_tdc_correction
+        );
+        assert_eq!(decoded.chip_size_x, config.chip_size_x);
+        assert_eq!(decoded.chip_size_y, config.chip_size_y);
+        assert_eq!(decoded.chip_transforms.len(), config.chip_transforms.len());
+        for (actual, expected) in decoded
+            .chip_transforms
+            .iter()
+            .zip(config.chip_transforms.iter())
+        {
+            assert_transform_eq(actual, expected);
+        }
+    }
+
+    #[test]
+    fn test_json_serialization_schema() {
+        let config = DetectorConfig::venus_defaults();
+        let json = config.to_json_string().expect("serialize config");
+        let value: Value = serde_json::from_str(&json).expect("parse json");
+
+        let detector = value
+            .get("detector")
+            .and_then(|v| v.as_object())
+            .expect("detector object");
+        let timing = detector
+            .get("timing")
+            .and_then(|v| v.as_object())
+            .expect("timing object");
+        let layout = detector
+            .get("chip_layout")
+            .and_then(|v| v.as_object())
+            .expect("chip_layout object");
+
+        assert!(timing.contains_key("tdc_frequency_hz"));
+        assert!(timing.contains_key("enable_missing_tdc_correction"));
+        assert!(layout.contains_key("chip_size_x"));
+        assert!(layout.contains_key("chip_size_y"));
+
+        let transforms = detector
+            .get("chip_transformations")
+            .and_then(|v| v.as_array())
+            .expect("chip_transformations array");
+        assert_eq!(transforms.len(), config.chip_transforms.len());
+        let first = transforms[0].as_object().expect("transform object");
+        assert!(first.contains_key("chip_id"));
+        let matrix = first
+            .get("matrix")
+            .and_then(|v| v.as_array())
+            .expect("matrix array");
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0].as_array().expect("matrix row").len(), 3);
+        assert_eq!(matrix[1].as_array().expect("matrix row").len(), 3);
+    }
+
+    #[test]
+    fn test_json_empty_transforms_serialization() {
+        let config = DetectorConfig {
+            tdc_frequency_hz: 42.0,
+            enable_missing_tdc_correction: true,
+            chip_size_x: 256,
+            chip_size_y: 256,
+            chip_transforms: Vec::new(),
+        };
+
+        let json = config.to_json_string().expect("serialize config");
+        let value: Value = serde_json::from_str(&json).expect("parse json");
+        let detector = value
+            .get("detector")
+            .and_then(|v| v.as_object())
+            .expect("detector object");
+
+        assert!(detector
+            .get("chip_transformations")
+            .is_some_and(serde_json::Value::is_null));
+
+        let decoded = DetectorConfig::from_json(&json).expect("decode");
+        assert_eq!(decoded.chip_size_x, 256);
+        assert_eq!(decoded.chip_size_y, 256);
+        assert_eq!(decoded.chip_transforms.len(), 4);
     }
 
     #[test]
