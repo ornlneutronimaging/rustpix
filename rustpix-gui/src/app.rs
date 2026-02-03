@@ -590,7 +590,7 @@ impl RustpixApp {
         }
     }
 
-    fn current_detector_config(&self) -> DetectorConfig {
+    pub(crate) fn current_detector_config(&self) -> DetectorConfig {
         let mut config = match self.detector_profile.kind {
             DetectorProfileKind::Custom => self
                 .detector_profile

@@ -152,12 +152,12 @@ impl Default for DetectorConfig {
 }
 
 // Intermediate structs for C++ compatible JSON schema
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct JsonConfig {
     detector: JsonDetector,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Serialize, Default)]
 #[serde(default)]
 struct JsonDetector {
     timing: JsonTiming,
@@ -165,7 +165,7 @@ struct JsonDetector {
     chip_transformations: Option<Vec<JsonChipTransform>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct JsonTiming {
     tdc_frequency_hz: f64,
@@ -181,7 +181,7 @@ impl Default for JsonTiming {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(default)]
 struct JsonChipLayout {
     chip_size_x: u16,
@@ -197,7 +197,7 @@ impl Default for JsonChipLayout {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct JsonChipTransform {
     chip_id: u8,
     matrix: [[i32; 3]; 2],
@@ -285,35 +285,96 @@ impl DetectorConfig {
         Self::from_json_config(json_config)
     }
 
+    /// Serialize configuration to a JSON string (C++ compatible schema).
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn to_json_string(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let transforms = {
+            let transforms = self
+                .chip_transforms
+                .iter()
+                .enumerate()
+                .map(|(chip_id, transform)| {
+                    let chip_id = u8::try_from(chip_id).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("chip_id {chip_id} exceeds u8"),
+                        )
+                    })?;
+                    Ok(JsonChipTransform {
+                        chip_id,
+                        matrix: [
+                            [transform.a, transform.b, transform.tx],
+                            [transform.c, transform.d, transform.ty],
+                        ],
+                    })
+                })
+                .collect::<Result<Vec<_>, std::io::Error>>()?;
+            Some(transforms)
+        };
+
+        let json_config = JsonConfig {
+            detector: JsonDetector {
+                timing: JsonTiming {
+                    tdc_frequency_hz: self.tdc_frequency_hz,
+                    enable_missing_tdc_correction: self.enable_missing_tdc_correction,
+                },
+                chip_layout: JsonChipLayout {
+                    chip_size_x: self.chip_size_x,
+                    chip_size_y: self.chip_size_y,
+                },
+                chip_transformations: transforms,
+            },
+        };
+
+        Ok(serde_json::to_string_pretty(&json_config)?)
+    }
+
+    /// Save configuration to a JSON file (C++ compatible schema).
+    ///
+    /// # Errors
+    /// Returns an error if serialization or file I/O fails.
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let json = self.to_json_string()?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
     fn from_json_config(config: JsonConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let detector = config.detector;
 
         let chip_size_x = detector.chip_layout.chip_size_x;
         let chip_size_y = detector.chip_layout.chip_size_y;
 
-        // Use VENUS defaults if no transformations specified (like C++)
+        // Use VENUS defaults if no transformations specified (like C++).
+        // An explicit empty list means "no transforms".
         let transforms = match detector.chip_transformations {
-            Some(transforms) if !transforms.is_empty() => {
-                // Find max chip ID to size the vector
-                let max_chip_id = transforms.iter().map(|t| t.chip_id).max().unwrap_or(0);
+            Some(transforms) => {
+                if transforms.is_empty() {
+                    Vec::new()
+                } else {
+                    // Find max chip ID to size the vector
+                    let max_chip_id = transforms.iter().map(|t| t.chip_id).max().unwrap_or(0);
 
-                let mut t_vec = vec![ChipTransform::identity(); (max_chip_id + 1) as usize];
+                    let mut t_vec = vec![ChipTransform::identity(); (max_chip_id + 1) as usize];
 
-                for t in transforms {
-                    let matrix = t.matrix;
-                    // C++ matrix: [[a, b, tx], [c, d, ty]]
-                    t_vec[t.chip_id as usize] = ChipTransform {
-                        a: matrix[0][0],
-                        b: matrix[0][1],
-                        tx: matrix[0][2],
-                        c: matrix[1][0],
-                        d: matrix[1][1],
-                        ty: matrix[1][2],
-                    };
+                    for t in transforms {
+                        let matrix = t.matrix;
+                        // C++ matrix: [[a, b, tx], [c, d, ty]]
+                        t_vec[t.chip_id as usize] = ChipTransform {
+                            a: matrix[0][0],
+                            b: matrix[0][1],
+                            tx: matrix[0][2],
+                            c: matrix[1][0],
+                            d: matrix[1][1],
+                            ty: matrix[1][2],
+                        };
+                    }
+                    t_vec
                 }
-                t_vec
             }
-            _ => {
+            None => {
                 // Fall back to VENUS defaults (already validated)
                 Self::venus_defaults().chip_transforms
             }
@@ -422,6 +483,7 @@ impl DetectorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn assert_f64_eq(actual: f64, expected: f64) {
         assert!(
@@ -572,6 +634,131 @@ mod tests {
 
         assert_f64_eq(config.tdc_frequency_hz, 60.0); // Default
         assert_eq!(config.chip_transforms[0].tx, 260); // Custom
+    }
+
+    fn assert_transform_eq(actual: &ChipTransform, expected: &ChipTransform) {
+        assert_eq!(actual.a, expected.a);
+        assert_eq!(actual.b, expected.b);
+        assert_eq!(actual.c, expected.c);
+        assert_eq!(actual.d, expected.d);
+        assert_eq!(actual.tx, expected.tx);
+        assert_eq!(actual.ty, expected.ty);
+    }
+
+    #[test]
+    fn test_json_roundtrip_serialization() {
+        let config = DetectorConfig {
+            tdc_frequency_hz: 14.0,
+            enable_missing_tdc_correction: false,
+            chip_size_x: 128,
+            chip_size_y: 64,
+            chip_transforms: vec![
+                ChipTransform {
+                    a: 1,
+                    b: 0,
+                    c: 0,
+                    d: 1,
+                    tx: 10,
+                    ty: 20,
+                },
+                ChipTransform {
+                    a: -1,
+                    b: 0,
+                    c: 0,
+                    d: -1,
+                    tx: 127,
+                    ty: 63,
+                },
+            ],
+        };
+
+        let json = config.to_json_string().expect("serialize config");
+        let decoded = DetectorConfig::from_json(&json).expect("roundtrip decode");
+
+        assert_f64_eq(decoded.tdc_frequency_hz, config.tdc_frequency_hz);
+        assert_eq!(
+            decoded.enable_missing_tdc_correction,
+            config.enable_missing_tdc_correction
+        );
+        assert_eq!(decoded.chip_size_x, config.chip_size_x);
+        assert_eq!(decoded.chip_size_y, config.chip_size_y);
+        assert_eq!(decoded.chip_transforms.len(), config.chip_transforms.len());
+        for (actual, expected) in decoded
+            .chip_transforms
+            .iter()
+            .zip(config.chip_transforms.iter())
+        {
+            assert_transform_eq(actual, expected);
+        }
+    }
+
+    #[test]
+    fn test_json_serialization_schema() {
+        let config = DetectorConfig::venus_defaults();
+        let json = config.to_json_string().expect("serialize config");
+        let value: Value = serde_json::from_str(&json).expect("parse json");
+
+        let detector = value
+            .get("detector")
+            .and_then(|v| v.as_object())
+            .expect("detector object");
+        let timing = detector
+            .get("timing")
+            .and_then(|v| v.as_object())
+            .expect("timing object");
+        let layout = detector
+            .get("chip_layout")
+            .and_then(|v| v.as_object())
+            .expect("chip_layout object");
+
+        assert!(timing.contains_key("tdc_frequency_hz"));
+        assert!(timing.contains_key("enable_missing_tdc_correction"));
+        assert!(layout.contains_key("chip_size_x"));
+        assert!(layout.contains_key("chip_size_y"));
+
+        let transforms = detector
+            .get("chip_transformations")
+            .and_then(|v| v.as_array())
+            .expect("chip_transformations array");
+        assert_eq!(transforms.len(), config.chip_transforms.len());
+        let first = transforms[0].as_object().expect("transform object");
+        assert!(first.contains_key("chip_id"));
+        let matrix = first
+            .get("matrix")
+            .and_then(|v| v.as_array())
+            .expect("matrix array");
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0].as_array().expect("matrix row").len(), 3);
+        assert_eq!(matrix[1].as_array().expect("matrix row").len(), 3);
+    }
+
+    #[test]
+    fn test_json_empty_transforms_serialization() {
+        let config = DetectorConfig {
+            tdc_frequency_hz: 42.0,
+            enable_missing_tdc_correction: true,
+            chip_size_x: 256,
+            chip_size_y: 256,
+            chip_transforms: Vec::new(),
+        };
+
+        let json = config.to_json_string().expect("serialize config");
+        let value: Value = serde_json::from_str(&json).expect("parse json");
+        let detector = value
+            .get("detector")
+            .and_then(|v| v.as_object())
+            .expect("detector object");
+
+        let transforms = detector
+            .get("chip_transformations")
+            .and_then(|v| v.as_array())
+            .expect("chip_transformations array");
+        assert!(transforms.is_empty());
+
+        let decoded = DetectorConfig::from_json(&json).expect("decode");
+        assert_eq!(decoded.chip_size_x, 256);
+        assert_eq!(decoded.chip_size_y, 256);
+        assert!(decoded.chip_transforms.is_empty());
     }
 
     #[test]
