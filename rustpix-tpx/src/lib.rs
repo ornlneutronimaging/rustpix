@@ -290,9 +290,7 @@ impl DetectorConfig {
     /// # Errors
     /// Returns an error if serialization fails.
     pub fn to_json_string(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let transforms = if self.chip_transforms.is_empty() {
-            None
-        } else {
+        let transforms = {
             let transforms = self
                 .chip_transforms
                 .iter()
@@ -349,29 +347,34 @@ impl DetectorConfig {
         let chip_size_x = detector.chip_layout.chip_size_x;
         let chip_size_y = detector.chip_layout.chip_size_y;
 
-        // Use VENUS defaults if no transformations specified (like C++)
+        // Use VENUS defaults if no transformations specified (like C++).
+        // An explicit empty list means "no transforms".
         let transforms = match detector.chip_transformations {
-            Some(transforms) if !transforms.is_empty() => {
-                // Find max chip ID to size the vector
-                let max_chip_id = transforms.iter().map(|t| t.chip_id).max().unwrap_or(0);
+            Some(transforms) => {
+                if transforms.is_empty() {
+                    Vec::new()
+                } else {
+                    // Find max chip ID to size the vector
+                    let max_chip_id = transforms.iter().map(|t| t.chip_id).max().unwrap_or(0);
 
-                let mut t_vec = vec![ChipTransform::identity(); (max_chip_id + 1) as usize];
+                    let mut t_vec = vec![ChipTransform::identity(); (max_chip_id + 1) as usize];
 
-                for t in transforms {
-                    let matrix = t.matrix;
-                    // C++ matrix: [[a, b, tx], [c, d, ty]]
-                    t_vec[t.chip_id as usize] = ChipTransform {
-                        a: matrix[0][0],
-                        b: matrix[0][1],
-                        tx: matrix[0][2],
-                        c: matrix[1][0],
-                        d: matrix[1][1],
-                        ty: matrix[1][2],
-                    };
+                    for t in transforms {
+                        let matrix = t.matrix;
+                        // C++ matrix: [[a, b, tx], [c, d, ty]]
+                        t_vec[t.chip_id as usize] = ChipTransform {
+                            a: matrix[0][0],
+                            b: matrix[0][1],
+                            tx: matrix[0][2],
+                            c: matrix[1][0],
+                            d: matrix[1][1],
+                            ty: matrix[1][2],
+                        };
+                    }
+                    t_vec
                 }
-                t_vec
             }
-            _ => {
+            None => {
                 // Fall back to VENUS defaults (already validated)
                 Self::venus_defaults().chip_transforms
             }
@@ -746,14 +749,16 @@ mod tests {
             .and_then(|v| v.as_object())
             .expect("detector object");
 
-        assert!(detector
+        let transforms = detector
             .get("chip_transformations")
-            .is_some_and(serde_json::Value::is_null));
+            .and_then(|v| v.as_array())
+            .expect("chip_transformations array");
+        assert!(transforms.is_empty());
 
         let decoded = DetectorConfig::from_json(&json).expect("decode");
         assert_eq!(decoded.chip_size_x, 256);
         assert_eq!(decoded.chip_size_y, 256);
-        assert_eq!(decoded.chip_transforms.len(), 4);
+        assert!(decoded.chip_transforms.is_empty());
     }
 
     #[test]
