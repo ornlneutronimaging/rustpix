@@ -1446,6 +1446,7 @@ impl RustpixApp {
         ui.add_space(4.0);
         self.render_roi_data_panel(ctx);
         self.render_spectrum_range_panel(ctx);
+        self.render_spectrum_help_panel(ctx);
 
         let Some(plot_data) = self.build_spectrum_plot_data(&colors, inputs) else {
             Self::render_spectrum_empty(ui);
@@ -1498,6 +1499,7 @@ impl RustpixApp {
                     }
                     self.render_spectrum_settings_button(ui, &colors);
                     self.render_spectrum_data_button(ui, &colors);
+                    self.render_spectrum_help_button(ui, &colors);
 
                     ui.add_space(8.0);
                     if self.render_spectrum_log_toggles(ui, &colors) {
@@ -1614,6 +1616,22 @@ impl RustpixApp {
             if opening {
                 self.populate_spectrum_range_inputs();
             }
+        }
+    }
+
+    fn render_spectrum_help_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let help_button = egui::Button::new("?")
+            .min_size(egui::vec2(22.0, 22.0))
+            .fill(if self.ui_state.panel_popups.show_spectrum_help {
+                colors.bg_header
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        if ui.add(help_button).on_hover_text("Spectrum help").clicked() {
+            self.ui_state.panel_popups.show_spectrum_help =
+                !self.ui_state.panel_popups.show_spectrum_help;
         }
     }
 
@@ -2440,6 +2458,35 @@ impl RustpixApp {
             });
 
         self.ui_state.panel_popups.show_spectrum_range = open;
+    }
+
+    fn render_spectrum_help_panel(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.panel_popups.show_spectrum_help {
+            return;
+        }
+        let mut open = self.ui_state.panel_popups.show_spectrum_help;
+        egui::Window::new("Spectrum Help")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Axes").strong());
+                ui.label("• Switch TOF / Energy in the dropdown.");
+                ui.label("• Energy axis needs flight path + TOF offset.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Visibility").strong());
+                ui.label("• Use the data button to toggle Full FOV and ROIs.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Scaling & range").strong());
+                ui.label("• logX/logY toggles adjust scaling.");
+                ui.label("• Range panel constrains x/y bounds.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Zoom & export").strong());
+                ui.label("• Zoom with buttons or selection box.");
+                ui.label("• Export PNG/CSV from the toolbar.");
+            });
+        self.ui_state.panel_popups.show_spectrum_help = open;
     }
 
     fn render_spectrum_range_contents(&mut self, ui: &mut egui::Ui, axis_label: &str) {

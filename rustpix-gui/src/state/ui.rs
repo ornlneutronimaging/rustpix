@@ -153,6 +153,7 @@ pub struct UiPanelToggles {
     pub show_spectrum_settings: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Default)]
 pub struct UiPanelPopups {
     /// Whether the spectrum data selection panel is open.
@@ -161,6 +162,14 @@ pub struct UiPanelPopups {
     pub show_spectrum_range: bool,
     /// Whether the ROI help panel is open.
     pub show_roi_help: bool,
+    /// Whether the clustering help panel is open.
+    pub show_clustering_help: bool,
+    /// Whether the view help panel is open.
+    pub show_view_help: bool,
+    /// Whether the pixel health help panel is open.
+    pub show_pixel_health_help: bool,
+    /// Whether the spectrum help panel is open.
+    pub show_spectrum_help: bool,
 }
 
 #[derive(Clone, Copy, Default)]

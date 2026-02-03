@@ -1,6 +1,6 @@
 //! Control panel (left sidebar) and top/bottom bars rendering.
 
-use eframe::egui::{self, Color32, FontFamily, FontId, Rounding, Stroke};
+use eframe::egui::{self, Color32, FontFamily, FontId, Rect, Rounding, Stroke};
 use rfd::FileDialog;
 
 use super::theme::{accent, form_label, primary_button, ThemeColors};
@@ -16,6 +16,13 @@ enum FileToolbarIcon {
     Open,
     Export,
     Gear,
+}
+
+#[derive(Clone, Copy)]
+enum SectionHelp {
+    Clustering,
+    View,
+    PixelHealth,
 }
 
 impl RustpixApp {
@@ -551,24 +558,42 @@ impl RustpixApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         // Statistics section
-                        self.render_section(ui, "Statistics", true, |app, ui| {
+                        self.render_section(ui, "Statistics", true, None, |app, ui| {
                             app.render_statistics(ui);
                         });
 
                         // Clustering section
-                        self.render_section(ui, "Clustering", true, |app, ui| {
-                            app.render_clustering_controls(ui);
-                        });
+                        self.render_section(
+                            ui,
+                            "Clustering",
+                            true,
+                            Some(SectionHelp::Clustering),
+                            |app, ui| {
+                                app.render_clustering_controls(ui);
+                            },
+                        );
 
                         // View section
-                        self.render_section(ui, "View", true, |app, ui| {
-                            app.render_view_options(ui);
-                        });
+                        self.render_section(
+                            ui,
+                            "View",
+                            true,
+                            Some(SectionHelp::View),
+                            |app, ui| {
+                                app.render_view_options(ui);
+                            },
+                        );
 
                         // Pixel Health section
-                        self.render_section(ui, "Pixel Health", false, |app, ui| {
-                            app.render_pixel_health(ui);
-                        });
+                        self.render_section(
+                            ui,
+                            "Pixel Health",
+                            false,
+                            Some(SectionHelp::PixelHealth),
+                            |app, ui| {
+                                app.render_pixel_health(ui);
+                            },
+                        );
 
                         // Progress indicator (when active)
                         self.render_progress_status(ui);
@@ -579,52 +604,105 @@ impl RustpixApp {
     }
 
     /// Render a collapsible section with header.
-    fn render_section<F>(&mut self, ui: &mut egui::Ui, title: &str, default_open: bool, content: F)
-    where
+    #[allow(clippy::too_many_lines)]
+    fn render_section<F>(
+        &mut self,
+        ui: &mut egui::Ui,
+        title: &str,
+        default_open: bool,
+        help: Option<SectionHelp>,
+        content: F,
+    ) where
         F: FnOnce(&mut Self, &mut egui::Ui),
     {
         // Section container
         ui.push_id(title, |ui| {
             let colors = ThemeColors::from_ui(ui);
-            // Header
-            let header_response = ui
-                .scope(|ui| {
-                    let old_padding = ui.spacing().button_padding;
-                    ui.spacing_mut().button_padding = egui::vec2(16.0, old_padding.y);
-                    let response = ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(title.to_uppercase())
-                                .size(11.0)
-                                .strong()
-                                .color(colors.text_primary),
-                        )
-                        .fill(Color32::TRANSPARENT)
-                        .stroke(Stroke::NONE)
-                        .rounding(Rounding::ZERO)
-                        .min_size(egui::vec2(ui.available_width(), 0.0)),
-                    );
-                    ui.spacing_mut().button_padding = old_padding;
-                    response
-                })
-                .inner;
+            let header_height = ui.spacing().interact_size.y.max(28.0);
+            let (header_rect, header_response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), header_height),
+                egui::Sense::click(),
+            );
 
-            // Get/toggle state
             let id = ui.make_persistent_id(format!("{title}_open"));
             let mut is_open = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || default_open));
 
-            if header_response.clicked() {
+            let help_state = match help {
+                Some(SectionHelp::Clustering) => self.ui_state.panel_popups.show_clustering_help,
+                Some(SectionHelp::View) => self.ui_state.panel_popups.show_view_help,
+                Some(SectionHelp::PixelHealth) => self.ui_state.panel_popups.show_pixel_health_help,
+                None => false,
+            };
+
+            let help_rect = help.map(|_| {
+                let size = egui::vec2(18.0, 18.0);
+                Rect::from_center_size(header_rect.right_center() - egui::vec2(36.0, 0.0), size)
+            });
+            let help_clicked = help_rect.is_some_and(|rect| {
+                let help_id = ui.make_persistent_id(format!("{title}_help"));
+                let response = ui.interact(rect, help_id, egui::Sense::click());
+                let response = response.on_hover_text("Help");
+                if response.clicked() {
+                    match help {
+                        Some(SectionHelp::Clustering) => {
+                            self.ui_state.panel_popups.show_clustering_help = !help_state;
+                        }
+                        Some(SectionHelp::View) => {
+                            self.ui_state.panel_popups.show_view_help = !help_state;
+                        }
+                        Some(SectionHelp::PixelHealth) => {
+                            self.ui_state.panel_popups.show_pixel_health_help = !help_state;
+                        }
+                        None => {}
+                    }
+                }
+                response.clicked()
+            });
+
+            if header_response.clicked() && !help_clicked {
                 is_open = !is_open;
                 ui.data_mut(|d| d.insert_temp(id, is_open));
             }
 
-            // Draw the header with proper styling
-            let header_rect = header_response.rect;
-            ui.painter()
-                .rect_filled(header_rect, 0.0, Color32::TRANSPARENT);
+            let header_fill = if header_response.hovered() {
+                colors.bg_header
+            } else {
+                Color32::TRANSPARENT
+            };
+            ui.painter().rect_filled(header_rect, 0.0, header_fill);
 
-            // Arrow indicator
+            let text_pos = header_rect.left_center() + egui::vec2(16.0, 0.0);
+            ui.painter().text(
+                text_pos,
+                egui::Align2::LEFT_CENTER,
+                title.to_uppercase(),
+                FontId::new(11.0, FontFamily::Proportional),
+                colors.text_primary,
+            );
+
+            if let Some(rect) = help_rect {
+                let fill = if help_state {
+                    colors.bg_header
+                } else {
+                    Color32::TRANSPARENT
+                };
+                ui.painter().rect_stroke(
+                    rect,
+                    Rounding::same(3.0),
+                    Stroke::new(1.0, colors.border_light),
+                );
+                ui.painter().rect_filled(rect, Rounding::same(3.0), fill);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "?",
+                    FontId::new(11.0, FontFamily::Proportional),
+                    colors.text_dim,
+                );
+            }
+
             let arrow = if is_open { "▼" } else { "▶" };
-            let arrow_pos = header_rect.right_center() - egui::vec2(20.0, 0.0);
+            let arrow_pos = header_rect.right_center() - egui::vec2(16.0, 0.0);
             ui.painter().text(
                 arrow_pos,
                 egui::Align2::CENTER_CENTER,
@@ -1557,6 +1635,88 @@ impl RustpixApp {
         if self.ui_state.export.show_dialog {
             self.render_export_dialog(ctx);
         }
+
+        self.render_help_windows(ctx);
+    }
+
+    fn render_help_windows(&mut self, ctx: &egui::Context) {
+        self.render_clustering_help_panel(ctx);
+        self.render_view_help_panel(ctx);
+        self.render_pixel_health_help_panel(ctx);
+    }
+
+    fn render_clustering_help_panel(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.panel_popups.show_clustering_help {
+            return;
+        }
+        let mut open = self.ui_state.panel_popups.show_clustering_help;
+        egui::Window::new("Clustering Help")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Algorithm").strong());
+                ui.label("• ABS / DBSCAN / Grid: choose clustering method.");
+                ui.label("• Parameters control spatial radius + time window.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Extraction").strong());
+                ui.label("• Super-res scales sub-pixel neutron positions.");
+                ui.label("• Weighted by TOT improves centroid stability.");
+                ui.label("• Min TOT filters low signal hits.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Run").strong());
+                ui.label("• Click Run Clustering to generate neutrons.");
+            });
+        self.ui_state.panel_popups.show_clustering_help = open;
+    }
+
+    fn render_view_help_panel(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.panel_popups.show_view_help {
+            return;
+        }
+        let mut open = self.ui_state.panel_popups.show_view_help;
+        egui::Window::new("View Help")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Colormap").strong());
+                ui.label("• Change display palette only (data unchanged).");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("TOF Slicer").strong());
+                ui.label("• Show a single TOF bin instead of full projection.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Spectrum").strong());
+                ui.label("• Toggle spectrum panel visibility.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Log scale").strong());
+                ui.label("• Use log intensity for histogram display.");
+            });
+        self.ui_state.panel_popups.show_view_help = open;
+    }
+
+    fn render_pixel_health_help_panel(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.panel_popups.show_pixel_health_help {
+            return;
+        }
+        let mut open = self.ui_state.panel_popups.show_pixel_health_help;
+        egui::Window::new("Pixel Health Help")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Dead/Hot pixels").strong());
+                ui.label("• Computed from hit statistics in the current dataset.");
+                ui.label("• Hot pixel overlay marks outliers.");
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Masks").strong());
+                ui.label("• Exclude masked pixels from spectra/stats.");
+                ui.label("• Recompute masks after changing thresholds.");
+            });
+        self.ui_state.panel_popups.show_pixel_health_help = open;
     }
 
     fn render_export_dialog(&mut self, ctx: &egui::Context) {
