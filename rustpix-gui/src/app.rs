@@ -1566,6 +1566,7 @@ fn prepare_histogram_export(
     let height = hyper.height();
     let n_bins = hyper.n_tof_bins();
     let payload = RustpixApp::build_histogram_write_data(hyper);
+    let rot_dim = payload.shape.rot_angle.max(1);
     let compression_level = request.options.compression_level.min(9);
     let mut options = HistogramWriteOptions {
         compression: Some(compression_level),
@@ -1576,7 +1577,7 @@ fn prepare_histogram_export(
     };
     if request.options.advanced.hist_chunk_override {
         options.chunk_counts = Some([
-            request.options.hist_chunk_rot.clamp(1, 1),
+            request.options.hist_chunk_rot.clamp(1, rot_dim),
             request.options.hist_chunk_y.clamp(1, height),
             request.options.hist_chunk_x.clamp(1, width),
             request.options.hist_chunk_tof.clamp(1, n_bins),

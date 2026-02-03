@@ -1001,9 +1001,18 @@ struct NeutronEventWriter {
     pulse_count: usize,
 }
 
+fn normalize_super_resolution(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        1.0
+    }
+}
+
 impl NeutronEventWriter {
     #[allow(clippy::too_many_lines)]
     fn new(group: &Group, options: &NeutronWriteOptions) -> Result<Self> {
+        let super_res = normalize_super_resolution(options.super_resolution_factor);
         let event_id = create_extendable_dataset::<i32>(
             group,
             "event_id",
@@ -1115,7 +1124,7 @@ impl NeutronEventWriter {
         group
             .new_attr::<f64>()
             .create("super_resolution_factor")?
-            .write_scalar(&options.super_resolution_factor)?;
+            .write_scalar(&super_res)?;
 
         Ok(Self {
             event_id,
@@ -1157,13 +1166,7 @@ impl NeutronEventWriter {
         let mut y_values = Vec::with_capacity(count);
         let mut event_id = Vec::with_capacity(count);
 
-        let super_res = if options.super_resolution_factor.is_finite()
-            && options.super_resolution_factor > 0.0
-        {
-            options.super_resolution_factor
-        } else {
-            1.0
-        };
+        let super_res = normalize_super_resolution(options.super_resolution_factor);
 
         for (&x, &y) in batch.neutrons.x.iter().zip(batch.neutrons.y.iter()) {
             if !x.is_finite() || !y.is_finite() {
