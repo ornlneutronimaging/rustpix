@@ -1,7 +1,11 @@
 [package]
 name = "rustpix-python"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for rustpix pixel detector processing"
 publish = false
 
 [lib]
@@ -9,7 +13,7 @@ name = "rustpix"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py311"] }
 numpy = { workspace = true }
 
 rustpix-core = { workspace = true }

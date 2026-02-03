@@ -5,7 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation.workspace = true
 description = "Core traits and types for rustpix pixel detector processing"
+keywords = ["neutron-imaging", "timepix", "pixel-detector", "scientific"]
+categories = ["science", "data-structures"]
+readme = "README.md"
 
 [lints]
 workspace = true

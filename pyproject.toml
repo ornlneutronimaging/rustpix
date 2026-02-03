@@ -5,13 +5,38 @@ build-backend = "maturin"
 [project]
 name = "rustpix"
 version = "0.1.0"
+description = "High-performance TPX3 pixel detector data processing for neutron imaging"
+authors = [{ name = "ORNL Neutron Imaging", email = "neutronimaging@ornl.gov" }]
+license = { text = "MIT" }
+readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Rust",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+keywords = [
+  "neutron-imaging",
+  "timepix",
+  "tpx3",
+  "pixel-detector",
+  "clustering",
 ]
 dependencies = ["numpy"]
+
+[project.urls]
+Homepage = "https://github.com/ornlneutronimaging/rustpix"
+Repository = "https://github.com/ornlneutronimaging/rustpix"
+Issues = "https://github.com/ornlneutronimaging/rustpix/issues"
 
 [project.optional-dependencies]
 arrow = ["pyarrow"]
@@ -60,3 +85,11 @@ gui-debug = { cmd = "cargo run -p rustpix-gui", description = "Build and run GUI
 docs = { cmd = "cargo doc --workspace --no-deps --open", description = "Build and open documentation" }
 clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf '{}' + 2>/dev/null || true", description = "Remove all build artifacts" }
 notebook = { cmd = "jupyter lab", description = "Launch JupyterLab" }
+
+# Version management
+version-show = { cmd = "python scripts/version.py show", description = "Display current version" }
+version-check = { cmd = "python scripts/version.py check", description = "Verify all versions are in sync" }
+version-sync = { cmd = "python scripts/version.py sync", description = "Sync version to pyproject.toml" }
+version-patch = { cmd = "python scripts/version.py patch", description = "Bump patch version (0.1.0 -> 0.1.1)" }
+version-minor = { cmd = "python scripts/version.py minor", description = "Bump minor version (0.1.0 -> 0.2.0)" }
+version-major = { cmd = "python scripts/version.py major", description = "Bump major version (0.1.0 -> 1.0.0)" }

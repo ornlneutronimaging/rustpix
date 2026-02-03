@@ -5,7 +5,11 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation.workspace = true
 description = "TPX3 packet parser, hit types, and file processor"
+keywords = ["timepix", "tpx3", "pixel-detector", "parsing", "neutron-imaging"]
+categories = ["science", "parsing"]
+readme = "README.md"
 
 [lints]
 workspace = true

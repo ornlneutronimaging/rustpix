@@ -1,0 +1,384 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (build artifacts but skip publishing)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build Python wheels for all platforms
+  build-wheels:
+    name: Build wheels (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          # macOS ARM64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # macOS x86_64
+          - os: macos-13
+            target: x86_64-apple-darwin
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --out dist -m rustpix-python/Cargo.toml
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  # Build source distribution
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist -m rustpix-python/Cargo.toml
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Build CLI binaries
+  build-cli:
+    name: Build CLI (${{ matrix.os }}, ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: rustpix-cli-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: rustpix-cli-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact_name: rustpix-cli-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: rustpix-cli-windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI
+        run: cargo build --release --package rustpix-cli --target ${{ matrix.target }}
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/rustpix dist/
+          cd dist
+          tar -czvf ${{ matrix.artifact_name }}.tar.gz rustpix
+          rm rustpix
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir dist
+          copy target\${{ matrix.target }}\release\rustpix.exe dist\
+          cd dist
+          7z a ${{ matrix.artifact_name }}.zip rustpix.exe
+          del rustpix.exe
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+
+  # Build macOS app bundle
+  build-macos-app:
+    name: Build macOS App Bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Build macOS app bundle
+        run: cargo bundle --release --package rustpix-gui
+
+      - name: Create DMG
+        run: |
+          # Get version from tag or use default
+          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION=${VERSION#v}  # Remove 'v' prefix if present
+
+          # Create DMG from the app bundle
+          hdiutil create -volname "Rustpix ${VERSION}" \
+            -srcfolder target/release/bundle/osx/Rustpix.app \
+            -ov -format UDZO \
+            rustpix-${VERSION}-macos-arm64.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: "*.dmg"
+
+  # Publish to PyPI
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    environment:
+      name: pypi
+      url: https://pypi.org/p/rustpix
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist-sdist
+
+      - name: Move sdist to dist directory
+        run: |
+          mv dist-sdist/*.tar.gz dist/
+          ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  # Publish to crates.io
+  publish-crates:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish crates (in dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # Publish in dependency order with delays for crates.io indexing
+          echo "Publishing rustpix-core..."
+          cargo publish -p rustpix-core --no-verify
+          echo "Waiting for crates.io to index..."
+          sleep 30
+
+          echo "Publishing rustpix-tpx..."
+          cargo publish -p rustpix-tpx --no-verify
+          sleep 30
+
+          echo "Publishing rustpix-algorithms..."
+          cargo publish -p rustpix-algorithms --no-verify
+          sleep 30
+
+          echo "Publishing rustpix-io..."
+          cargo publish -p rustpix-io --no-verify
+          sleep 30
+
+          echo "Publishing rustpix-cli..."
+          cargo publish -p rustpix-cli --no-verify
+
+          echo "All crates published successfully!"
+
+  # Create GitHub Release
+  github-release:
+    name: Create GitHub Release
+    needs: [build-wheels, build-sdist, build-cli, build-macos-app]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist-sdist
+
+      - name: Move sdist to wheels directory
+        run: mv dist-sdist/*.tar.gz dist/wheels/
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/cli
+          pattern: rustpix-cli-*
+          merge-multiple: true
+
+      - name: Download macOS app
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-app
+          path: dist/app
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          # Copy all artifacts to release directory
+          cp dist/wheels/*.whl dist/wheels/*.tar.gz release/ 2>/dev/null || true
+          cp dist/cli/* release/ 2>/dev/null || true
+          cp dist/app/*.dmg release/ 2>/dev/null || true
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: ${{ inputs.dry_run || false }}
+          prerelease: ${{ contains(github.ref, 'rc') || contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
+
+  # Update Homebrew tap
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: github-release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !inputs.dry_run
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Updating Homebrew tap for version $VERSION"
+
+      - name: Wait for release asset to be available
+        run: |
+          echo "Waiting for DMG to be available on GitHub Release..."
+          for i in {1..30}; do
+            if curl -sL --head --fail \
+              "https://github.com/ornlneutronimaging/rustpix/releases/download/v${{ steps.version.outputs.version }}/rustpix-${{ steps.version.outputs.version }}-macos-arm64.dmg" \
+              > /dev/null 2>&1; then
+              echo "DMG is available"
+              exit 0
+            fi
+            echo "Attempt $i/30: DMG not yet available, waiting 10s..."
+            sleep 10
+          done
+          echo "DMG not available after 5 minutes"
+          exit 1
+
+      - name: Download DMG and calculate SHA256
+        id: sha256
+        run: |
+          DMG_URL="https://github.com/ornlneutronimaging/rustpix/releases/download/v${{ steps.version.outputs.version }}/rustpix-${{ steps.version.outputs.version }}-macos-arm64.dmg"
+          echo "Downloading $DMG_URL"
+          curl -fSL --retry 3 --retry-delay 5 "$DMG_URL" -o rustpix.dmg
+
+          # Verify the downloaded file is a valid DMG (not an error page)
+          if [ ! -s rustpix.dmg ]; then
+            echo "Error: Downloaded file is empty"
+            exit 1
+          fi
+
+          # Check for DMG magic bytes (first 4 bytes should not be HTML)
+          if head -c 15 rustpix.dmg | grep -q '<!DOCTYPE\|<html'; then
+            echo "Error: Downloaded file appears to be HTML, not a DMG"
+            exit 1
+          fi
+
+          SHA256=$(sha256sum rustpix.dmg | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+          echo "SHA256: $SHA256"
+
+      - name: Clone Homebrew tap repository
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/ornlneutronimaging/homebrew-rustpix.git
+          cd homebrew-rustpix
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update cask formula
+        run: |
+          cd homebrew-rustpix
+
+          # Update version
+          sed -i 's/version "[^"]*"/version "${{ steps.version.outputs.version }}"/' Casks/rustpix.rb
+
+          # Update sha256
+          sed -i 's/sha256 "[^"]*"/sha256 "${{ steps.sha256.outputs.sha256 }}"/' Casks/rustpix.rb
+
+          echo "Updated Casks/rustpix.rb:"
+          cat Casks/rustpix.rb
+
+      - name: Commit and push changes
+        run: |
+          cd homebrew-rustpix
+          git add Casks/rustpix.rb
+
+          # Only commit and push if there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit - tap is already up to date for version ${{ steps.version.outputs.version }}"
+          else
+            git commit -m "Update rustpix to ${{ steps.version.outputs.version }}"
+            git push origin main
+            echo "Successfully updated Homebrew tap to version ${{ steps.version.outputs.version }}"
+          fi

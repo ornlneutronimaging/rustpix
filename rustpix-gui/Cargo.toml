@@ -7,6 +7,24 @@ license.workspace = true
 repository.workspace = true
 description = "GUI application for rustpix pixel detector processing"
 
+[[bin]]
+name = "rustpix-gui"
+path = "src/main.rs"
+
+# macOS app bundle configuration for cargo-bundle
+[package.metadata.bundle]
+name = "Rustpix"
+identifier = "gov.ornl.rustpix"
+icon = ["../resources/rustpix.icns"]
+short_description = "Pixel Detector Data Processing"
+long_description = """
+Rustpix is a high-performance tool for processing Timepix3 pixel detector
+data used in neutron imaging. It provides clustering algorithms, timestamp
+analysis, and data export to various formats.
+"""
+category = "public.app-category.developer-tools"
+copyright = "Copyright © 2024 Oak Ridge National Laboratory"
+
 [lints]
 workspace = true
 
