@@ -13,7 +13,7 @@ name = "rustpix"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { workspace = true, features = ["extension-module"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py311"] }
 numpy = { workspace = true }
 
 rustpix-core = { workspace = true }
