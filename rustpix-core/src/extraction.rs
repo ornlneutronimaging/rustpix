@@ -669,4 +669,30 @@ mod tests {
         assert_eq!(n1.n_hits, 1);
         assert_eq!(n1.chip_id, 1);
     }
+
+    #[test]
+    fn test_super_resolution_factor_affects_output() {
+        let batch = make_batch(&[(1000, 2, 3, 500, 20, 0, 0)]);
+
+        let mut extractor = SimpleCentroidExtraction::new();
+        extractor.configure(
+            ExtractionConfig::default()
+                .with_super_resolution(1.0)
+                .with_min_tot_threshold(0),
+        );
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
+        assert_eq!(neutrons.len(), 1);
+        assert!((neutrons[0].x - 2.0).abs() < f64::EPSILON);
+        assert!((neutrons[0].y - 3.0).abs() < f64::EPSILON);
+
+        extractor.configure(
+            ExtractionConfig::default()
+                .with_super_resolution(4.0)
+                .with_min_tot_threshold(0),
+        );
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
+        assert_eq!(neutrons.len(), 1);
+        assert!((neutrons[0].x - 8.0).abs() < f64::EPSILON);
+        assert!((neutrons[0].y - 12.0).abs() < f64::EPSILON);
+    }
 }
