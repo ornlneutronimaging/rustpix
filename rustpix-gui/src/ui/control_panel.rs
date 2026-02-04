@@ -10,7 +10,7 @@ use crate::state::{
     ExportFormat, Hdf5ExportOptions, TiffBitDepth, TiffExportOptions, TiffSpectraTiming,
     TiffStackBehavior, ViewMode,
 };
-use crate::util::{format_bytes, format_number};
+use crate::util::{format_bytes, format_number, sanitize_export_base_name};
 use crate::viewer::Colormap;
 use rustpix_tpx::{ChipTransform, DetectorConfig};
 
@@ -1970,7 +1970,7 @@ x,y are local chip coordinates (pixels).",
                         self.populate_default_tiff_base_name();
                         let options = &mut self.ui_state.export.tiff;
                         let base_name_ok =
-                            !Self::sanitize_export_base_name(&options.base_name).is_empty();
+                            !sanitize_export_base_name(&options.base_name).is_empty();
                         Self::render_tiff_export_options(
                             ui,
                             &colors,
@@ -2001,9 +2001,8 @@ x,y are local chip coordinates (pixels).",
                         }
                         ExportFormat::TiffFolder | ExportFormat::TiffStack => {
                             if let Some(parent) = FileDialog::new().pick_folder() {
-                                let base_name = Self::sanitize_export_base_name(
-                                    &self.ui_state.export.tiff.base_name,
-                                );
+                                let base_name =
+                                    sanitize_export_base_name(&self.ui_state.export.tiff.base_name);
                                 if !base_name.is_empty() {
                                     let folder = parent.join(&base_name);
                                     self.start_export_tiff(folder, self.ui_state.export.format);
@@ -2139,7 +2138,7 @@ x,y are local chip coordinates (pixels).",
                 .size(10.0)
                 .color(colors.text_muted),
         );
-        if Self::sanitize_export_base_name(&options.base_name).is_empty() {
+        if sanitize_export_base_name(&options.base_name).is_empty() {
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new("Base name is required.")
@@ -2217,22 +2216,6 @@ x,y are local chip coordinates (pixels).",
             .clicked()
     }
 
-    fn sanitize_export_base_name(value: &str) -> String {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return String::new();
-        }
-        trimmed
-            .chars()
-            .map(|c| match c {
-                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
-                _ => '_',
-            })
-            .collect::<String>()
-            .trim_matches('_')
-            .to_string()
-    }
-
     fn populate_default_tiff_base_name(&mut self) {
         let options = &mut self.ui_state.export.tiff;
         if !options.base_name.is_empty() && options.base_name != "Run_XXXXX" {
@@ -2244,7 +2227,7 @@ x,y are local chip coordinates (pixels).",
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             return;
         };
-        let sanitized = Self::sanitize_export_base_name(stem);
+        let sanitized = sanitize_export_base_name(stem);
         if !sanitized.is_empty() {
             options.base_name = sanitized;
         }

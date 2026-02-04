@@ -30,7 +30,9 @@ use crate::state::{
     ExportFormat, Hdf5ExportOptions, ProcessingState, Statistics, TiffBitDepth, TiffExportOptions,
     TiffSpectraTiming, TiffStackBehavior, UiState, ViewMode, ZoomMode,
 };
-use crate::util::{f64_to_usize_bounded, u64_to_f64, usize_to_f32, usize_to_f64};
+use crate::util::{
+    f64_to_usize_bounded, sanitize_export_base_name, u64_to_f64, usize_to_f32, usize_to_f64,
+};
 use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
@@ -1634,14 +1636,14 @@ fn spectra_counts_for_export(
         if let Some(mask) = request.pixel_masks.as_ref() {
             return compute_masked_spectrum(hyperstack, mask).unwrap_or_else(|| {
                 warnings.push(
-                    "Masked spectrum requested but masks are unavailable; using full spectrum."
+                    "Masked spectrum requested but mask dimensions don't match histogram; using full spectrum."
                         .to_string(),
                 );
                 hyperstack.full_spectrum()
             });
         }
         warnings.push(
-            "Masked spectrum requested but masks are unavailable; using full spectrum.".to_string(),
+            "Masked spectrum requested but no mask is available; using full spectrum.".to_string(),
         );
     }
     hyperstack.full_spectrum()
@@ -1730,8 +1732,12 @@ fn write_tiff_stack(
         TiffBitDepth::Bit16 => 2u64,
         TiffBitDepth::Bit32 => 4u64,
     };
-    let stack_bytes =
-        u64::from(width) * u64::from(height) * bytes_per_pixel * u64::try_from(n_bins)?;
+    let n_bins_u64 = u64::try_from(n_bins).unwrap_or(u64::MAX);
+    let stack_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|v| v.checked_mul(bytes_per_pixel))
+        .and_then(|v| v.checked_mul(n_bins_u64))
+        .unwrap_or(u64::MAX);
     let use_bigtiff = match behavior {
         TiffStackBehavior::StandardOnly => {
             if stack_bytes > u64::from(u32::MAX) {
@@ -1878,22 +1884,6 @@ fn add_clamp_warning(bit_depth: TiffBitDepth, clamped: bool, warnings: &mut Vec<
             warnings.push("32-bit TIFF clamped values above 4,294,967,295.".to_string());
         }
     }
-}
-
-fn sanitize_export_base_name(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    trimmed
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
-            _ => '_',
-        })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string()
 }
 
 fn prepare_hit_export(
