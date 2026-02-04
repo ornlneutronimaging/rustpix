@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 authors = ["ORNL Neutron Imaging <neutronimaging@ornl.gov>"]
 license = "MIT"
@@ -30,10 +30,10 @@ categories = ["science", "data-structures", "parsing"]
 
 [workspace.dependencies]
 # Internal crates (version for crates.io, path for local dev)
-rustpix-core = { version = "1.0.3", path = "rustpix-core" }
-rustpix-tpx = { version = "1.0.3", path = "rustpix-tpx" }
-rustpix-algorithms = { version = "1.0.3", path = "rustpix-algorithms" }
-rustpix-io = { version = "1.0.3", path = "rustpix-io" }
+rustpix-core = { version = "1.0.4", path = "rustpix-core" }
+rustpix-tpx = { version = "1.0.4", path = "rustpix-tpx" }
+rustpix-algorithms = { version = "1.0.4", path = "rustpix-algorithms" }
+rustpix-io = { version = "1.0.4", path = "rustpix-io" }
 
 # Parallelism
 rayon = "1.10"
