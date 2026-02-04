@@ -4,7 +4,9 @@
 //! data, and message handling.
 
 use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::fs::{self, File as StdFile};
 use std::hash::{Hash, Hasher};
+use std::io::{BufWriter, Write};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -24,8 +26,11 @@ use crate::message::{AppMessage, PulseBounds};
 use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
-use crate::state::{Hdf5ExportOptions, ProcessingState, Statistics, UiState, ViewMode, ZoomMode};
-use crate::util::{f64_to_usize_bounded, u64_to_f64, usize_to_f64};
+use crate::state::{
+    ExportFormat, Hdf5ExportOptions, ProcessingState, Statistics, TiffBitDepth, TiffExportOptions,
+    TiffSpectraTiming, TiffStackBehavior, UiState, ViewMode, ZoomMode,
+};
+use crate::util::{f64_to_usize_bounded, u64_to_f64, usize_to_f32, usize_to_f64};
 use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
@@ -36,6 +41,9 @@ use rustpix_io::hdf5::{
 };
 use rustpix_io::EventBatch;
 use rustpix_tpx::DetectorConfig;
+use tiff::encoder::colortype::{Gray16, Gray32};
+use tiff::encoder::TiffEncoder as TiffFileEncoder;
+use tiff::tags::Tag;
 
 #[derive(Clone)]
 pub(crate) struct RoiSpectrumData {
@@ -782,6 +790,54 @@ impl RustpixApp {
         });
     }
 
+    pub(crate) fn start_export_tiff(&mut self, folder: PathBuf, format: ExportFormat) {
+        if self.ui_state.export.in_progress {
+            return;
+        }
+        if format == ExportFormat::Hdf5 {
+            return;
+        }
+
+        let tx = self.tx.clone();
+        let view_mode = self.ui_state.view_mode;
+        let hyperstack = match view_mode {
+            ViewMode::Hits => self.hyperstack.clone(),
+            ViewMode::Neutrons => self.neutron_hyperstack.clone(),
+        };
+        let request = ExportTiffRequest {
+            folder,
+            format,
+            options: self.ui_state.export.tiff.clone(),
+            hyperstack,
+            pixel_masks: self.pixel_masks.clone(),
+            tof_offset_ns: self.tof_offset_ns,
+            summed_counts: self.active_counts().map(<[u64]>::to_vec),
+        };
+
+        self.ui_state.export.in_progress = true;
+        self.ui_state.export.progress = 0.0;
+        self.ui_state.export.status = "Preparing export".to_string();
+
+        thread::spawn(move || {
+            let _ = tx.send(AppMessage::ExportProgress(
+                0.05,
+                "Preparing export".to_string(),
+            ));
+
+            let export_path = request.folder.clone();
+            let result = export_tiff_worker(&request, &tx);
+
+            match result {
+                Ok((size, warnings)) => {
+                    let _ = tx.send(AppMessage::ExportComplete(export_path, size, warnings));
+                }
+                Err(err) => {
+                    let _ = tx.send(AppMessage::ExportError(err.to_string()));
+                }
+            }
+        });
+    }
+
     fn build_histogram_write_data(hyperstack: &Hyperstack3D) -> HistogramWriteData {
         let width = hyperstack.width();
         let height = hyperstack.height();
@@ -1352,11 +1408,11 @@ impl RustpixApp {
         };
         let size_mb = u64_to_f64(size_bytes) / (1024.0 * 1024.0);
         self.ui_state.roi_status = Some((
-            format!("Saved HDF5: {} ({size_mb:.1} MB)", path.display()),
+            format!("Saved export: {} ({size_mb:.1} MB)", path.display()),
             ctx.input(|i| i.time + 4.0),
         ));
         if !warnings.is_empty() {
-            log::warn!("HDF5 export validation warnings:");
+            log::warn!("Export validation warnings:");
             for warning in warnings {
                 log::warn!(" - {warning}");
             }
@@ -1376,7 +1432,7 @@ impl RustpixApp {
         self.ui_state.export.in_progress = false;
         self.ui_state.export.status = "Export failed".to_string();
         self.ui_state.roi_warning = Some((
-            format!("HDF5 export failed: {error}"),
+            format!("Export failed: {error}"),
             ctx.input(|i| i.time + 6.0),
         ));
     }
@@ -1395,6 +1451,23 @@ struct ExportHdf5Request {
     flight_path_m: f64,
     tof_offset_ns: f64,
     super_resolution_factor: f64,
+}
+
+struct ExportTiffRequest {
+    folder: PathBuf,
+    format: ExportFormat,
+    options: TiffExportOptions,
+    hyperstack: Option<Arc<Hyperstack3D>>,
+    pixel_masks: Option<PixelMaskData>,
+    tof_offset_ns: f64,
+    summed_counts: Option<Vec<u64>>,
+}
+
+struct TiffStackParams {
+    width: u32,
+    height: u32,
+    n_bins: usize,
+    bit_depth: TiffBitDepth,
 }
 
 fn export_hdf5_worker(
@@ -1443,6 +1516,384 @@ fn export_hdf5_worker(
 
 fn send_export_progress(tx: &Sender<AppMessage>, progress: f32, status: &str) {
     let _ = tx.send(AppMessage::ExportProgress(progress, status.to_string()));
+}
+
+fn hyperstack_dimensions_u32(hyperstack: &Hyperstack3D) -> Result<(u32, u32)> {
+    let width = u32::try_from(hyperstack.width())
+        .map_err(|_| anyhow!("Histogram width exceeds u32 range"))?;
+    let height = u32::try_from(hyperstack.height())
+        .map_err(|_| anyhow!("Histogram height exceeds u32 range"))?;
+    Ok((width, height))
+}
+
+fn export_tiff_worker(
+    request: &ExportTiffRequest,
+    tx: &Sender<AppMessage>,
+) -> Result<(u64, Vec<String>)> {
+    let hyperstack = request
+        .hyperstack
+        .as_deref()
+        .ok_or_else(|| anyhow!("No histogram data available"))?;
+    let base_name = sanitize_export_base_name(&request.options.base_name);
+    if base_name.is_empty() {
+        return Err(anyhow!("Base name is required for TIFF export"));
+    }
+    if request.folder.exists() {
+        return Err(anyhow!(
+            "Output folder already exists: {}",
+            request.folder.display()
+        ));
+    }
+
+    fs::create_dir(&request.folder)?;
+    let result = (|| {
+        let mut warnings = Vec::new();
+        send_export_progress(tx, 0.1, "Preparing TIFF export");
+
+        let (width, height) = hyperstack_dimensions_u32(hyperstack)?;
+        if hyperstack.n_tof_bins() == 0 {
+            return Err(anyhow!("No TOF bins available for export"));
+        }
+
+        let mut total_bytes = 0u64;
+        let mut clamped_any = false;
+
+        if request.options.include_spectra {
+            send_export_progress(tx, 0.15, "Writing spectra");
+            let spectra_counts = spectra_counts_for_export(request, hyperstack, &mut warnings);
+            let spectra_path = request.folder.join(format!("{base_name}_Spectra.txt"));
+            total_bytes += write_spectra_file(
+                &spectra_path,
+                &spectra_counts,
+                hyperstack.bin_width() * 25.0,
+                request.tof_offset_ns,
+                request.options.spectra_timing,
+                request.options.include_tof_offset,
+            )?;
+        }
+
+        if request.options.include_summed_image {
+            send_export_progress(tx, 0.2, "Writing summed image");
+            let summed = build_summed_counts(hyperstack, request.summed_counts.as_deref());
+            let summed_path = request.folder.join(format!("{base_name}_SummedImg.tif"));
+            total_bytes += write_single_tiff_image(
+                &summed_path,
+                width,
+                height,
+                &summed,
+                request.options.bit_depth,
+                &mut clamped_any,
+            )?;
+        }
+
+        match request.format {
+            ExportFormat::TiffFolder => {
+                total_bytes += write_tiff_folder(
+                    hyperstack,
+                    &request.folder,
+                    &base_name,
+                    request.options.bit_depth,
+                    tx,
+                    &mut clamped_any,
+                )?;
+            }
+            ExportFormat::TiffStack => {
+                total_bytes += write_tiff_stack(
+                    hyperstack,
+                    &request.folder,
+                    &base_name,
+                    request.options.bit_depth,
+                    request.options.stack_behavior,
+                    tx,
+                    &mut clamped_any,
+                )?;
+            }
+            ExportFormat::Hdf5 => {
+                return Err(anyhow!("Invalid export format for TIFF worker"));
+            }
+        }
+
+        add_clamp_warning(request.options.bit_depth, clamped_any, &mut warnings);
+        send_export_progress(tx, 1.0, "Export complete");
+        Ok((total_bytes, warnings))
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&request.folder);
+    }
+
+    result
+}
+
+fn spectra_counts_for_export(
+    request: &ExportTiffRequest,
+    hyperstack: &Hyperstack3D,
+    warnings: &mut Vec<String>,
+) -> Vec<u64> {
+    if request.options.exclude_masked_pixels {
+        if let Some(mask) = request.pixel_masks.as_ref() {
+            return compute_masked_spectrum(hyperstack, mask).unwrap_or_else(|| {
+                warnings.push(
+                    "Masked spectrum requested but masks are unavailable; using full spectrum."
+                        .to_string(),
+                );
+                hyperstack.full_spectrum()
+            });
+        }
+        warnings.push(
+            "Masked spectrum requested but masks are unavailable; using full spectrum.".to_string(),
+        );
+    }
+    hyperstack.full_spectrum()
+}
+
+fn write_spectra_file(
+    path: &Path,
+    counts: &[u64],
+    bin_width_ns: f64,
+    tof_offset_ns: f64,
+    timing: TiffSpectraTiming,
+    include_offset: bool,
+) -> Result<u64> {
+    let mut file = BufWriter::new(StdFile::create(path)?);
+    writeln!(file, "shutter_time,counts")?;
+    let offset = if include_offset { tof_offset_ns } else { 0.0 };
+    let base_shift = match timing {
+        TiffSpectraTiming::BinCenter => 0.5,
+        TiffSpectraTiming::BinStart => 0.0,
+    };
+    for (i, count) in counts.iter().enumerate() {
+        let time_ns = (usize_to_f64(i) + base_shift) * bin_width_ns + offset;
+        let time_seconds = time_ns * 1.0e-9;
+        writeln!(file, "{time_seconds:.6e},{count}")?;
+    }
+    let size = file.into_inner()?.metadata()?.len();
+    Ok(size)
+}
+
+fn build_summed_counts(hyperstack: &Hyperstack3D, cached: Option<&[u64]>) -> Vec<u64> {
+    let expected = hyperstack.width() * hyperstack.height();
+    if let Some(counts) = cached {
+        if counts.len() == expected {
+            return counts.to_vec();
+        }
+    }
+    let mut summed = vec![0u64; expected];
+    for (idx, &count) in hyperstack.data().iter().enumerate() {
+        let pixel = idx % expected;
+        summed[pixel] = summed[pixel].saturating_add(count);
+    }
+    summed
+}
+
+fn write_tiff_folder(
+    hyperstack: &Hyperstack3D,
+    folder: &Path,
+    base_name: &str,
+    bit_depth: TiffBitDepth,
+    tx: &Sender<AppMessage>,
+    clamped_any: &mut bool,
+) -> Result<u64> {
+    let (width, height) = hyperstack_dimensions_u32(hyperstack)?;
+    let n_bins = hyperstack.n_tof_bins();
+    let update_every = (n_bins / 20).max(1);
+    let mut total_bytes = 0u64;
+    for tof in 0..n_bins {
+        if tof % update_every == 0 {
+            let progress = 0.25 + (usize_to_f32(tof) / usize_to_f32(n_bins)) * 0.7;
+            send_export_progress(tx, progress, "Writing TIFF folder");
+        }
+        let slice = hyperstack
+            .slice_tof(tof)
+            .ok_or_else(|| anyhow!("Missing TOF slice {tof}"))?;
+        let filename = format!("{base_name}_{tof:05}.tif");
+        let path = folder.join(filename);
+        total_bytes +=
+            write_single_tiff_image(&path, width, height, slice, bit_depth, clamped_any)?;
+    }
+
+    Ok(total_bytes)
+}
+
+fn write_tiff_stack(
+    hyperstack: &Hyperstack3D,
+    folder: &Path,
+    base_name: &str,
+    bit_depth: TiffBitDepth,
+    behavior: TiffStackBehavior,
+    tx: &Sender<AppMessage>,
+    clamped_any: &mut bool,
+) -> Result<u64> {
+    let (width, height) = hyperstack_dimensions_u32(hyperstack)?;
+    let n_bins = hyperstack.n_tof_bins();
+    let bytes_per_pixel = match bit_depth {
+        TiffBitDepth::Bit16 => 2u64,
+        TiffBitDepth::Bit32 => 4u64,
+    };
+    let stack_bytes =
+        u64::from(width) * u64::from(height) * bytes_per_pixel * u64::try_from(n_bins)?;
+    let use_bigtiff = match behavior {
+        TiffStackBehavior::StandardOnly => {
+            if stack_bytes > u64::from(u32::MAX) {
+                return Err(anyhow!(
+                    "TIFF stack exceeds 4 GB. Use TIFF Folder or enable BigTIFF."
+                ));
+            }
+            false
+        }
+        TiffStackBehavior::AutoBigTiff => stack_bytes > u64::from(u32::MAX),
+        TiffStackBehavior::AlwaysBigTiff => true,
+    };
+
+    let stack_path = folder.join(format!("{base_name}_stack.tif"));
+    let file = StdFile::create(&stack_path)?;
+    let params = TiffStackParams {
+        width,
+        height,
+        n_bins,
+        bit_depth,
+    };
+
+    if use_bigtiff {
+        let encoder = TiffFileEncoder::new_big(file)?;
+        write_tiff_stack_with_encoder(encoder, &stack_path, hyperstack, &params, tx, clamped_any)
+    } else {
+        let encoder = TiffFileEncoder::new(file)?;
+        write_tiff_stack_with_encoder(encoder, &stack_path, hyperstack, &params, tx, clamped_any)
+    }
+}
+
+fn write_tiff_stack_with_encoder<K: tiff::encoder::TiffKind>(
+    mut encoder: TiffFileEncoder<StdFile, K>,
+    stack_path: &Path,
+    hyperstack: &Hyperstack3D,
+    params: &TiffStackParams,
+    tx: &Sender<AppMessage>,
+    clamped_any: &mut bool,
+) -> Result<u64> {
+    let description = format!(
+        "ImageJ=1.53\nimages={}\nslices={}\nhyperstack=true\nmode=grayscale\n",
+        params.n_bins, params.n_bins
+    );
+
+    let update_every = (params.n_bins / 20).max(1);
+    for tof in 0..params.n_bins {
+        if tof % update_every == 0 {
+            let progress = 0.25 + (usize_to_f32(tof) / usize_to_f32(params.n_bins)) * 0.7;
+            send_export_progress(tx, progress, "Writing TIFF stack");
+        }
+        let slice = hyperstack
+            .slice_tof(tof)
+            .ok_or_else(|| anyhow!("Missing TOF slice {tof}"))?;
+
+        match params.bit_depth {
+            TiffBitDepth::Bit16 => {
+                let data = convert_slice_u16(slice, clamped_any);
+                let mut image = encoder.new_image::<Gray16>(params.width, params.height)?;
+                if tof == 0 {
+                    image
+                        .encoder()
+                        .write_tag(Tag::ImageDescription, description.as_str())?;
+                }
+                image.write_data(&data)?;
+            }
+            TiffBitDepth::Bit32 => {
+                let data = convert_slice_u32(slice, clamped_any);
+                let mut image = encoder.new_image::<Gray32>(params.width, params.height)?;
+                if tof == 0 {
+                    image
+                        .encoder()
+                        .write_tag(Tag::ImageDescription, description.as_str())?;
+                }
+                image.write_data(&data)?;
+            }
+        }
+    }
+
+    drop(encoder);
+    let size = StdFile::open(stack_path)?.metadata()?.len();
+    Ok(size)
+}
+
+fn write_single_tiff_image(
+    path: &Path,
+    width: u32,
+    height: u32,
+    counts: &[u64],
+    bit_depth: TiffBitDepth,
+    clamped_any: &mut bool,
+) -> Result<u64> {
+    let file = StdFile::create(path)?;
+    let mut encoder = TiffFileEncoder::new(file)?;
+    match bit_depth {
+        TiffBitDepth::Bit16 => {
+            let data = convert_slice_u16(counts, clamped_any);
+            encoder.write_image::<Gray16>(width, height, &data)?;
+        }
+        TiffBitDepth::Bit32 => {
+            let data = convert_slice_u32(counts, clamped_any);
+            encoder.write_image::<Gray32>(width, height, &data)?;
+        }
+    }
+    drop(encoder);
+    let size = StdFile::open(path)?.metadata()?.len();
+    Ok(size)
+}
+
+fn convert_slice_u16(counts: &[u64], clamped: &mut bool) -> Vec<u16> {
+    let mut out = Vec::with_capacity(counts.len());
+    for &value in counts {
+        if value > u64::from(u16::MAX) {
+            *clamped = true;
+            out.push(u16::MAX);
+        } else {
+            out.push(u16::try_from(value).unwrap_or(u16::MAX));
+        }
+    }
+    out
+}
+
+fn convert_slice_u32(counts: &[u64], clamped: &mut bool) -> Vec<u32> {
+    let mut out = Vec::with_capacity(counts.len());
+    for &value in counts {
+        if value > u64::from(u32::MAX) {
+            *clamped = true;
+            out.push(u32::MAX);
+        } else {
+            out.push(u32::try_from(value).unwrap_or(u32::MAX));
+        }
+    }
+    out
+}
+
+fn add_clamp_warning(bit_depth: TiffBitDepth, clamped: bool, warnings: &mut Vec<String>) {
+    if !clamped {
+        return;
+    }
+    match bit_depth {
+        TiffBitDepth::Bit16 => {
+            warnings.push("16-bit TIFF clamped values above 65535.".to_string());
+        }
+        TiffBitDepth::Bit32 => {
+            warnings.push("32-bit TIFF clamped values above 4,294,967,295.".to_string());
+        }
+    }
+}
+
+fn sanitize_export_base_name(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 fn prepare_hit_export(

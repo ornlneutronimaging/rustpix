@@ -6,7 +6,10 @@ use rfd::FileDialog;
 use super::theme::{accent, form_label, primary_button, ThemeColors};
 use crate::app::{DetectorProfile, DetectorProfileKind, RustpixApp};
 use crate::pipeline::AlgorithmType;
-use crate::state::{Hdf5ExportOptions, ViewMode};
+use crate::state::{
+    ExportFormat, Hdf5ExportOptions, TiffBitDepth, TiffExportOptions, TiffSpectraTiming,
+    TiffStackBehavior, ViewMode,
+};
 use crate::util::{format_bytes, format_number};
 use crate::viewer::Colormap;
 use rustpix_tpx::{ChipTransform, DetectorConfig};
@@ -84,7 +87,7 @@ impl RustpixApp {
             colors,
             FileToolbarIcon::Export,
             can_export,
-            "Export HDF5",
+            "Export data",
         )
         .clicked()
         {
@@ -1920,7 +1923,7 @@ x,y are local chip coordinates (pixels).",
         let mut open = self.ui_state.export.show_dialog;
         let mut should_close = false;
         let availability = self.export_availability();
-        egui::Window::new("Export HDF5")
+        egui::Window::new("Export")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1931,33 +1934,83 @@ x,y are local chip coordinates (pixels).",
                 let view_mode = self.ui_state.view_mode;
                 let export_in_progress = self.ui_state.export.in_progress;
 
-                let save_clicked = {
-                    let options = &mut self.ui_state.export.options;
-                    Self::apply_export_availability(options, availability);
-                    Self::render_export_header(ui, &colors, options);
-                    ui.add_space(8.0);
-                    Self::render_export_dataset_options(
-                        ui,
-                        options,
-                        availability,
-                        hit_count,
-                        neutron_count,
-                        view_mode,
-                    );
-                    if !availability.deflate.is_available() {
-                        Self::render_export_deflate_warning(ui);
+                Self::render_export_format_selector(ui, &colors, &mut self.ui_state.export.format);
+                ui.add_space(10.0);
+
+                let save_clicked = match self.ui_state.export.format {
+                    ExportFormat::Hdf5 => {
+                        let options = &mut self.ui_state.export.options;
+                        Self::apply_export_availability(options, availability);
+                        Self::render_export_header(ui, &colors, options);
+                        ui.add_space(8.0);
+                        Self::render_export_dataset_options(
+                            ui,
+                            options,
+                            availability,
+                            hit_count,
+                            neutron_count,
+                            view_mode,
+                        );
+                        if !availability.deflate.is_available() {
+                            Self::render_export_deflate_warning(ui);
+                        }
+                        if options.advanced.enabled {
+                            Self::render_export_advanced(ui, &colors, options);
+                        }
+                        ui.add_space(10.0);
+                        Self::render_export_save_button(
+                            ui,
+                            self.ui_state.export.format,
+                            options,
+                            availability,
+                            export_in_progress,
+                        )
                     }
-                    if options.advanced.enabled {
-                        Self::render_export_advanced(ui, &colors, options);
+                    ExportFormat::TiffFolder | ExportFormat::TiffStack => {
+                        self.populate_default_tiff_base_name();
+                        let options = &mut self.ui_state.export.tiff;
+                        let base_name_ok =
+                            !Self::sanitize_export_base_name(&options.base_name).is_empty();
+                        Self::render_tiff_export_options(
+                            ui,
+                            &colors,
+                            options,
+                            self.ui_state.export.format,
+                            availability,
+                        );
+                        ui.add_space(10.0);
+                        Self::render_tiff_export_button(
+                            ui,
+                            self.ui_state.export.format,
+                            availability,
+                            export_in_progress,
+                            base_name_ok,
+                        )
                     }
-                    ui.add_space(10.0);
-                    Self::render_export_save_button(ui, options, availability, export_in_progress)
                 };
 
                 if save_clicked {
-                    if let Some(path) = FileDialog::new().set_file_name("rustpix.h5").save_file() {
-                        self.start_export_hdf5(path);
-                        should_close = true;
+                    match self.ui_state.export.format {
+                        ExportFormat::Hdf5 => {
+                            if let Some(path) =
+                                FileDialog::new().set_file_name("rustpix.h5").save_file()
+                            {
+                                self.start_export_hdf5(path);
+                                should_close = true;
+                            }
+                        }
+                        ExportFormat::TiffFolder | ExportFormat::TiffStack => {
+                            if let Some(parent) = FileDialog::new().pick_folder() {
+                                let base_name = Self::sanitize_export_base_name(
+                                    &self.ui_state.export.tiff.base_name,
+                                );
+                                if !base_name.is_empty() {
+                                    let folder = parent.join(&base_name);
+                                    self.start_export_tiff(folder, self.ui_state.export.format);
+                                    should_close = true;
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -1965,6 +2018,236 @@ x,y are local chip coordinates (pixels).",
             open = false;
         }
         self.ui_state.export.show_dialog = open;
+    }
+
+    fn render_export_format_selector(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        format: &mut ExportFormat,
+    ) {
+        ui.label(
+            egui::RichText::new("Export format")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        ui.add_space(4.0);
+        egui::ComboBox::from_id_salt("export_format")
+            .selected_text(format.to_string())
+            .width(ui.available_width() - 8.0)
+            .show_ui(ui, |ui| {
+                for option in [
+                    ExportFormat::Hdf5,
+                    ExportFormat::TiffFolder,
+                    ExportFormat::TiffStack,
+                ] {
+                    ui.selectable_value(format, option, option.to_string());
+                }
+            });
+    }
+
+    fn render_tiff_export_options(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        options: &mut TiffExportOptions,
+        format: ExportFormat,
+        availability: ExportAvailability,
+    ) {
+        ui.label(
+            egui::RichText::new("TIFF export options")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        ui.add_space(6.0);
+
+        Self::render_tiff_bit_depth(ui, options);
+        ui.add_space(4.0);
+        Self::render_tiff_spectra_options(ui, options);
+        ui.add_space(8.0);
+        Self::render_tiff_base_name(ui, colors, options);
+        if format == ExportFormat::TiffStack {
+            Self::render_tiff_stack_behavior(ui, colors, options);
+        }
+
+        if !availability.histogram.is_available() {
+            Self::render_tiff_availability_warning(ui);
+        }
+    }
+
+    fn render_tiff_bit_depth(ui: &mut egui::Ui, options: &mut TiffExportOptions) {
+        ui.horizontal(|ui| {
+            ui.label("Bit depth");
+            egui::ComboBox::from_id_salt("tiff_bit_depth")
+                .selected_text(options.bit_depth.to_string())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut options.bit_depth,
+                        TiffBitDepth::Bit16,
+                        TiffBitDepth::Bit16.to_string(),
+                    );
+                    ui.selectable_value(
+                        &mut options.bit_depth,
+                        TiffBitDepth::Bit32,
+                        TiffBitDepth::Bit32.to_string(),
+                    );
+                });
+        });
+    }
+
+    fn render_tiff_spectra_options(ui: &mut egui::Ui, options: &mut TiffExportOptions) {
+        ui.checkbox(&mut options.include_spectra, "Include spectra file");
+        ui.checkbox(&mut options.include_summed_image, "Include summed image");
+        ui.checkbox(
+            &mut options.exclude_masked_pixels,
+            "Exclude masked pixels (spectra)",
+        );
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut options.include_tof_offset, "Include TOF offset");
+            ui.add_space(10.0);
+            ui.label("Timing");
+            egui::ComboBox::from_id_salt("tiff_spectra_timing")
+                .selected_text(options.spectra_timing.to_string())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut options.spectra_timing,
+                        TiffSpectraTiming::BinCenter,
+                        TiffSpectraTiming::BinCenter.to_string(),
+                    );
+                    ui.selectable_value(
+                        &mut options.spectra_timing,
+                        TiffSpectraTiming::BinStart,
+                        TiffSpectraTiming::BinStart.to_string(),
+                    );
+                });
+        });
+    }
+
+    fn render_tiff_base_name(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        options: &mut TiffExportOptions,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("Base name");
+            ui.add(
+                egui::TextEdit::singleline(&mut options.base_name)
+                    .desired_width(ui.available_width() - 70.0),
+            );
+        });
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("A folder named after the base name will be created.")
+                .size(10.0)
+                .color(colors.text_muted),
+        );
+        if Self::sanitize_export_base_name(&options.base_name).is_empty() {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("Base name is required.")
+                    .size(10.0)
+                    .color(accent::RED),
+            );
+        }
+    }
+
+    fn render_tiff_stack_behavior(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        options: &mut TiffExportOptions,
+    ) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Large stack handling")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        egui::ComboBox::from_id_salt("tiff_stack_behavior")
+            .selected_text(options.stack_behavior.to_string())
+            .width(ui.available_width() - 8.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut options.stack_behavior,
+                    TiffStackBehavior::StandardOnly,
+                    TiffStackBehavior::StandardOnly.to_string(),
+                );
+                ui.selectable_value(
+                    &mut options.stack_behavior,
+                    TiffStackBehavior::AutoBigTiff,
+                    TiffStackBehavior::AutoBigTiff.to_string(),
+                );
+                ui.selectable_value(
+                    &mut options.stack_behavior,
+                    TiffStackBehavior::AlwaysBigTiff,
+                    TiffStackBehavior::AlwaysBigTiff.to_string(),
+                );
+            });
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("Standard TIFF is the most compatible with ImageJ.")
+                .size(10.0)
+                .color(colors.text_muted),
+        );
+    }
+
+    fn render_tiff_availability_warning(ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("No histogram data available for TIFF export.")
+                .size(10.0)
+                .color(accent::RED),
+        );
+    }
+
+    fn render_tiff_export_button(
+        ui: &mut egui::Ui,
+        format: ExportFormat,
+        availability: ExportAvailability,
+        export_in_progress: bool,
+        base_name_ok: bool,
+    ) -> bool {
+        let can_export =
+            availability.histogram.is_available() && !export_in_progress && base_name_ok;
+        let label = match format {
+            ExportFormat::TiffFolder => "Export TIFF Folder...",
+            ExportFormat::TiffStack => "Export TIFF Stack...",
+            ExportFormat::Hdf5 => "Save HDF5...",
+        };
+        ui.add_enabled(can_export, egui::Button::new(label))
+            .clicked()
+    }
+
+    fn sanitize_export_base_name(value: &str) -> String {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        trimmed
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+                _ => '_',
+            })
+            .collect::<String>()
+            .trim_matches('_')
+            .to_string()
+    }
+
+    fn populate_default_tiff_base_name(&mut self) {
+        let options = &mut self.ui_state.export.tiff;
+        if !options.base_name.is_empty() && options.base_name != "Run_XXXXX" {
+            return;
+        }
+        let Some(path) = self.selected_file.as_ref() else {
+            return;
+        };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            return;
+        };
+        let sanitized = Self::sanitize_export_base_name(stem);
+        if !sanitized.is_empty() {
+            options.base_name = sanitized;
+        }
     }
 
     fn export_availability(&self) -> ExportAvailability {
@@ -2144,6 +2427,7 @@ x,y are local chip coordinates (pixels).",
 
     fn render_export_save_button(
         ui: &mut egui::Ui,
+        format: ExportFormat,
         options: &Hdf5ExportOptions,
         availability: ExportAvailability,
         export_in_progress: bool,
@@ -2152,9 +2436,15 @@ x,y are local chip coordinates (pixels).",
             || options.datasets.neutrons
             || options.datasets.histogram
             || options.masks.pixel_masks;
-        let can_export = any_selected && availability.deflate.is_available() && !export_in_progress;
+        let deflate_ok = availability.deflate.is_available();
+        let can_export = any_selected && deflate_ok && !export_in_progress;
 
-        ui.add_enabled(can_export, egui::Button::new("Save HDF5..."))
+        let label = match format {
+            ExportFormat::Hdf5 => "Save HDF5...",
+            ExportFormat::TiffFolder => "Export TIFF Folder...",
+            ExportFormat::TiffStack => "Export TIFF Stack...",
+        };
+        ui.add_enabled(can_export, egui::Button::new(label))
             .clicked()
     }
 

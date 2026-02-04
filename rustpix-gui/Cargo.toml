@@ -43,6 +43,7 @@ egui_plot = "0.29"
 egui_extras = { version = "0.29", features = ["svg"] }
 rfd = "0.15"
 image = "0.25"
+tiff = "0.10"
 hdf5.workspace = true
 sysinfo.workspace = true
 
