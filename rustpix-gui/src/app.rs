@@ -1847,7 +1847,7 @@ fn convert_slice_u16(counts: &[u64], clamped: &mut bool) -> Vec<u16> {
             *clamped = true;
             out.push(u16::MAX);
         } else {
-            out.push(u16::try_from(value).unwrap_or(u16::MAX));
+            out.push(u16::try_from(value).expect("value <= u16::MAX"));
         }
     }
     out
@@ -1860,7 +1860,7 @@ fn convert_slice_u32(counts: &[u64], clamped: &mut bool) -> Vec<u32> {
             *clamped = true;
             out.push(u32::MAX);
         } else {
-            out.push(u32::try_from(value).unwrap_or(u32::MAX));
+            out.push(u32::try_from(value).expect("value <= u32::MAX"));
         }
     }
     out
