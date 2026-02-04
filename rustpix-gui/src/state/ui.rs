@@ -190,16 +190,116 @@ pub struct UiCacheToggles {
 
 #[derive(Default)]
 pub struct UiExportState {
-    /// Whether the HDF5 export dialog is open.
+    /// Whether the export dialog is open.
     pub show_dialog: bool,
-    /// Whether an HDF5 export is in progress.
+    /// Whether an export is in progress.
     pub in_progress: bool,
     /// Export progress value from 0.0 to 1.0.
     pub progress: f32,
     /// Export status message.
     pub status: String,
+    /// Selected export format.
+    pub format: ExportFormat,
     /// HDF5 export configuration.
     pub options: Hdf5ExportOptions,
+    /// TIFF export configuration.
+    pub tiff: TiffExportOptions,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ExportFormat {
+    #[default]
+    Hdf5,
+    TiffFolder,
+    TiffStack,
+}
+
+impl fmt::Display for ExportFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hdf5 => write!(f, "HDF5 (NeXus)"),
+            Self::TiffFolder => write!(f, "TIFF Folder"),
+            Self::TiffStack => write!(f, "TIFF Stack"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TiffBitDepth {
+    #[default]
+    Bit16,
+    Bit32,
+}
+
+impl fmt::Display for TiffBitDepth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bit16 => write!(f, "16-bit"),
+            Self::Bit32 => write!(f, "32-bit"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TiffSpectraTiming {
+    #[default]
+    BinCenter,
+    BinStart,
+}
+
+impl fmt::Display for TiffSpectraTiming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BinCenter => write!(f, "Bin center"),
+            Self::BinStart => write!(f, "Bin start"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TiffStackBehavior {
+    #[default]
+    StandardOnly,
+    AutoBigTiff,
+    AlwaysBigTiff,
+}
+
+impl fmt::Display for TiffStackBehavior {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StandardOnly => write!(f, "Standard TIFF (most compatible)"),
+            Self::AutoBigTiff => write!(f, "Auto BigTIFF if needed"),
+            Self::AlwaysBigTiff => write!(f, "Always BigTIFF"),
+        }
+    }
+}
+
+#[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct TiffExportOptions {
+    pub bit_depth: TiffBitDepth,
+    pub include_spectra: bool,
+    pub include_summed_image: bool,
+    pub exclude_masked_pixels: bool,
+    pub include_tof_offset: bool,
+    pub spectra_timing: TiffSpectraTiming,
+    pub base_name: String,
+    pub stack_behavior: TiffStackBehavior,
+}
+
+impl Default for TiffExportOptions {
+    fn default() -> Self {
+        Self {
+            bit_depth: TiffBitDepth::Bit16,
+            include_spectra: true,
+            include_summed_image: true,
+            exclude_masked_pixels: true,
+            include_tof_offset: true,
+            spectra_timing: TiffSpectraTiming::BinCenter,
+            base_name: "Run_XXXXX".to_string(),
+            stack_behavior: TiffStackBehavior::StandardOnly,
+        }
+    }
 }
 
 #[derive(Clone)]

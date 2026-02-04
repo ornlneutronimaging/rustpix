@@ -6,4 +6,7 @@ mod ui;
 
 pub use processing::ProcessingState;
 pub use statistics::Statistics;
-pub use ui::{Hdf5ExportOptions, SpectrumXAxis, UiState, ViewMode, ZoomMode};
+pub use ui::{
+    ExportFormat, Hdf5ExportOptions, SpectrumXAxis, TiffBitDepth, TiffExportOptions,
+    TiffSpectraTiming, TiffStackBehavior, UiState, ViewMode, ZoomMode,
+};

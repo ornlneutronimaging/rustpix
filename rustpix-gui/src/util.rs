@@ -21,6 +21,24 @@ pub fn u64_to_f64(value: u64) -> f64 {
     value as f64
 }
 
+/// Sanitize a base name for export folder/file creation.
+#[must_use]
+pub fn sanitize_export_base_name(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
+
 /// Convert f32 to u8 with clamping to [0, 255].
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn f32_to_u8(value: f32) -> u8 {

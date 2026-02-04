@@ -3831,6 +3831,7 @@ dependencies = [
  "rustpix-io",
  "rustpix-tpx",
  "sysinfo",
+ "tiff",
 ]
 
 [[package]]
