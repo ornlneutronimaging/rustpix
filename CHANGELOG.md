@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-02-03
+
+### Fixed
+
+- GitHub Actions workflow: Updated macOS runner from retired macos-13 to macos-15
+- GitHub Actions workflow: Fixed publish job conditions to handle tag-triggered releases
+- PyPI publishing now works correctly for tag-triggered releases
+
 ## [1.0.0] - 2026-02-03
 
 ### Added

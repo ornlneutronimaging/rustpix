@@ -35,7 +35,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
           # macOS x86_64
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
           # Windows x86_64
           - os: windows-latest
@@ -90,7 +90,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: rustpix-cli-macos-arm64
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             artifact_name: rustpix-cli-macos-x86_64
           - os: windows-latest
@@ -175,7 +175,7 @@ jobs:
     name: Publish to PyPI
     needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
     environment:
       name: pypi
       url: https://pypi.org/p/rustpix
@@ -207,7 +207,7 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
     steps:
       - uses: actions/checkout@v4
 
@@ -301,7 +301,7 @@ jobs:
     name: Update Homebrew Tap
     needs: github-release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !inputs.dry_run
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && (github.event_name != 'workflow_dispatch' || !inputs.dry_run)
     steps:
       - name: Extract version from tag
         id: version
