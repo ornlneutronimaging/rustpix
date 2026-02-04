@@ -150,7 +150,8 @@ jobs:
         run: cargo install cargo-bundle
 
       - name: Build macOS app bundle
-        run: cargo bundle --release --package rustpix-gui --exclude rustpix-python
+        working-directory: rustpix-gui
+        run: cargo bundle --release
 
       - name: Create DMG
         run: |
