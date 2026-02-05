@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/logo.svg" alt="Rustpix Logo" width="128" height="128">
+</p>
+
 # Introduction
 
 **Rustpix** is a high-performance pixel detector data processing library for neutron imaging. It processes Timepix3 (TPX3) data with throughput exceeding 96 million hits per second, featuring multiple clustering algorithms, centroid extraction, and Python bindings.

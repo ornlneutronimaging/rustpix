@@ -82,6 +82,8 @@ build = { cmd = "maturin develop --release --strip", env = { RUSTFLAGS = "-C tar
 build-debug = { cmd = "maturin develop", description = "Build in debug mode + editable install" }
 gui = { cmd = "cargo run -p rustpix-gui --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build and run GUI in release mode" }
 gui-debug = { cmd = "cargo run -p rustpix-gui", description = "Build and run GUI in debug mode" }
+cli = { cmd = "cargo build -p rustpix-cli --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build CLI in release mode (binary at target/release/rustpix)" }
+cli-debug = { cmd = "cargo build -p rustpix-cli", description = "Build CLI in debug mode (binary at target/debug/rustpix)" }
 docs = { cmd = "cargo doc --workspace --no-deps --open", description = "Build and open documentation" }
 clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf '{}' + 2>/dev/null || true", description = "Remove all build artifacts" }
 notebook = { cmd = "jupyter lab", description = "Launch JupyterLab" }
