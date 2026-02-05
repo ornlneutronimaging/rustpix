@@ -1,6 +1,7 @@
 # rustpix
 
 [![CI](https://github.com/ornlneutronimaging/rustpix/actions/workflows/ci.yml/badge.svg)](https://github.com/ornlneutronimaging/rustpix/actions/workflows/ci.yml)
+[![Documentation](https://img.shields.io/badge/docs-mdBook-blue.svg)](https://ornlneutronimaging.github.io/rustpix/)
 [![Crates.io](https://img.shields.io/crates/v/rustpix-core.svg)](https://crates.io/crates/rustpix-core)
 [![PyPI](https://img.shields.io/pypi/v/rustpix.svg)](https://pypi.org/project/rustpix/)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18496371.svg)](https://doi.org/10.5281/zenodo.18496371)
@@ -217,9 +218,8 @@ pixi run gui-debug
 
 ## Documentation
 
+- **User Guide**: [ornlneutronimaging.github.io/rustpix](https://ornlneutronimaging.github.io/rustpix/)
 - **Rust API**: [docs.rs/rustpix-core](https://docs.rs/rustpix-core)
-- **Python API**: See docstrings in `rustpix` module
-- **Examples**: [examples/](examples/) directory
 - **Design Docs**: [docs/](docs/) directory
 
 ## Citation

@@ -24,3 +24,9 @@ target
 # Project-specific documentation files (not for version control)
 CLAUDE.md
 IMPLEMENTATION_PLAN.md
+
+# mdBook build output
+book/book/
+
+# Temporary test data
+tmp_test_data

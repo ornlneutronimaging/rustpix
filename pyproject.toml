@@ -68,6 +68,7 @@ pytest = "*"
 jupyterlab = "*"
 ipykernel = "*"
 matplotlib = "*"
+mdbook = "*"
 
 [tool.pixi.environments]
 default = { features = [] }
@@ -82,6 +83,8 @@ build = { cmd = "maturin develop --release --strip", env = { RUSTFLAGS = "-C tar
 build-debug = { cmd = "maturin develop", description = "Build in debug mode + editable install" }
 gui = { cmd = "cargo run -p rustpix-gui --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build and run GUI in release mode" }
 gui-debug = { cmd = "cargo run -p rustpix-gui", description = "Build and run GUI in debug mode" }
+cli = { cmd = "cargo build -p rustpix-cli --release", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build CLI in release mode (binary at target/release/rustpix)" }
+cli-debug = { cmd = "cargo build -p rustpix-cli", description = "Build CLI in debug mode (binary at target/debug/rustpix)" }
 docs = { cmd = "cargo doc --workspace --no-deps --open", description = "Build and open documentation" }
 clean = { cmd = "cargo clean && rm -rf target/ dist/ .pytest_cache __pycache__ && find . -name '*.egg-info' -type d -exec rm -rf '{}' + 2>/dev/null || true", description = "Remove all build artifacts" }
 notebook = { cmd = "jupyter lab", description = "Launch JupyterLab" }
@@ -93,3 +96,7 @@ version-sync = { cmd = "python scripts/version.py sync", description = "Sync ver
 version-patch = { cmd = "python scripts/version.py patch", description = "Bump patch version (0.1.0 -> 0.1.1)" }
 version-minor = { cmd = "python scripts/version.py minor", description = "Bump minor version (0.1.0 -> 0.2.0)" }
 version-major = { cmd = "python scripts/version.py major", description = "Bump major version (0.1.0 -> 1.0.0)" }
+
+# Documentation (mdBook)
+book = { cmd = "mdbook serve book --open", description = "Serve mdBook documentation locally" }
+book-build = { cmd = "mdbook build book", description = "Build mdBook documentation" }

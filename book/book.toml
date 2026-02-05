@@ -1,0 +1,27 @@
+[book]
+title = "Rustpix Documentation"
+description = "High-performance pixel detector data processing for neutron imaging"
+authors = ["ORNL Neutron Imaging Team"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/ornlneutronimaging/rustpix"
+edit-url-template = "https://github.com/ornlneutronimaging/rustpix/edit/main/book/src/{path}"
+site-url = "/rustpix/"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
