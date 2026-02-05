@@ -3,6 +3,7 @@
 [![CI](https://github.com/ornlneutronimaging/rustpix/actions/workflows/ci.yml/badge.svg)](https://github.com/ornlneutronimaging/rustpix/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/rustpix-core.svg)](https://crates.io/crates/rustpix-core)
 [![PyPI](https://img.shields.io/pypi/v/rustpix.svg)](https://pypi.org/project/rustpix/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18496371.svg)](https://doi.org/10.5281/zenodo.18496371)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 High-performance pixel detector data processing for neutron imaging. Supports Timepix3 (TPX3) with 96M+ hits/sec throughput. Features multiple clustering algorithms, centroid extraction, and Python bindings.
@@ -226,11 +227,12 @@ pixi run gui-debug
 If you use rustpix in your research, please cite:
 
 ```bibtex
-@software{rustpix2024,
+@software{rustpix2026,
   title = {rustpix: High-performance pixel detector data processing},
   author = {{ORNL Neutron Imaging Team}},
-  year = {2024},
-  url = {https://github.com/ornlneutronimaging/rustpix}
+  year = {2026},
+  url = {https://github.com/ornlneutronimaging/rustpix},
+  doi = {10.5281/zenodo.18496371}
 }
 ```
 
