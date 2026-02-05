@@ -15,9 +15,9 @@ data = hits.to_numpy()
 print(f"Loaded {len(data['x'])} hits")
 
 # Access individual arrays
-x = data['x']      # int32
-y = data['y']      # int32
-tof = data['tof']  # float64, nanoseconds
+x = data['x']      # uint16
+y = data['y']      # uint16
+tof = data['tof']  # uint32, 25ns ticks (multiply by 25 for nanoseconds)
 tot = data['tot']  # uint16
 ```
 

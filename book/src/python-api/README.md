@@ -20,13 +20,15 @@ Contains raw detector hits with the following fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `x` | `int32` | X coordinate (pixels) |
-| `y` | `int32` | Y coordinate (pixels) |
-| `tof` | `float64` | Time-of-flight (nanoseconds) |
+| `x` | `uint16` | X coordinate (pixels) |
+| `y` | `uint16` | Y coordinate (pixels) |
+| `tof` | `uint32` | Time-of-flight (25ns ticks) |
 | `tot` | `uint16` | Time-over-threshold (charge proxy) |
-| `timestamp` | `uint64` | Raw timestamp |
+| `timestamp` | `uint32` | Raw timestamp |
 | `chip_id` | `uint8` | Detector chip ID |
 | `cluster_id` | `int32` | Cluster assignment (-1 if unclustered) |
+
+> **Note:** The `tof` field is stored in 25ns tick units for efficiency. To convert to nanoseconds: `tof_ns = tof * 25`
 
 ### NeutronBatch
 
@@ -36,10 +38,12 @@ Contains processed neutron events:
 |-------|------|-------------|
 | `x` | `float64` | Centroid X (sub-pixel resolution) |
 | `y` | `float64` | Centroid Y (sub-pixel resolution) |
-| `tof` | `float64` | Time-of-flight (nanoseconds) |
-| `tot` | `uint32` | Total charge (sum of hit ToT) |
+| `tof` | `uint32` | Time-of-flight (25ns ticks) |
+| `tot` | `uint16` | Total charge (sum of hit ToT) |
 | `n_hits` | `uint16` | Number of hits in cluster |
 | `chip_id` | `uint8` | Detector chip ID |
+
+> **Note:** The `tof` field is stored in 25ns tick units. To convert to nanoseconds: `tof_ns = tof * 25`
 
 ## Output Formats
 

@@ -27,7 +27,7 @@ The default algorithm. Uses 8-connectivity search to find adjacent pixels within
 |-----------|-------------|---------------|
 | `radius` | Maximum pixel distance | 5.0 |
 | `temporal_window_ns` | Maximum time difference | 75.0 ns |
-| `abs_scan_interval` | Hits between cluster scans | 1000 |
+| `abs_scan_interval` | Hits between cluster scans | 100 |
 
 ### When to Use
 
