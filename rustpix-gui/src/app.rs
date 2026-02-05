@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use eframe::egui;
+use egui_plot::PlotPoint;
 use hdf5::filters::deflate_available;
 use hdf5::filters::Filter;
 use hdf5::File;
@@ -33,7 +34,7 @@ use crate::state::{
 use crate::util::{
     f64_to_usize_bounded, sanitize_export_base_name, u64_to_f64, usize_to_f32, usize_to_f64,
 };
-use crate::viewer::{generate_histogram_image, Colormap, Roi, RoiShape, RoiState};
+use crate::viewer::{generate_histogram_image_transformed, Colormap, Roi, RoiShape, RoiState};
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::hdf5::{
@@ -78,22 +79,27 @@ pub(crate) struct RoiSpectrumEntry {
 #[derive(Clone, Copy)]
 struct RoiSpectrumContext<'a> {
     hyperstack: &'a Hyperstack3D,
-    width: usize,
-    height: usize,
+    data_width: usize,
+    data_height: usize,
+    display_width: usize,
+    display_height: usize,
     n_bins: usize,
     mask: Option<&'a PixelMaskData>,
+    transform: crate::state::ViewTransform,
 }
 
 #[derive(Default)]
 struct RoiSpectraCache {
     roi_revision: u64,
     data_revision: u64,
+    transform: crate::state::ViewTransform,
     spectra: HashMap<usize, RoiSpectrumEntry>,
 }
 
 struct RoiSpectrumPending {
     roi_revision: u64,
     data_revision: u64,
+    transform: crate::state::ViewTransform,
     last_change: f64,
 }
 
@@ -474,6 +480,134 @@ impl RustpixApp {
         }
     }
 
+    pub(crate) fn rotate_histogram_cw(&mut self) {
+        self.update_histogram_transform(crate::state::ViewTransform::rotate_cw);
+    }
+
+    pub(crate) fn rotate_histogram_ccw(&mut self) {
+        self.update_histogram_transform(crate::state::ViewTransform::rotate_ccw);
+    }
+
+    pub(crate) fn flip_histogram_horizontal(&mut self) {
+        self.update_histogram_transform(crate::state::ViewTransform::flip_horizontal);
+    }
+
+    pub(crate) fn flip_histogram_vertical(&mut self) {
+        self.update_histogram_transform(crate::state::ViewTransform::flip_vertical);
+    }
+
+    pub(crate) fn reset_histogram_transform(&mut self) {
+        self.update_histogram_transform(crate::state::ViewTransform::reset);
+    }
+
+    fn update_histogram_transform(
+        &mut self,
+        update: impl FnOnce(&mut crate::state::ViewTransform),
+    ) {
+        let before = self.ui_state.histogram_view.transform;
+        update(&mut self.ui_state.histogram_view.transform);
+        let after = self.ui_state.histogram_view.transform;
+        if before != after {
+            self.on_histogram_transform_changed(before, after);
+        }
+    }
+
+    fn on_histogram_transform_changed(
+        &mut self,
+        before: crate::state::ViewTransform,
+        after: crate::state::ViewTransform,
+    ) {
+        self.texture = None;
+        self.ui_state.histogram_view.needs_plot_reset = true;
+        self.remap_roi_for_transform(before, after);
+        self.roi_spectrum_pending = None;
+    }
+
+    fn remap_roi_for_transform(
+        &mut self,
+        before: crate::state::ViewTransform,
+        after: crate::state::ViewTransform,
+    ) {
+        if self.roi_state.rois.is_empty()
+            && self.roi_state.draft.is_none()
+            && self.roi_state.polygon_draft.is_none()
+        {
+            return;
+        }
+        let (width, height) = self.current_data_dimensions();
+        if width == 0 || height == 0 {
+            return;
+        }
+        let width_f = usize_to_f64(width);
+        let height_f = usize_to_f64(height);
+        let map_point = |x: f64, y: f64| -> (f64, f64) {
+            let (data_x, data_y) = before
+                .apply_inverse_f64(x, y, width_f, height_f)
+                .unwrap_or((x, y));
+            after
+                .apply_f64(data_x, data_y, width_f, height_f)
+                .unwrap_or((x, y))
+        };
+
+        let mut changed = false;
+        for roi in &mut self.roi_state.rois {
+            match &mut roi.shape {
+                RoiShape::Rectangle { x1, y1, x2, y2 } => {
+                    let (ox1, oy1, ox2, oy2) = (*x1, *y1, *x2, *y2);
+                    let (c1x, c1y) = map_point(ox1, oy1);
+                    let (c2x, c2y) = map_point(ox2, oy1);
+                    let (c3x, c3y) = map_point(ox2, oy2);
+                    let (c4x, c4y) = map_point(ox1, oy2);
+                    let min_x = c1x.min(c2x).min(c3x).min(c4x);
+                    let max_x = c1x.max(c2x).max(c3x).max(c4x);
+                    let min_y = c1y.min(c2y).min(c3y).min(c4y);
+                    let max_y = c1y.max(c2y).max(c3y).max(c4y);
+                    *x1 = min_x;
+                    *x2 = max_x;
+                    *y1 = min_y;
+                    *y2 = max_y;
+                    changed = true;
+                }
+                RoiShape::Polygon { vertices } => {
+                    for (x, y) in vertices.iter_mut() {
+                        let (nx, ny) = map_point(*x, *y);
+                        *x = nx;
+                        *y = ny;
+                    }
+                    changed = true;
+                }
+            }
+        }
+
+        if let Some(draft) = &mut self.roi_state.draft {
+            let (sx, sy) = map_point(draft.start.x, draft.start.y);
+            let (cx, cy) = map_point(draft.current.x, draft.current.y);
+            draft.start = PlotPoint::new(sx, sy);
+            draft.current = PlotPoint::new(cx, cy);
+            changed = true;
+        }
+
+        if let Some(draft) = &mut self.roi_state.polygon_draft {
+            for (x, y) in &mut draft.vertices {
+                let (nx, ny) = map_point(*x, *y);
+                *x = nx;
+                *y = ny;
+            }
+            if let Some(hover) = draft.hover {
+                let (hx, hy) = map_point(hover.x, hover.y);
+                draft.hover = Some(PlotPoint::new(hx, hy));
+            }
+            changed = true;
+        }
+
+        self.roi_state.end_drag();
+        self.roi_state.clear_edit_mode();
+
+        if changed {
+            self.roi_state.touch();
+        }
+    }
+
     /// Generate histogram image from current view (hits or neutrons).
     pub fn generate_histogram(&self) -> egui::ColorImage {
         let counts = if self.ui_state.histogram.slicer_enabled {
@@ -485,15 +619,18 @@ impl RustpixApp {
             self.active_counts()
         };
 
-        let (width, height) = self.current_dimensions();
+        let (width, height) = self.current_data_dimensions();
+        let transform = self.ui_state.histogram_view.transform;
+        let (disp_w, disp_h) = transform.display_size(width, height);
 
         let Some(counts) = counts else {
-            return egui::ColorImage::new([width.max(1), height.max(1)], egui::Color32::BLACK);
+            return egui::ColorImage::new([disp_w.max(1), disp_h.max(1)], egui::Color32::BLACK);
         };
-        generate_histogram_image(
+        generate_histogram_image_transformed(
             counts,
             width,
             height,
+            transform,
             self.colormap,
             self.ui_state.histogram.log_scale,
         )
@@ -739,12 +876,21 @@ impl RustpixApp {
         }
     }
 
-    /// Get width/height for the active view.
-    pub fn current_dimensions(&self) -> (usize, usize) {
+    /// Get width/height for the active view (raw data dimensions).
+    pub fn current_data_dimensions(&self) -> (usize, usize) {
         self.active_hyperstack().map_or_else(
             || self.current_detector_config().detector_dimensions(),
             |hs| (hs.width(), hs.height()),
         )
+    }
+
+    /// Get width/height for the active view (display dimensions).
+    pub fn current_dimensions(&self) -> (usize, usize) {
+        let (width, height) = self.current_data_dimensions();
+        self.ui_state
+            .histogram_view
+            .transform
+            .display_size(width, height)
     }
 
     pub(crate) fn start_export_hdf5(&mut self, path: PathBuf) {
@@ -913,9 +1059,12 @@ impl RustpixApp {
     pub(crate) fn update_roi_spectra(&mut self, ctx: &egui::Context) {
         let roi_revision = self.roi_state.revision();
         let data_revision = self.active_data_revision();
+        let transform = self.ui_state.histogram_view.transform;
         let needs_update = {
             let cache = self.active_roi_cache();
-            cache.roi_revision != roi_revision || cache.data_revision != data_revision
+            cache.roi_revision != roi_revision
+                || cache.data_revision != data_revision
+                || cache.transform != transform
         };
         if !needs_update {
             self.roi_spectrum_pending = None;
@@ -929,9 +1078,11 @@ impl RustpixApp {
                 Some(pending) => {
                     if pending.roi_revision != roi_revision
                         || pending.data_revision != data_revision
+                        || pending.transform != transform
                     {
                         pending.roi_revision = roi_revision;
                         pending.data_revision = data_revision;
+                        pending.transform = transform;
                         pending.last_change = now;
                     }
                 }
@@ -939,6 +1090,7 @@ impl RustpixApp {
                     self.roi_spectrum_pending = Some(RoiSpectrumPending {
                         roi_revision,
                         data_revision,
+                        transform,
                         last_change: now,
                     });
                 }
@@ -953,7 +1105,10 @@ impl RustpixApp {
         }
 
         let start = Instant::now();
-        let force_all = self.active_roi_cache().data_revision != data_revision;
+        let force_all = {
+            let cache = self.active_roi_cache();
+            cache.data_revision != data_revision || cache.transform != transform
+        };
         let previous = {
             let cache = self.active_roi_cache_mut();
             std::mem::take(&mut cache.spectra)
@@ -969,20 +1124,27 @@ impl RustpixApp {
         cache.spectra = spectra;
         cache.roi_revision = roi_revision;
         cache.data_revision = data_revision;
+        cache.transform = transform;
         self.roi_spectrum_pending = None;
     }
 
     pub(crate) fn force_roi_spectra_update(&mut self) {
         let roi_revision = self.roi_state.revision();
         let data_revision = self.active_data_revision();
+        let transform = self.ui_state.histogram_view.transform;
         let needs_update = {
             let cache = self.active_roi_cache();
-            cache.roi_revision != roi_revision || cache.data_revision != data_revision
+            cache.roi_revision != roi_revision
+                || cache.data_revision != data_revision
+                || cache.transform != transform
         };
         if !needs_update {
             return;
         }
-        let force_all = self.active_roi_cache().data_revision != data_revision;
+        let force_all = {
+            let cache = self.active_roi_cache();
+            cache.data_revision != data_revision || cache.transform != transform
+        };
         let previous = {
             let cache = self.active_roi_cache_mut();
             std::mem::take(&mut cache.spectra)
@@ -992,6 +1154,7 @@ impl RustpixApp {
         cache.spectra = spectra;
         cache.roi_revision = roi_revision;
         cache.data_revision = data_revision;
+        cache.transform = transform;
         self.roi_spectrum_pending = None;
     }
 
@@ -1005,13 +1168,26 @@ impl RustpixApp {
         };
         let width = hyperstack.width();
         let height = hyperstack.height();
+        let transform = self.ui_state.histogram_view.transform;
+        let (display_width, display_height) = transform.display_size(width, height);
         let n_bins = hyperstack.n_tof_bins();
-        let mask = if self.ui_state.pixel_health.exclude_masked_pixels
+        let mask_data = if self.ui_state.pixel_health.exclude_masked_pixels
             && self.ui_state.view_mode == ViewMode::Hits
         {
             self.pixel_masks.as_ref()
         } else {
             None
+        };
+        let mask = Self::active_pixel_mask(mask_data, width, height);
+        let ctx = RoiSpectrumContext {
+            hyperstack,
+            data_width: width,
+            data_height: height,
+            display_width,
+            display_height,
+            n_bins,
+            mask,
+            transform,
         };
         let mut spectra = HashMap::with_capacity(self.roi_state.rois.len());
 
@@ -1025,9 +1201,7 @@ impl RustpixApp {
                     }
                 }
             }
-            let Some(data) =
-                Self::compute_roi_spectrum(roi, hyperstack, width, height, n_bins, mask)
-            else {
+            let Some(data) = Self::compute_roi_spectrum(roi, ctx) else {
                 continue;
             };
             spectra.insert(roi.id, RoiSpectrumEntry { data, shape_hash });
@@ -1036,29 +1210,12 @@ impl RustpixApp {
         spectra
     }
 
-    fn compute_roi_spectrum(
-        roi: &Roi,
-        hyperstack: &Hyperstack3D,
-        width: usize,
-        height: usize,
-        n_bins: usize,
-        mask: Option<&PixelMaskData>,
-    ) -> Option<RoiSpectrumData> {
-        let mask = Self::active_pixel_mask(mask, width, height);
-        let ctx = RoiSpectrumContext {
-            hyperstack,
-            width,
-            height,
-            n_bins,
-            mask,
-        };
+    fn compute_roi_spectrum(roi: &Roi, ctx: RoiSpectrumContext<'_>) -> Option<RoiSpectrumData> {
         match &roi.shape {
             RoiShape::Rectangle { x1, y1, x2, y2 } => {
                 Some(Self::compute_rect_spectrum(*x1, *y1, *x2, *y2, ctx))
             }
-            RoiShape::Polygon { vertices } => {
-                Self::compute_polygon_spectrum(vertices, hyperstack, width, height, n_bins, mask)
-            }
+            RoiShape::Polygon { vertices } => Self::compute_polygon_spectrum(vertices, ctx),
         }
     }
 
@@ -1090,24 +1247,18 @@ impl RustpixApp {
     }
 
     fn collect_rect_indices(
-        width: usize,
+        ctx: RoiSpectrumContext<'_>,
         x_start: usize,
         x_end: usize,
         y_start: usize,
         y_end: usize,
-        mask: Option<&PixelMaskData>,
     ) -> Vec<usize> {
         let mut indices = Vec::new();
         for y in y_start..y_end {
-            let row = y * width;
             for x in x_start..x_end {
-                let idx = row + x;
-                if let Some(mask) = mask {
-                    if mask.dead_mask[idx] == 1 || mask.hot_mask[idx] == 1 {
-                        continue;
-                    }
+                if let Some(idx) = Self::display_to_data_index(ctx, x, y) {
+                    indices.push(idx);
                 }
-                indices.push(idx);
             }
         }
         indices
@@ -1120,8 +1271,8 @@ impl RustpixApp {
         y2: f64,
         ctx: RoiSpectrumContext<'_>,
     ) -> RoiSpectrumData {
-        let (x_start, x_end) = clamp_span(x1, x2, ctx.width);
-        let (y_start, y_end) = clamp_span(y1, y2, ctx.height);
+        let (x_start, x_end) = clamp_span(x1, x2, ctx.display_width);
+        let (y_start, y_end) = clamp_span(y1, y2, ctx.display_height);
         let area = (x2 - x1).abs() * (y2 - y1).abs();
 
         if x_start >= x_end || y_start >= y_end {
@@ -1132,20 +1283,9 @@ impl RustpixApp {
             };
         }
 
-        if let Some(mask) = ctx.mask {
-            let indices =
-                Self::collect_rect_indices(ctx.width, x_start, x_end, y_start, y_end, Some(mask));
-            let counts = Self::sum_counts_for_indices(ctx.hyperstack, ctx.n_bins, &indices);
-            let pixel_count = indices.len() as u64;
-            return RoiSpectrumData {
-                counts,
-                area,
-                pixel_count,
-            };
-        }
-
-        let counts = ctx.hyperstack.spectrum(x_start..x_end, y_start..y_end);
-        let pixel_count = (x_end - x_start) as u64 * (y_end - y_start) as u64;
+        let indices = Self::collect_rect_indices(ctx, x_start, x_end, y_start, y_end);
+        let counts = Self::sum_counts_for_indices(ctx.hyperstack, ctx.n_bins, &indices);
+        let pixel_count = indices.len() as u64;
         RoiSpectrumData {
             counts,
             area,
@@ -1155,11 +1295,7 @@ impl RustpixApp {
 
     fn compute_polygon_spectrum(
         vertices: &[(f64, f64)],
-        hyperstack: &Hyperstack3D,
-        width: usize,
-        height: usize,
-        n_bins: usize,
-        mask: Option<&PixelMaskData>,
+        ctx: RoiSpectrumContext<'_>,
     ) -> Option<RoiSpectrumData> {
         if vertices.len() < 3 {
             return None;
@@ -1172,31 +1308,44 @@ impl RustpixApp {
             min_y = min_y.min(*y);
             max_y = max_y.max(*y);
         }
-        let (x_start, x_end) = clamp_span(min_x, max_x, width);
-        let (y_start, y_end) = clamp_span(min_y, max_y, height);
+        let (x_start, x_end) = clamp_span(min_x, max_x, ctx.display_width);
+        let (y_start, y_end) = clamp_span(min_y, max_y, ctx.display_height);
         let mut roi_indices = Vec::new();
         for y in y_start..y_end {
             let py = usize_to_f64(y) + 0.5;
             for x in x_start..x_end {
                 let px = usize_to_f64(x) + 0.5;
                 if point_in_polygon_xy(px, py, vertices) {
-                    if let Some(mask) = mask {
-                        let idx = y * width + x;
-                        if mask.dead_mask[idx] == 1 || mask.hot_mask[idx] == 1 {
-                            continue;
-                        }
+                    if let Some(idx) = Self::display_to_data_index(ctx, x, y) {
+                        roi_indices.push(idx);
                     }
-                    roi_indices.push(y * width + x);
                 }
             }
         }
-        let counts = Self::sum_counts_for_indices(hyperstack, n_bins, &roi_indices);
+        let counts = Self::sum_counts_for_indices(ctx.hyperstack, ctx.n_bins, &roi_indices);
         let area = polygon_area(vertices).abs();
         Some(RoiSpectrumData {
             counts,
             area,
             pixel_count: roi_indices.len() as u64,
         })
+    }
+
+    fn display_to_data_index(
+        ctx: RoiSpectrumContext<'_>,
+        display_x: usize,
+        display_y: usize,
+    ) -> Option<usize> {
+        let (src_x, src_y) =
+            ctx.transform
+                .apply_inverse(display_x, display_y, ctx.data_width, ctx.data_height)?;
+        let idx = src_y * ctx.data_width + src_x;
+        if let Some(mask) = ctx.mask {
+            if mask.dead_mask[idx] == 1 || mask.hot_mask[idx] == 1 {
+                return None;
+            }
+        }
+        Some(idx)
     }
 
     /// Check if neutron data is available.

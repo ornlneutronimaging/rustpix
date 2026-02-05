@@ -164,23 +164,32 @@ impl RustpixApp {
     }
 
     fn status_banner_text(&self, colors: ThemeColors) -> (String, Color32, bool) {
+        let transform_label = self.ui_state.histogram_view.transform.status_label();
         if let Some(p) = &self.selected_file {
             let name = p.file_name().unwrap_or_default().to_string_lossy();
             if self.statistics.hit_count > 0 {
-                (
-                    format!(
-                        "{} • {} hits",
-                        name,
-                        format_number(self.statistics.hit_count)
-                    ),
-                    colors.text_muted,
-                    false,
-                )
+                let mut text = format!(
+                    "{} • {} hits",
+                    name,
+                    format_number(self.statistics.hit_count)
+                );
+                if let Some(label) = transform_label {
+                    text = format!("{text} • {label}");
+                }
+                (text, colors.text_muted, false)
             } else {
-                (format!("{name}"), colors.text_muted, false)
+                let mut text = format!("{name}");
+                if let Some(label) = transform_label {
+                    text = format!("{text} • {label}");
+                }
+                (text, colors.text_muted, false)
             }
         } else {
-            ("No file loaded".to_string(), colors.text_primary, true)
+            let mut text = "No file loaded".to_string();
+            if let Some(label) = transform_label {
+                text = format!("{text} • {label}");
+            }
+            (text, colors.text_primary, true)
         }
     }
 

@@ -536,7 +536,7 @@ impl RoiState {
         self.revision
     }
 
-    fn touch(&mut self) {
+    pub(crate) fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
 

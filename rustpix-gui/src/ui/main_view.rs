@@ -73,6 +73,8 @@ struct CentralPanelInputs {
     actions: CentralPanelActions,
     data_width: usize,
     data_height: usize,
+    data_width_raw: usize,
+    data_height_raw: usize,
     data_width_f64: f64,
     data_height_f64: f64,
     data_extent: f64,
@@ -280,6 +282,7 @@ impl RustpixApp {
             && self.roi_state.polygon_draft.is_some()
             && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
+        let (data_width_raw, data_height_raw) = self.current_data_dimensions();
         let (data_width, data_height) = self.current_dimensions();
         let data_width = data_width.max(1);
         let data_height = data_height.max(1);
@@ -307,6 +310,8 @@ impl RustpixApp {
             },
             data_width,
             data_height,
+            data_width_raw,
+            data_height_raw,
             data_width_f64,
             data_height_f64,
             data_extent,
@@ -323,6 +328,27 @@ impl RustpixApp {
         }
         if inputs.actions.commit_polygon {
             self.commit_polygon_draft(ctx);
+        }
+        self.apply_histogram_transform_shortcuts(ctx);
+    }
+
+    fn apply_histogram_transform_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let shift_down = ctx.input(|i| i.modifiers.shift);
+        if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+            if shift_down {
+                self.rotate_histogram_ccw();
+            } else {
+                self.rotate_histogram_cw();
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            self.flip_histogram_horizontal();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::V)) {
+            self.flip_histogram_vertical();
         }
     }
 
@@ -576,6 +602,9 @@ impl RustpixApp {
                 self.render_histogram_zoom_group(ui);
 
                 ui.add_space(8.0);
+                self.render_histogram_transform_controls(ui, colors);
+
+                ui.add_space(8.0);
                 let grid_btn = egui::Button::new(egui::RichText::new("▦ Grid").size(10.0).color(
                     if self.ui_state.histogram_view.show_grid {
                         Color32::WHITE
@@ -597,6 +626,73 @@ impl RustpixApp {
                 }
             });
         });
+    }
+
+    fn render_histogram_transform_controls(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
+        let transform = self.ui_state.histogram_view.transform;
+        let label = transform
+            .status_label()
+            .unwrap_or_else(|| "No transform".to_string());
+        let tooltip_suffix = format!("Current: {label}");
+
+        let rotate_left = Self::transform_button(ui, "↶", false, colors)
+            .on_hover_text(format!("Rotate left 90° (Shift+R)\n{tooltip_suffix}"))
+            .clicked();
+        if rotate_left {
+            self.rotate_histogram_ccw();
+        }
+
+        let rotate_right = Self::transform_button(ui, "↷", false, colors)
+            .on_hover_text(format!("Rotate right 90° (R)\n{tooltip_suffix}"))
+            .clicked();
+        if rotate_right {
+            self.rotate_histogram_cw();
+        }
+
+        let flip_v = Self::transform_button(ui, "⇅", transform.flip_v, colors)
+            .on_hover_text(format!("Flip vertical (V)\n{tooltip_suffix}"))
+            .clicked();
+        if flip_v {
+            self.flip_histogram_vertical();
+        }
+
+        let flip_h = Self::transform_button(ui, "⇆", transform.flip_h, colors)
+            .on_hover_text(format!("Flip horizontal (H)\n{tooltip_suffix}"))
+            .clicked();
+        if flip_h {
+            self.flip_histogram_horizontal();
+        }
+
+        if !transform.is_identity() {
+            let reset = Self::transform_button(ui, "Reset", false, colors)
+                .on_hover_text(format!("Reset orientation\n{tooltip_suffix}"))
+                .clicked();
+            if reset {
+                self.reset_histogram_transform();
+            }
+        }
+    }
+
+    fn transform_button(
+        ui: &mut egui::Ui,
+        label: &str,
+        active: bool,
+        colors: &ThemeColors,
+    ) -> egui::Response {
+        let text_color = if active {
+            Color32::WHITE
+        } else {
+            colors.text_muted
+        };
+        let btn = egui::Button::new(egui::RichText::new(label).size(10.0).color(text_color))
+            .fill(if active {
+                accent::BLUE
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(1.0, colors.border_light))
+            .rounding(Rounding::same(4.0));
+        ui.add(btn)
     }
 
     fn render_histogram_plot(
@@ -842,7 +938,24 @@ impl RustpixApp {
         if self.ui_state.view_mode == ViewMode::Hits && self.ui_state.pixel_health.show_hot_pixels {
             if let Some(mask) = &self.pixel_masks {
                 if !mask.hot_points.is_empty() {
-                    let hot_points = Points::new(PlotPoints::new(mask.hot_points.clone()))
+                    let transform = self.ui_state.histogram_view.transform;
+                    let hot_points = if transform.is_identity() {
+                        mask.hot_points.clone()
+                    } else {
+                        let (width, height) = self.current_data_dimensions();
+                        let width_f = usize_to_f64(width);
+                        let height_f = usize_to_f64(height);
+                        mask.hot_points
+                            .iter()
+                            .map(|[x, y]| {
+                                transform
+                                    .apply_f64(*x, *y, width_f, height_f)
+                                    .unwrap_or((*x, *y))
+                            })
+                            .map(|(x, y)| [x, y])
+                            .collect()
+                    };
+                    let hot_points = Points::new(PlotPoints::new(hot_points))
                         .shape(MarkerShape::Square)
                         .radius(2.0)
                         .color(accent::RED)
@@ -1077,10 +1190,17 @@ impl RustpixApp {
                     self.cursor_info = None;
                     return;
                 };
+                let transform = self.ui_state.histogram_view.transform;
+                let Some((src_x, src_y)) =
+                    transform.apply_inverse(xi, yi, inputs.data_width_raw, inputs.data_height_raw)
+                else {
+                    self.cursor_info = None;
+                    return;
+                };
                 let count = inputs
                     .counts_for_cursor
                     .as_ref()
-                    .map_or(0, |c| c[yi * inputs.data_width + xi]);
+                    .map_or(0, |c| c[src_y * inputs.data_width_raw + src_x]);
                 self.cursor_info = Some((xi, yi, count));
             } else {
                 self.cursor_info = None;

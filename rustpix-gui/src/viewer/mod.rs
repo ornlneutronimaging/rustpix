@@ -6,4 +6,4 @@ mod texture;
 
 pub use colormap::Colormap;
 pub use roi::{Roi, RoiCommitError, RoiHandle, RoiSelectionMode, RoiShape, RoiState};
-pub use texture::generate_histogram_image;
+pub use texture::generate_histogram_image_transformed;
