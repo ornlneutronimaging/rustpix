@@ -315,6 +315,78 @@ impl ViewTransform {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{Rotation, ViewTransform};
+    use std::collections::HashSet;
+
+    fn assert_close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {a} ≈ {b}");
+    }
+
+    #[test]
+    fn view_transform_apply_inverse_is_bijection() {
+        let width = 4usize;
+        let height = 3usize;
+        let rotations = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
+        for rotation in rotations {
+            for flip_h in [false, true] {
+                for flip_v in [false, true] {
+                    let transform = ViewTransform {
+                        rotation,
+                        flip_h,
+                        flip_v,
+                    };
+                    let (disp_w, disp_h) = transform.display_size(width, height);
+                    let mut seen = HashSet::with_capacity(width * height);
+                    for y in 0..disp_h {
+                        for x in 0..disp_w {
+                            let (sx, sy) = transform
+                                .apply_inverse(x, y, width, height)
+                                .expect("in-bounds coords must map");
+                            assert!(sx < width && sy < height);
+                            let idx = sy * width + sx;
+                            assert!(seen.insert(idx), "duplicate mapping for {idx}");
+                        }
+                    }
+                    assert_eq!(seen.len(), width * height);
+                    assert!(transform.apply_inverse(disp_w, 0, width, height).is_none());
+                    assert!(transform.apply_inverse(0, disp_h, width, height).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn view_transform_f64_round_trip() {
+        let width = 5.0;
+        let height = 3.0;
+        let points = [(0.0, 0.0), (0.5, 0.5), (1.25, 2.75), (4.2, 0.1), (5.0, 3.0)];
+        let rotations = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
+        for rotation in rotations {
+            for flip_h in [false, true] {
+                for flip_v in [false, true] {
+                    let transform = ViewTransform {
+                        rotation,
+                        flip_h,
+                        flip_v,
+                    };
+                    for (x, y) in points {
+                        let (dx, dy) = transform
+                            .apply_f64(x, y, width, height)
+                            .expect("valid dims");
+                        let (sx, sy) = transform
+                            .apply_inverse_f64(dx, dy, width, height)
+                            .expect("valid dims");
+                        assert_close(sx, x);
+                        assert_close(sy, y);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct UiSpectrumToggles {
     /// Whether to use log scale for X axis in spectrum.
