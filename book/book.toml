@@ -12,7 +12,7 @@ build-dir = "book"
 default-theme = "light"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/ornlneutronimaging/rustpix"
-edit-url-template = "https://github.com/ornlneutronimaging/rustpix/edit/main/book/{path}"
+edit-url-template = "https://github.com/ornlneutronimaging/rustpix/edit/main/book/src/{path}"
 site-url = "/rustpix/"
 no-section-label = false
 
