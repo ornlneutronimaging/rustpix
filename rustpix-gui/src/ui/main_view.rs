@@ -583,9 +583,10 @@ impl RustpixApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let reset_btn = egui::Button::new(
                     egui::RichText::new("↺ Reset View")
-                        .size(10.0)
+                        .size(11.0)
                         .color(colors.text_muted),
                 )
+                .min_size(egui::vec2(0.0, 28.0))
                 .fill(Color32::TRANSPARENT)
                 .stroke(Stroke::new(1.0, colors.border_light))
                 .rounding(Rounding::same(4.0));
@@ -599,19 +600,26 @@ impl RustpixApp {
                 }
 
                 ui.add_space(6.0);
+                Self::toolbar_divider(ui);
+                ui.add_space(8.0);
                 self.render_histogram_zoom_group(ui);
 
+                ui.add_space(8.0);
+                Self::toolbar_divider(ui);
                 ui.add_space(8.0);
                 self.render_histogram_transform_controls(ui, colors);
 
                 ui.add_space(8.0);
-                let grid_btn = egui::Button::new(egui::RichText::new("▦ Grid").size(10.0).color(
+                Self::toolbar_divider(ui);
+                ui.add_space(8.0);
+                let grid_btn = egui::Button::new(egui::RichText::new("▦ Grid").size(11.0).color(
                     if self.ui_state.histogram_view.show_grid {
                         Color32::WHITE
                     } else {
                         colors.text_muted
                     },
                 ))
+                .min_size(egui::vec2(0.0, 28.0))
                 .fill(if self.ui_state.histogram_view.show_grid {
                     accent::BLUE
                 } else {
@@ -684,7 +692,8 @@ impl RustpixApp {
         } else {
             colors.text_muted
         };
-        let btn = egui::Button::new(egui::RichText::new(label).size(10.0).color(text_color))
+        let btn = egui::Button::new(egui::RichText::new(label).size(16.0).color(text_color))
+            .min_size(egui::vec2(32.0, 28.0))
             .fill(if active {
                 accent::BLUE
             } else {
@@ -2802,7 +2811,7 @@ impl RustpixApp {
             colors.text_muted
         };
         let button = egui::Button::new("")
-            .min_size(egui::vec2(24.0, 22.0))
+            .min_size(egui::vec2(30.0, 28.0))
             .fill(if active {
                 accent::BLUE
             } else {
@@ -2812,7 +2821,7 @@ impl RustpixApp {
             .rounding(Rounding::same(4.0));
         let response = ui.add(button);
         let image = Self::zoom_icon_image(icon, tint);
-        image.paint_at(ui, response.rect.shrink(4.0));
+        image.paint_at(ui, response.rect.shrink(5.0));
         response.on_hover_text(tooltip)
     }
 
@@ -2824,13 +2833,13 @@ impl RustpixApp {
         };
         egui::Image::new(source)
             .tint(tint)
-            .fit_to_exact_size(egui::vec2(14.0, 14.0))
+            .fit_to_exact_size(egui::vec2(16.0, 16.0))
     }
 
     /// Render a toolbar divider.
     fn toolbar_divider(ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
-        let rect = ui.allocate_space(egui::vec2(1.0, 20.0));
+        let rect = ui.allocate_space(egui::vec2(1.0, 24.0));
         ui.painter().vline(
             rect.1.center().x,
             rect.1.y_range(),
