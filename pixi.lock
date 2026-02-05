@@ -212,6 +212,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/matplotlib-base-3.10.8-py313h683a580_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/matplotlib-inline-0.2.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/maturin-1.11.5-py310hb4e1661_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/mdbook-0.5.2-hb17b654_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mistune-3.2.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/munkres-1.1.4-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/nbclient-0.10.4-pyhd8ed1ab_0.conda
@@ -497,6 +498,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/matplotlib-base-3.10.8-py313h58042b9_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/matplotlib-inline-0.2.1-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/maturin-1.11.5-py310h1939404_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/mdbook-0.5.2-h8d80559_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mistune-3.2.0-pyhcf101f3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/munkres-1.1.4-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/nbclient-0.10.4-pyhd8ed1ab_0.conda
@@ -4842,6 +4844,31 @@ packages:
   - pkg:pypi/maturin?source=hash-mapping
   size: 6851352
   timestamp: 1767965954110
+- conda: https://conda.anaconda.org/conda-forge/linux-64/mdbook-0.5.2-hb17b654_0.conda
+  sha256: 2657d098213214b835a905e8fadb4e07420e74743462e3fa8951c5b7cc6e1947
+  md5: 15a8190221450654518f22ff57d0b2d0
+  depends:
+  - libgcc >=14
+  - __glibc >=2.17,<3.0.a0
+  constrains:
+  - __glibc >=2.17
+  license: MPL-2.0
+  license_family: MOZILLA
+  purls: []
+  size: 4050995
+  timestamp: 1765667562729
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/mdbook-0.5.2-h8d80559_0.conda
+  sha256: 0771ac3ae88b73f4b83de0c95e1ad5b7aa533ce2ddb74453f8f96748f80fa983
+  md5: c16f2fef9f593ffb8b6bacbf606c17ba
+  depends:
+  - __osx >=11.0
+  constrains:
+  - __osx >=11.0
+  license: MPL-2.0
+  license_family: MOZILLA
+  purls: []
+  size: 3765499
+  timestamp: 1765667576491
 - conda: https://conda.anaconda.org/conda-forge/noarch/mistune-3.2.0-pyhcf101f3_0.conda
   sha256: d3fb4beb5e0a52b6cc33852c558e077e1bfe44df1159eb98332d69a264b14bae
   md5: b11e360fc4de2b0035fc8aaa74f17fd6

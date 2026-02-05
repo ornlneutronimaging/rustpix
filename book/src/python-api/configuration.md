@@ -100,7 +100,7 @@ config = rustpix.ExtractionConfig(
 |-----------|------|---------|-------------|
 | `super_resolution_factor` | `float` | `8.0` | Sub-pixel resolution multiplier |
 | `weighted_by_tot` | `bool` | `True` | Weight centroid by ToT (charge) |
-| `min_tot_threshold` | `int` | `0` | Filter hits below this ToT |
+| `min_tot_threshold` | `int` | `10` | Filter hits below this ToT |
 
 ### Super Resolution
 

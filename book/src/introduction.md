@@ -12,7 +12,6 @@
 - **Multiple Clustering Algorithms**:
   - ABS (Adjacency-Based Search) - 8-connectivity clustering
   - DBSCAN - Density-based with spatial indexing
-  - Graph - Union-find connected components
   - Grid - Parallel grid-based clustering
 - **Streaming Architecture**: Process files larger than RAM
 - **Python Bindings**: Thin wrappers with NumPy integration

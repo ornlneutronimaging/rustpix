@@ -68,6 +68,7 @@ pytest = "*"
 jupyterlab = "*"
 ipykernel = "*"
 matplotlib = "*"
+mdbook = "*"
 
 [tool.pixi.environments]
 default = { features = [] }
