@@ -3779,7 +3779,7 @@ dependencies = [
 
 [[package]]
 name = "rustpix-algorithms"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "approx",
  "rayon",
@@ -3789,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "rustpix-cli"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "clap",
  "rayon",
@@ -3803,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "rustpix-core"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "approx",
  "serde",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "rustpix-gui"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "rustpix-io"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "hdf5-metno",
  "memmap2",
@@ -3853,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "rustpix-python"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "numpy",
  "pyo3",
@@ -3865,11 +3865,11 @@ dependencies = [
 
 [[package]]
 name = "rustpix-tools"
-version = "1.0.4"
+version = "1.0.5"
 
 [[package]]
 name = "rustpix-tpx"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "approx",
  "rayon",

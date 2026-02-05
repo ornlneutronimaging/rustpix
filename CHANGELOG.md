@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-02-05
+
+### Added
+
+- GUI: TIFF export format support for images
+- GUI: Histogram view transforms with ROI remapping
+
 ## [1.0.4] - 2026-02-04
 
 ### Fixed
