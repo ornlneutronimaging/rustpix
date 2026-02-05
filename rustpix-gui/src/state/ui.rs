@@ -131,6 +131,260 @@ pub struct UiHistogramView {
     pub show_grid: bool,
     /// Flag to trigger plot bounds reset (auto-fit to data).
     pub needs_plot_reset: bool,
+    /// Current histogram view transform.
+    pub transform: ViewTransform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Rotation {
+    #[default]
+    R0,
+    R90,
+    R180,
+    R270,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewTransform {
+    pub rotation: Rotation,
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+impl Default for ViewTransform {
+    fn default() -> Self {
+        Self {
+            rotation: Rotation::R0,
+            flip_h: false,
+            flip_v: false,
+        }
+    }
+}
+
+impl ViewTransform {
+    #[must_use]
+    pub fn is_identity(self) -> bool {
+        self.rotation == Rotation::R0 && !self.flip_h && !self.flip_v
+    }
+
+    pub fn rotate_cw(&mut self) {
+        self.rotation = match self.rotation {
+            Rotation::R0 => Rotation::R90,
+            Rotation::R90 => Rotation::R180,
+            Rotation::R180 => Rotation::R270,
+            Rotation::R270 => Rotation::R0,
+        };
+    }
+
+    pub fn rotate_ccw(&mut self) {
+        self.rotation = match self.rotation {
+            Rotation::R0 => Rotation::R270,
+            Rotation::R90 => Rotation::R0,
+            Rotation::R180 => Rotation::R90,
+            Rotation::R270 => Rotation::R180,
+        };
+    }
+
+    pub fn flip_horizontal(&mut self) {
+        self.flip_h = !self.flip_h;
+    }
+
+    pub fn flip_vertical(&mut self) {
+        self.flip_v = !self.flip_v;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    #[must_use]
+    pub fn display_size(self, width: usize, height: usize) -> (usize, usize) {
+        match self.rotation {
+            Rotation::R90 | Rotation::R270 => (height, width),
+            _ => (width, height),
+        }
+    }
+
+    #[must_use]
+    pub fn apply_inverse(
+        self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) -> Option<(usize, usize)> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let (disp_w, disp_h) = self.display_size(width, height);
+        if x >= disp_w || y >= disp_h {
+            return None;
+        }
+        let mut x = x;
+        let mut y = y;
+        if self.flip_h {
+            x = disp_w.saturating_sub(1).saturating_sub(x);
+        }
+        if self.flip_v {
+            y = disp_h.saturating_sub(1).saturating_sub(y);
+        }
+        let (src_x, src_y) = match self.rotation {
+            Rotation::R0 => (x, y),
+            Rotation::R90 => (y, height.saturating_sub(1).saturating_sub(x)),
+            Rotation::R180 => (
+                width.saturating_sub(1).saturating_sub(x),
+                height.saturating_sub(1).saturating_sub(y),
+            ),
+            Rotation::R270 => (width.saturating_sub(1).saturating_sub(y), x),
+        };
+        if src_x >= width || src_y >= height {
+            return None;
+        }
+        Some((src_x, src_y))
+    }
+
+    #[must_use]
+    pub fn apply_f64(self, x: f64, y: f64, width: f64, height: f64) -> Option<(f64, f64)> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let (mut out_x, mut out_y) = match self.rotation {
+            Rotation::R0 => (x, y),
+            Rotation::R90 => (height - y, x),
+            Rotation::R180 => (width - x, height - y),
+            Rotation::R270 => (y, width - x),
+        };
+        let (disp_w, disp_h) = match self.rotation {
+            Rotation::R90 | Rotation::R270 => (height, width),
+            _ => (width, height),
+        };
+        if self.flip_h {
+            out_x = disp_w - out_x;
+        }
+        if self.flip_v {
+            out_y = disp_h - out_y;
+        }
+        Some((out_x, out_y))
+    }
+
+    #[must_use]
+    pub fn apply_inverse_f64(self, x: f64, y: f64, width: f64, height: f64) -> Option<(f64, f64)> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let (disp_w, disp_h) = match self.rotation {
+            Rotation::R90 | Rotation::R270 => (height, width),
+            _ => (width, height),
+        };
+        let mut x = x;
+        let mut y = y;
+        if self.flip_h {
+            x = disp_w - x;
+        }
+        if self.flip_v {
+            y = disp_h - y;
+        }
+        let (src_x, src_y) = match self.rotation {
+            Rotation::R0 => (x, y),
+            Rotation::R90 => (y, height - x),
+            Rotation::R180 => (width - x, height - y),
+            Rotation::R270 => (width - y, x),
+        };
+        Some((src_x, src_y))
+    }
+
+    #[must_use]
+    pub fn status_label(self) -> Option<String> {
+        if self.is_identity() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        match self.rotation {
+            Rotation::R0 => {}
+            Rotation::R90 => parts.push("Rot 90° CW".to_string()),
+            Rotation::R180 => parts.push("Rot 180°".to_string()),
+            Rotation::R270 => parts.push("Rot 90° CCW".to_string()),
+        }
+        match (self.flip_h, self.flip_v) {
+            (true, true) => parts.push("Flip H+V".to_string()),
+            (true, false) => parts.push("Flip H".to_string()),
+            (false, true) => parts.push("Flip V".to_string()),
+            (false, false) => {}
+        }
+        Some(parts.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Rotation, ViewTransform};
+    use std::collections::HashSet;
+
+    fn assert_close(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {a} ≈ {b}");
+    }
+
+    #[test]
+    fn view_transform_apply_inverse_is_bijection() {
+        let width = 4usize;
+        let height = 3usize;
+        let rotations = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
+        for rotation in rotations {
+            for flip_h in [false, true] {
+                for flip_v in [false, true] {
+                    let transform = ViewTransform {
+                        rotation,
+                        flip_h,
+                        flip_v,
+                    };
+                    let (disp_w, disp_h) = transform.display_size(width, height);
+                    let mut seen = HashSet::with_capacity(width * height);
+                    for y in 0..disp_h {
+                        for x in 0..disp_w {
+                            let (sx, sy) = transform
+                                .apply_inverse(x, y, width, height)
+                                .expect("in-bounds coords must map");
+                            assert!(sx < width && sy < height);
+                            let idx = sy * width + sx;
+                            assert!(seen.insert(idx), "duplicate mapping for {idx}");
+                        }
+                    }
+                    assert_eq!(seen.len(), width * height);
+                    assert!(transform.apply_inverse(disp_w, 0, width, height).is_none());
+                    assert!(transform.apply_inverse(0, disp_h, width, height).is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn view_transform_f64_round_trip() {
+        let width = 5.0;
+        let height = 3.0;
+        let points = [(0.0, 0.0), (0.5, 0.5), (1.25, 2.75), (4.2, 0.1), (5.0, 3.0)];
+        let rotations = [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270];
+        for rotation in rotations {
+            for flip_h in [false, true] {
+                for flip_v in [false, true] {
+                    let transform = ViewTransform {
+                        rotation,
+                        flip_h,
+                        flip_v,
+                    };
+                    for (x, y) in points {
+                        let (dx, dy) = transform
+                            .apply_f64(x, y, width, height)
+                            .expect("valid dims");
+                        let (sx, sy) = transform
+                            .apply_inverse_f64(dx, dy, width, height)
+                            .expect("valid dims");
+                        assert_close(sx, x);
+                        assert_close(sy, y);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
