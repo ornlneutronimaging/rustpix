@@ -318,7 +318,7 @@ impl SnsBankEventWriter {
 /// Streaming writer for ORNL SNS `NXsnsevent` HDF5 files.
 ///
 /// Writes event data in bank-based format with pulse-indexed structure.
-/// Call [`write_hits`] or [`write_neutrons`] per pulse, then [`finalize`].
+/// Call [`Self::write_hits`] or [`Self::write_neutrons`] per pulse, then [`Self::finalize`].
 pub struct SnsEventSink {
     _file: File,
     entry: Group,
