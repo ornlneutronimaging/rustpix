@@ -607,14 +607,15 @@ fn run_process_hdf5(
                 sink.write_neutrons(&event_batch)?;
             }
         } else {
-            let stream = reader.stream_time_ordered()?;
-            for mut batch in stream {
-                total_hits = total_hits.saturating_add(batch.len());
+            let stream = reader.stream_time_ordered_events()?;
+            for event in stream {
+                total_hits = total_hits.saturating_add(event.hits.len());
+                let mut hits = event.hits;
                 let neutrons =
-                    cluster_and_extract_batch(&mut batch, algo, clustering, extraction, params)?;
+                    cluster_and_extract_batch(&mut hits, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
                 let event_batch = NeutronEventBatch {
-                    tdc_timestamp_25ns: 0,
+                    tdc_timestamp_25ns: event.tdc_timestamp_25ns,
                     neutrons,
                 };
                 sink.write_neutrons(&event_batch)?;
@@ -685,14 +686,15 @@ fn run_process_sns_hdf5(
                     .map_err(|e| CliError::Other(format!("Failed writing SNS neutrons: {e}")))?;
             }
         } else {
-            let stream = reader.stream_time_ordered()?;
-            for mut batch in stream {
-                total_hits = total_hits.saturating_add(batch.len());
+            let stream = reader.stream_time_ordered_events()?;
+            for event in stream {
+                total_hits = total_hits.saturating_add(event.hits.len());
+                let mut hits = event.hits;
                 let neutrons =
-                    cluster_and_extract_batch(&mut batch, algo, clustering, extraction, params)?;
+                    cluster_and_extract_batch(&mut hits, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
                 let event_batch = NeutronEventBatch {
-                    tdc_timestamp_25ns: 0,
+                    tdc_timestamp_25ns: event.tdc_timestamp_25ns,
                     neutrons,
                 };
                 sink.write_neutrons(0, &event_batch)
@@ -715,7 +717,7 @@ fn run_process_sns_hdf5(
 /// When `--tof-max` is provided, accumulation happens in a single streaming
 /// pass (constant memory). When auto-detecting, a lightweight first pass
 /// scans for the maximum TOF value and then a second pass accumulates.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_process_tiff(
     input: &[PathBuf],
     output: &Path,
@@ -805,6 +807,7 @@ fn run_process_tiff(
                     width,
                     height,
                     bin_width,
+                    extraction.super_resolution_factor,
                 );
             }
         } else {
@@ -815,7 +818,13 @@ fn run_process_tiff(
                     cluster_and_extract_batch(&mut batch, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
                 accumulate_neutrons_into_histogram(
-                    &mut data, &neutrons, tof_bins, width, height, bin_width,
+                    &mut data,
+                    &neutrons,
+                    tof_bins,
+                    width,
+                    height,
+                    bin_width,
+                    extraction.super_resolution_factor,
                 );
             }
         }
@@ -850,10 +859,12 @@ fn accumulate_neutrons_into_histogram(
     width: usize,
     height: usize,
     bin_width: f64,
+    super_resolution_factor: f64,
 ) {
+    let inv = 1.0 / super_resolution_factor;
     for i in 0..batch.len() {
-        let x = batch.x[i].round();
-        let y = batch.y[i].round();
+        let x = (batch.x[i] * inv).round();
+        let y = (batch.y[i] * inv).round();
         let tof = batch.tof[i];
 
         if x < 0.0 || y < 0.0 {

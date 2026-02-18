@@ -325,6 +325,7 @@ pub struct SnsEventSink {
     writers: Vec<(SnsBankConfig, SnsBankEventWriter)>,
     options: SnsWriteOptions,
     run_start_ns: Option<u64>,
+    last_pulse_ns: u64,
     total_counts: u64,
     total_pulses: u64,
     finalized: bool,
@@ -424,6 +425,7 @@ impl SnsEventSink {
             writers,
             options,
             run_start_ns: None,
+            last_pulse_ns: 0,
             total_counts: 0,
             total_pulses: 0,
             finalized: false,
@@ -525,6 +527,7 @@ impl SnsEventSink {
     ///
     /// # Errors
     /// Returns an error if the HDF5 write fails.
+    #[allow(clippy::cast_precision_loss)]
     pub fn finalize(&mut self) -> Result<()> {
         if self.finalized {
             return Ok(());
@@ -540,11 +543,23 @@ impl SnsEventSink {
         overwrite_u64_dataset(&self.entry, "total_counts", self.total_counts)?;
         overwrite_u64_dataset(&self.entry, "total_pulses", self.total_pulses)?;
 
+        // Compute and write end_time and duration from pulse timestamps.
+        if let Some(start_ns) = self.run_start_ns {
+            let duration_s = (self.last_pulse_ns.saturating_sub(start_ns)) as f64 / 1_000_000_000.0;
+            overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
+
+            // Build end_time ISO 8601 string from the last pulse absolute time.
+            let end_secs = self.last_pulse_ns / 1_000_000_000;
+            let end_time = epoch_secs_to_iso8601(end_secs);
+            overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+        }
+
         Ok(())
     }
 
     /// Compute pulse time in seconds relative to run start.
     fn pulse_time_seconds(&mut self, pulse_ns: u64) -> f64 {
+        self.last_pulse_ns = pulse_ns;
         if let Some(start) = self.run_start_ns {
             (pulse_ns.saturating_sub(start)) as f64 / 1_000_000_000.0
         } else {
@@ -633,6 +648,72 @@ fn overwrite_u64_dataset(group: &Group, name: &str, value: u64) -> Result<()> {
     let ds = group.dataset(name)?;
     ds.write_scalar(&value)?;
     Ok(())
+}
+
+fn overwrite_f64_dataset(group: &Group, name: &str, value: f64) -> Result<()> {
+    let ds = group.dataset(name)?;
+    ds.write_scalar(&value)?;
+    Ok(())
+}
+
+fn overwrite_str_dataset(group: &Group, name: &str, value: &str) -> Result<()> {
+    // HDF5 fixed-length string datasets cannot be resized; delete and recreate.
+    if group.dataset(name).is_ok() {
+        group.unlink(name)?;
+    }
+    write_str_dataset(group, name, value)?;
+    Ok(())
+}
+
+/// Convert Unix epoch seconds to an ISO 8601 UTC string.
+fn epoch_secs_to_iso8601(secs: u64) -> String {
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hours = rem / 3600;
+    let minutes = (rem % 3600) / 60;
+    let seconds = rem % 60;
+    let mut y = 1970i64;
+    let mut d = i64::try_from(days).unwrap_or(0);
+    loop {
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if d < year_days {
+            break;
+        }
+        d -= year_days;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days: [i64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0usize;
+    for (i, &md) in month_days.iter().enumerate() {
+        if d < md {
+            m = i;
+            break;
+        }
+        d -= md;
+    }
+    format!(
+        "{y:04}-{:02}-{:02}T{hours:02}:{minutes:02}:{seconds:02}Z",
+        m + 1,
+        d + 1,
+    )
 }
 
 // ---------------------------------------------------------------------------
