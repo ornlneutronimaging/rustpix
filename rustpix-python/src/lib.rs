@@ -13,6 +13,8 @@ use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
+use rustpix_io::hdf5::{Hdf5NeutronSink, NeutronEventBatch, NeutronWriteOptions};
+use rustpix_io::hdf5_sns::{SnsEventSink, SnsRunMetadata, SnsWriteOptions};
 use rustpix_io::{
     out_of_core_neutron_stream, OutOfCoreConfig, TimeOrderedHitStream, Tpx3FileReader,
 };
@@ -427,12 +429,18 @@ impl PyNeutronBatchStream {
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, output_path=None))]
 /// Read TPX3 hits as a single batch (always time-ordered).
+///
+/// The `output_path` parameter is reserved for future use (hit-level HDF5 export).
 fn read_tpx3_hits(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
     output_path: Option<&str>,
 ) -> PyResult<PyHitBatch> {
-    ensure_hdf5_disabled(output_path)?;
+    if output_path.is_some() {
+        return Err(PyNotImplementedError::new_err(
+            "HDF5 output for raw hits is not yet supported; use process_tpx3_neutrons with output_path instead",
+        ));
+    }
     let config = detector_config
         .as_ref()
         .map(|cfg| cfg.inner.clone())
@@ -484,7 +492,13 @@ fn process_tpx3_neutrons(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let processing = parse_processing_kwargs(kwargs)?;
-    ensure_hdf5_disabled(processing.output_path.as_deref())?;
+
+    // HDF5 output requires collect mode.
+    if processing.output_path.is_some() && !collect {
+        return Err(PyValueError::new_err(
+            "output_path (HDF5 export) requires collect=True",
+        ));
+    }
 
     let detector = detector_config
         .as_ref()
@@ -535,6 +549,11 @@ fn process_tpx3_neutrons(
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         };
 
+        // Write HDF5 if output_path was specified.
+        if let Some(ref output_path) = processing.output_path {
+            write_neutrons_hdf5(output_path, &neutrons, extraction.super_resolution_factor)?;
+        }
+
         let batch = PyNeutronBatch {
             batch: Some(neutrons),
             metadata: BatchMetadata {
@@ -582,7 +601,6 @@ fn cluster_hits(
 ) -> PyResult<PyNeutronBatch> {
     let selection = parse_algorithm_kwargs(kwargs)?;
     let output_path = parse_output_path(kwargs)?;
-    ensure_hdf5_disabled(output_path.as_deref())?;
 
     let clustering = clustering_config
         .as_ref()
@@ -603,6 +621,10 @@ fn cluster_hits(
 
     let neutrons = cluster_and_extract_batch(batch_ref, algo, &clustering, &extraction, &params)
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    if let Some(ref path) = output_path {
+        write_neutrons_hdf5(path, &neutrons, extraction.super_resolution_factor)?;
+    }
 
     Ok(PyNeutronBatch {
         batch: Some(neutrons),
@@ -638,7 +660,11 @@ fn stream_tpx3_neutrons(
     let selection = parse_algorithm_kwargs(kwargs)?;
     let output_path = parse_output_path(kwargs)?;
     let out_of_core = parse_out_of_core_kwargs(kwargs)?;
-    ensure_hdf5_disabled(output_path.as_deref())?;
+    if output_path.is_some() {
+        return Err(PyValueError::new_err(
+            "output_path is not supported in streaming mode; use process_tpx3_neutrons(collect=True, output_path=...) instead",
+        ));
+    }
 
     let detector = detector_config
         .as_ref()
@@ -732,13 +758,129 @@ fn rustpix(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-fn ensure_hdf5_disabled(output_path: Option<&str>) -> PyResult<()> {
-    if output_path.is_some() {
-        return Err(PyNotImplementedError::new_err(
-            "HDF5 output is not implemented yet",
-        ));
+/// Detect output format from file path extension.
+fn detect_hdf5_format(path: &str) -> &'static str {
+    if path.ends_with(".nxs.h5") {
+        "sns"
+    } else {
+        "nexus"
     }
+}
+
+/// Write a `NeutronBatch` to an HDF5 file (generic `NeXus` or SNS `NXsnsevent`).
+fn write_neutrons_hdf5(
+    output_path: &str,
+    neutrons: &NeutronBatch,
+    super_resolution_factor: f64,
+) -> PyResult<()> {
+    let path = std::path::Path::new(output_path);
+    let format = detect_hdf5_format(output_path);
+
+    let event_batch = NeutronEventBatch {
+        tdc_timestamp_25ns: 0,
+        neutrons: neutrons.clone(),
+    };
+
+    let now = iso8601_now();
+
+    if format == "sns" {
+        let run_meta = SnsRunMetadata {
+            run_number: 0,
+            experiment_identifier: String::new(),
+            start_time: now,
+            end_time: None,
+            duration: None,
+            proton_charge: None,
+            title: None,
+        };
+        let mut options = SnsWriteOptions::venus_defaults(run_meta);
+        options.super_resolution_factor = super_resolution_factor;
+        let mut sink = SnsEventSink::create(path, options)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create SNS HDF5: {e}")))?;
+        sink.write_neutrons(0, &event_batch)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed writing SNS neutrons: {e}")))?;
+        sink.finalize()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to finalize SNS HDF5: {e}")))?;
+    } else {
+        let options = NeutronWriteOptions {
+            x_size: 514,
+            y_size: 514,
+            super_resolution_factor,
+            chunk_events: 100_000,
+            compression: Some(1),
+            shuffle: true,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: Some("tof".to_string()),
+            include_xy: true,
+            include_tot: true,
+            include_chip_id: true,
+            include_n_hits: true,
+        };
+        let mut sink = Hdf5NeutronSink::create(path, options)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create HDF5: {e}")))?;
+        sink.write_neutrons(&event_batch)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed writing neutrons: {e}")))?;
+        drop(sink);
+    }
+
     Ok(())
+}
+
+/// Generate an ISO 8601 UTC timestamp for the current time.
+fn iso8601_now() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = dur.as_secs();
+    let days = total_secs / 86400;
+    let rem = total_secs % 86400;
+    let hours = rem / 3600;
+    let minutes = (rem % 3600) / 60;
+    let seconds = rem % 60;
+    // Days since Unix epoch → approximate date (correct for 1970–2099).
+    let mut y = 1970i64;
+    let mut d = i64::try_from(days).unwrap_or(0);
+    loop {
+        let year_days = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if d < year_days {
+            break;
+        }
+        d -= year_days;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days: [i64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0usize;
+    for (i, &md) in month_days.iter().enumerate() {
+        if d < md {
+            m = i;
+            break;
+        }
+        d -= md;
+    }
+    format!(
+        "{y:04}-{:02}-{:02}T{hours:02}:{minutes:02}:{seconds:02}Z",
+        m + 1,
+        d + 1,
+    )
 }
 
 struct AlgorithmSelection {

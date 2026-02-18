@@ -8,6 +8,8 @@
 mod error;
 #[cfg(feature = "hdf5")]
 pub mod hdf5;
+#[cfg(feature = "hdf5")]
+pub mod hdf5_sns;
 pub mod out_of_core;
 mod out_of_core_pipeline;
 mod reader;
@@ -19,6 +21,11 @@ pub use error::{Error, Result};
 pub use hdf5::{
     write_combined_hdf5, write_combined_hdf5_batches, Hdf5HistogramSink, Hdf5HitSink,
     Hdf5NeutronSink, HistogramAxisData, HistogramBin, PixelMaskWriteData, PixelMaskWriteOptions,
+};
+#[cfg(feature = "hdf5")]
+pub use hdf5_sns::{
+    write_hits_sns, write_neutrons_sns, DasLogEntry, SnsBankConfig, SnsEventSink,
+    SnsInstrumentConfig, SnsRunMetadata, SnsWriteOptions,
 };
 pub use out_of_core::{pulse_batches, OutOfCoreConfig, PulseBatchGroup, PulseBatcher, PulseSlice};
 pub use out_of_core_pipeline::{

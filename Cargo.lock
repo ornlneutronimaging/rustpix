@@ -3792,6 +3792,7 @@ name = "rustpix-cli"
 version = "1.0.5"
 dependencies = [
  "clap",
+ "hdf5-metno",
  "rayon",
  "rustpix-algorithms",
  "rustpix-core",
@@ -3799,6 +3800,7 @@ dependencies = [
  "rustpix-tpx",
  "serde_json",
  "thiserror 2.0.17",
+ "tiff",
 ]
 
 [[package]]
@@ -3855,6 +3857,7 @@ dependencies = [
 name = "rustpix-python"
 version = "1.0.5"
 dependencies = [
+ "hdf5-metno",
  "numpy",
  "pyo3",
  "rustpix-algorithms",

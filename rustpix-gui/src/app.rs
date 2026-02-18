@@ -28,8 +28,8 @@ use crate::pipeline::{
     load_file_worker, run_clustering_worker, AlgorithmType, ClusteringWorkerConfig,
 };
 use crate::state::{
-    ExportFormat, Hdf5ExportOptions, ProcessingState, Statistics, TiffBitDepth, TiffExportOptions,
-    TiffSpectraTiming, TiffStackBehavior, UiState, ViewMode, ZoomMode,
+    ExportFormat, Hdf5ExportOptions, ProcessingState, SnsEventSource, Statistics, TiffBitDepth,
+    TiffExportOptions, TiffSpectraTiming, TiffStackBehavior, UiState, ViewMode, ZoomMode,
 };
 use crate::util::{
     f64_to_usize_bounded, sanitize_export_base_name, u64_to_f64, usize_to_f32, usize_to_f64,
@@ -42,6 +42,7 @@ use rustpix_io::hdf5::{
     HitWriteOptions, NeutronEventBatch, NeutronWriteOptions, PixelMaskWriteData,
     PixelMaskWriteOptions,
 };
+use rustpix_io::hdf5_sns::{SnsEventSink, SnsRunMetadata, SnsWriteOptions};
 use rustpix_io::EventBatch;
 use rustpix_tpx::DetectorConfig;
 use tiff::encoder::colortype::{Gray16, Gray32};
@@ -938,11 +939,85 @@ impl RustpixApp {
         });
     }
 
+    pub(crate) fn start_export_sns_hdf5(&mut self, path: PathBuf) {
+        if self.ui_state.export.in_progress {
+            return;
+        }
+
+        let sns_opts = &self.ui_state.export.sns;
+        let run_number = sns_opts.run_number.trim().parse::<u32>().unwrap_or(0);
+        let proton_charge = sns_opts
+            .proton_charge
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|v| *v > 0.0);
+
+        let run_meta = SnsRunMetadata {
+            run_number,
+            experiment_identifier: sns_opts.experiment_identifier.trim().to_string(),
+            start_time: chrono_iso8601_now(),
+            end_time: None,
+            duration: None,
+            proton_charge,
+            title: if sns_opts.title.trim().is_empty() {
+                None
+            } else {
+                Some(sns_opts.title.trim().to_string())
+            },
+        };
+
+        let compression = if sns_opts.compression_level > 0 {
+            Some(sns_opts.compression_level)
+        } else {
+            None
+        };
+
+        let mut write_options = SnsWriteOptions::venus_defaults(run_meta);
+        write_options.chunk_events = sns_opts.chunk_events.max(1);
+        write_options.compression = compression;
+        write_options.shuffle = sns_opts.shuffle;
+        write_options.super_resolution_factor = self.neutron_super_resolution_factor;
+
+        let tx = self.tx.clone();
+        let request = ExportSnsHdf5Request {
+            path,
+            write_options,
+            event_source: sns_opts.event_source,
+            hit_batch: self.hit_batch.clone(),
+            hit_pulse_bounds: self.hit_pulse_bounds.clone(),
+            neutrons: Arc::clone(&self.neutrons),
+        };
+
+        self.ui_state.export.in_progress = true;
+        self.ui_state.export.progress = 0.0;
+        self.ui_state.export.status = "Preparing SNS export".to_string();
+
+        thread::spawn(move || {
+            let _ = tx.send(AppMessage::ExportProgress(
+                0.05,
+                "Preparing SNS export".to_string(),
+            ));
+
+            let export_path = request.path.clone();
+            let result = export_sns_hdf5_worker(&request, &tx);
+
+            match result {
+                Ok((size, warnings)) => {
+                    let _ = tx.send(AppMessage::ExportComplete(export_path, size, warnings));
+                }
+                Err(err) => {
+                    let _ = tx.send(AppMessage::ExportError(err.to_string()));
+                }
+            }
+        });
+    }
+
     pub(crate) fn start_export_tiff(&mut self, folder: PathBuf, format: ExportFormat) {
         if self.ui_state.export.in_progress {
             return;
         }
-        if format == ExportFormat::Hdf5 {
+        if matches!(format, ExportFormat::Hdf5 | ExportFormat::SnsHdf5) {
             return;
         }
 
@@ -1604,6 +1679,15 @@ struct ExportHdf5Request {
     super_resolution_factor: f64,
 }
 
+struct ExportSnsHdf5Request {
+    path: PathBuf,
+    write_options: SnsWriteOptions,
+    event_source: SnsEventSource,
+    hit_batch: Option<Arc<HitBatch>>,
+    hit_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
+    neutrons: Arc<NeutronBatch>,
+}
+
 struct ExportTiffRequest {
     folder: PathBuf,
     format: ExportFormat,
@@ -1667,6 +1751,156 @@ fn export_hdf5_worker(
 
 fn send_export_progress(tx: &Sender<AppMessage>, progress: f32, status: &str) {
     let _ = tx.send(AppMessage::ExportProgress(progress, status.to_string()));
+}
+
+fn export_sns_hdf5_worker(
+    request: &ExportSnsHdf5Request,
+    tx: &Sender<AppMessage>,
+) -> Result<(u64, Vec<String>)> {
+    let mut warnings = Vec::new();
+
+    send_export_progress(tx, 0.10, "Creating SNS HDF5 file");
+    let mut sink =
+        SnsEventSink::create(&request.path, request.write_options.clone()).map_err(|err| {
+            remove_partial_file(&request.path);
+            anyhow!("Failed to create SNS HDF5 file: {err}")
+        })?;
+
+    match request.event_source {
+        SnsEventSource::Hits => {
+            if let Some(batch) = request.hit_batch.as_deref().filter(|b| !b.is_empty()) {
+                send_export_progress(tx, 0.20, "Writing hit events");
+                if let Some(bounds) = request.hit_pulse_bounds.as_deref() {
+                    let total = bounds.len();
+                    for (i, bound) in bounds.iter().enumerate() {
+                        let end = bound.start.saturating_add(bound.len);
+                        if end > batch.len() {
+                            warnings.push("Pulse boundary exceeds cached hit range".to_string());
+                            break;
+                        }
+                        let hits = slice_hit_batch(batch, bound.start, bound.len);
+                        if hits.is_empty() {
+                            continue;
+                        }
+                        let event_batch = EventBatch {
+                            tdc_timestamp_25ns: bound.tdc_timestamp_25ns,
+                            hits,
+                        };
+                        sink.write_hits(0, &event_batch).map_err(|err| {
+                            remove_partial_file(&request.path);
+                            anyhow!("Failed writing hit pulse {i}: {err}")
+                        })?;
+                        if i % 500 == 0 {
+                            #[allow(clippy::cast_precision_loss)]
+                            let progress = 0.20 + 0.70 * (i as f32 / total as f32);
+                            send_export_progress(tx, progress, "Writing hit events");
+                        }
+                    }
+                } else {
+                    // No pulse boundaries — write all hits as a single pulse
+                    let event_batch = EventBatch {
+                        tdc_timestamp_25ns: 0,
+                        hits: (*batch).clone(),
+                    };
+                    sink.write_hits(0, &event_batch).map_err(|err| {
+                        remove_partial_file(&request.path);
+                        anyhow!("Failed writing hits: {err}")
+                    })?;
+                }
+            } else {
+                warnings.push("No hit data available for SNS export".to_string());
+            }
+        }
+        SnsEventSource::Neutrons => {
+            let neutrons = request.neutrons.as_ref();
+            if neutrons.is_empty() {
+                warnings.push("No neutron data available for SNS export".to_string());
+            } else {
+                send_export_progress(tx, 0.20, "Writing neutron events");
+                let neutron_batch = NeutronEventBatch {
+                    tdc_timestamp_25ns: 0,
+                    neutrons: neutrons.clone(),
+                };
+                sink.write_neutrons(0, &neutron_batch).map_err(|err| {
+                    remove_partial_file(&request.path);
+                    anyhow!("Failed writing neutrons: {err}")
+                })?;
+            }
+        }
+    }
+
+    send_export_progress(tx, 0.90, "Finalizing");
+    sink.finalize().map_err(|err| {
+        remove_partial_file(&request.path);
+        anyhow!("Failed to finalize SNS HDF5: {err}")
+    })?;
+
+    let size = std::fs::metadata(&request.path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    send_export_progress(tx, 1.0, "Export complete");
+    Ok((size, warnings))
+}
+
+/// Returns the current time as ISO 8601 string.
+fn chrono_iso8601_now() -> String {
+    let now = std::time::SystemTime::now();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // Format as ISO 8601 without chrono dependency: YYYY-MM-DDTHH:MM:SSZ
+    // Use a simple calculation for UTC time.
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since 1970-01-01 to Y-M-D (simplified leap year calculation).
+    let mut y = 1970i64;
+    // Safe: days since epoch fits in i64 for any foreseeable date.
+    let mut remaining = i64::try_from(days).unwrap_or(i64::MAX);
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0usize;
+    for &md in &month_days {
+        if remaining < md {
+            break;
+        }
+        remaining -= md;
+        m += 1;
+    }
+    let d = remaining + 1;
+    format!(
+        "{y:04}-{:02}-{d:02}T{hours:02}:{minutes:02}:{seconds:02}Z",
+        m + 1
+    )
 }
 
 fn hyperstack_dimensions_u32(hyperstack: &Hyperstack3D) -> Result<(u32, u32)> {
@@ -1759,7 +1993,7 @@ fn export_tiff_worker(
                     &mut clamped_any,
                 )?;
             }
-            ExportFormat::Hdf5 => {
+            ExportFormat::Hdf5 | ExportFormat::SnsHdf5 => {
                 return Err(anyhow!("Invalid export format for TIFF worker"));
             }
         }

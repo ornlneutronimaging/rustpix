@@ -7,8 +7,8 @@ use super::theme::{accent, form_label, primary_button, ThemeColors};
 use crate::app::{DetectorProfile, DetectorProfileKind, RustpixApp};
 use crate::pipeline::AlgorithmType;
 use crate::state::{
-    ExportFormat, Hdf5ExportOptions, TiffBitDepth, TiffExportOptions, TiffSpectraTiming,
-    TiffStackBehavior, ViewMode,
+    ExportFormat, Hdf5ExportOptions, SnsEventSource, SnsExportOptions, TiffBitDepth,
+    TiffExportOptions, TiffSpectraTiming, TiffStackBehavior, ViewMode,
 };
 use crate::util::{format_bytes, format_number, sanitize_export_base_name};
 use crate::viewer::Colormap;
@@ -1928,6 +1928,7 @@ x,y are local chip coordinates (pixels).",
         self.ui_state.panel_popups.show_pixel_health_help = open;
     }
 
+    #[allow(clippy::too_many_lines)]
     fn render_export_dialog(&mut self, ctx: &egui::Context) {
         let mut open = self.ui_state.export.show_dialog;
         let mut should_close = false;
@@ -1975,6 +1976,24 @@ x,y are local chip coordinates (pixels).",
                             export_in_progress,
                         )
                     }
+                    ExportFormat::SnsHdf5 => {
+                        let options = &mut self.ui_state.export.sns;
+                        Self::render_sns_export_options(
+                            ui,
+                            &colors,
+                            options,
+                            availability,
+                            hit_count,
+                            neutron_count,
+                        );
+                        ui.add_space(10.0);
+                        Self::render_sns_export_save_button(
+                            ui,
+                            options,
+                            availability,
+                            export_in_progress,
+                        )
+                    }
                     ExportFormat::TiffFolder | ExportFormat::TiffStack => {
                         self.populate_default_tiff_base_name();
                         let options = &mut self.ui_state.export.tiff;
@@ -2005,6 +2024,19 @@ x,y are local chip coordinates (pixels).",
                                 FileDialog::new().set_file_name("rustpix.h5").save_file()
                             {
                                 self.start_export_hdf5(path);
+                                should_close = true;
+                            }
+                        }
+                        ExportFormat::SnsHdf5 => {
+                            let default_name = if self.ui_state.export.sns.run_number.is_empty() {
+                                "rustpix_sns.nxs.h5".to_string()
+                            } else {
+                                format!("VENUS_{}.nxs.h5", self.ui_state.export.sns.run_number)
+                            };
+                            if let Some(path) =
+                                FileDialog::new().set_file_name(&default_name).save_file()
+                            {
+                                self.start_export_sns_hdf5(path);
                                 should_close = true;
                             }
                         }
@@ -2045,6 +2077,7 @@ x,y are local chip coordinates (pixels).",
             .show_ui(ui, |ui| {
                 for option in [
                     ExportFormat::Hdf5,
+                    ExportFormat::SnsHdf5,
                     ExportFormat::TiffFolder,
                     ExportFormat::TiffStack,
                 ] {
@@ -2219,7 +2252,7 @@ x,y are local chip coordinates (pixels).",
         let label = match format {
             ExportFormat::TiffFolder => "Export TIFF Folder...",
             ExportFormat::TiffStack => "Export TIFF Stack...",
-            ExportFormat::Hdf5 => "Save HDF5...",
+            ExportFormat::Hdf5 | ExportFormat::SnsHdf5 => "Save HDF5...",
         };
         ui.add_enabled(can_export, egui::Button::new(label))
             .clicked()
@@ -2432,11 +2465,114 @@ x,y are local chip coordinates (pixels).",
         let can_export = any_selected && deflate_ok && !export_in_progress;
 
         let label = match format {
-            ExportFormat::Hdf5 => "Save HDF5...",
+            ExportFormat::Hdf5 | ExportFormat::SnsHdf5 => "Save HDF5...",
             ExportFormat::TiffFolder => "Export TIFF Folder...",
             ExportFormat::TiffStack => "Export TIFF Stack...",
         };
         ui.add_enabled(can_export, egui::Button::new(label))
+            .clicked()
+    }
+
+    fn render_sns_export_options(
+        ui: &mut egui::Ui,
+        colors: &ThemeColors,
+        options: &mut SnsExportOptions,
+        availability: ExportAvailability,
+        hit_count: usize,
+        neutron_count: usize,
+    ) {
+        ui.label(
+            egui::RichText::new("SNS NXsnsevent export")
+                .size(11.0)
+                .color(colors.text_primary),
+        );
+        ui.add_space(6.0);
+
+        // Event source selection (mutually exclusive — one event stream per bank)
+        ui.label(egui::RichText::new("Event source").strong());
+        let hits_label = if availability.hits.is_available() {
+            format!("Hits ({hit_count} events)")
+        } else {
+            "Hits (not available)".to_string()
+        };
+        ui.add_enabled(
+            availability.hits.is_available(),
+            egui::RadioButton::new(options.event_source == SnsEventSource::Hits, hits_label),
+        )
+        .clicked()
+        .then(|| options.event_source = SnsEventSource::Hits);
+
+        let neutrons_label = if availability.neutrons.is_available() {
+            format!("Neutrons ({neutron_count} events)")
+        } else {
+            "Neutrons (not available)".to_string()
+        };
+        ui.add_enabled(
+            availability.neutrons.is_available(),
+            egui::RadioButton::new(
+                options.event_source == SnsEventSource::Neutrons,
+                neutrons_label,
+            ),
+        )
+        .clicked()
+        .then(|| options.event_source = SnsEventSource::Neutrons);
+
+        ui.add_space(8.0);
+
+        // Run metadata
+        ui.label(egui::RichText::new("Run metadata").strong());
+        ui.horizontal(|ui| {
+            ui.label("Run number:");
+            ui.text_edit_singleline(&mut options.run_number);
+        });
+        ui.horizontal(|ui| {
+            ui.label("IPTS:");
+            ui.text_edit_singleline(&mut options.experiment_identifier);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Title:");
+            ui.text_edit_singleline(&mut options.title);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Proton charge (pC):");
+            ui.text_edit_singleline(&mut options.proton_charge);
+        });
+
+        ui.add_space(8.0);
+
+        // Compression
+        ui.label(egui::RichText::new("Compression").strong());
+        ui.horizontal(|ui| {
+            ui.label("Level (0-9):");
+            let mut level = i32::from(options.compression_level);
+            if ui
+                .add(egui::DragValue::new(&mut level).range(0..=9))
+                .changed()
+            {
+                options.compression_level = u8::try_from(level.clamp(0, 9)).unwrap_or(1);
+            }
+        });
+        ui.checkbox(&mut options.shuffle, "Shuffle filter");
+
+        if !availability.deflate.is_available() {
+            Self::render_export_deflate_warning(ui);
+        }
+    }
+
+    fn render_sns_export_save_button(
+        ui: &mut egui::Ui,
+        options: &SnsExportOptions,
+        availability: ExportAvailability,
+        export_in_progress: bool,
+    ) -> bool {
+        let source_available = match options.event_source {
+            SnsEventSource::Hits => availability.hits.is_available(),
+            SnsEventSource::Neutrons => availability.neutrons.is_available(),
+        };
+        let deflate_ok = options.compression_level == 0 || availability.deflate.is_available();
+        let can_export = source_available && deflate_ok && !export_in_progress;
+
+        ui.add_enabled(can_export, egui::Button::new("Save SNS HDF5..."))
             .clicked()
     }
 

@@ -336,7 +336,7 @@ pub struct NeutronEventBatch {
     pub neutrons: NeutronBatch,
 }
 
-fn detector_size(config: &DetectorConfig) -> (u32, u32) {
+pub(crate) fn detector_size(config: &DetectorConfig) -> (u32, u32) {
     if config.chip_transforms.is_empty() {
         return (u32::from(config.chip_size_x), u32::from(config.chip_size_y));
     }
@@ -2078,7 +2078,7 @@ fn derive_energy_axis_ev(tof_ns: &[f64], flight_path_m: f64, tof_offset_ns: f64)
         .collect()
 }
 
-fn create_extendable_dataset<T: H5Type>(
+pub(crate) fn create_extendable_dataset<T: H5Type>(
     group: &Group,
     name: &str,
     chunk_events: usize,
@@ -2101,7 +2101,7 @@ fn create_extendable_dataset<T: H5Type>(
     Ok(builder.create(name)?)
 }
 
-fn append_slice<T: H5Type>(dataset: &Dataset, offset: usize, data: &[T]) -> Result<()> {
+pub(crate) fn append_slice<T: H5Type>(dataset: &Dataset, offset: usize, data: &[T]) -> Result<()> {
     if data.is_empty() {
         return Ok(());
     }
@@ -2125,7 +2125,7 @@ fn axis_mode_for_len(dim: usize, axis_len: usize) -> Result<&'static str> {
     }
 }
 
-fn set_dataset_units(dataset: &Dataset, units: &str) -> Result<()> {
+pub(crate) fn set_dataset_units(dataset: &Dataset, units: &str) -> Result<()> {
     let value = to_var_len_unicode(units)?;
     dataset
         .new_attr::<VarLenUnicode>()
@@ -2143,7 +2143,7 @@ fn set_axis_mode(dataset: &Dataset, mode: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_attr_str_file(file: &File, name: &str, value: &str) -> Result<()> {
+pub(crate) fn set_attr_str_file(file: &File, name: &str, value: &str) -> Result<()> {
     let value = to_var_len_unicode(value)?;
     file.new_attr::<VarLenUnicode>()
         .create(name)?
@@ -2151,7 +2151,7 @@ fn set_attr_str_file(file: &File, name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_attr_str_group(group: &Group, name: &str, value: &str) -> Result<()> {
+pub(crate) fn set_attr_str_group(group: &Group, name: &str, value: &str) -> Result<()> {
     let value = to_var_len_unicode(value)?;
     group
         .new_attr::<VarLenUnicode>()
@@ -2235,7 +2235,7 @@ fn read_attr_opt_string(group: &Group, name: &str) -> Result<Option<String>> {
     }
 }
 
-fn to_var_len_unicode(value: &str) -> Result<VarLenUnicode> {
+pub(crate) fn to_var_len_unicode(value: &str) -> Result<VarLenUnicode> {
     VarLenUnicode::from_str(value)
         .map_err(|e| Error::InvalidFormat(format!("invalid utf-8 attribute: {e}")))
 }
