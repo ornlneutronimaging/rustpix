@@ -446,15 +446,17 @@ impl SnsEventSink {
             )));
         }
 
+        let n = batch.hits.x.len();
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
         let pulse_time_s = self.pulse_time_seconds(pulse_ns);
-        let n = batch.hits.x.len();
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
         writer.append_hits(bank, batch, pulse_time_s)?;
 
-        self.total_counts += n as u64;
-        self.total_pulses += 1;
+        if n > 0 {
+            self.total_counts += n as u64;
+            self.total_pulses += 1;
+        }
         Ok(())
     }
 
@@ -472,9 +474,9 @@ impl SnsEventSink {
             )));
         }
 
+        let n = batch.neutrons.x.len();
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
         let pulse_time_s = self.pulse_time_seconds(pulse_ns);
-        let n = batch.neutrons.x.len();
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
         writer.append_neutrons(
@@ -484,8 +486,10 @@ impl SnsEventSink {
             self.options.super_resolution_factor,
         )?;
 
-        self.total_counts += n as u64;
-        self.total_pulses += 1;
+        if n > 0 {
+            self.total_counts += n as u64;
+            self.total_pulses += 1;
+        }
         Ok(())
     }
 
@@ -544,14 +548,19 @@ impl SnsEventSink {
         overwrite_u64_dataset(&self.entry, "total_pulses", self.total_pulses)?;
 
         // Compute and write end_time and duration from pulse timestamps.
-        if let Some(start_ns) = self.run_start_ns {
-            let duration_s = (self.last_pulse_ns.saturating_sub(start_ns)) as f64 / 1_000_000_000.0;
+        // `run_start_ns` and `last_pulse_ns` are *relative* detector tick counts,
+        // not Unix-epoch nanoseconds — the delta gives the measurement duration.
+        if let Some(first_pulse_ns) = self.run_start_ns {
+            let duration_s =
+                (self.last_pulse_ns.saturating_sub(first_pulse_ns)) as f64 / 1_000_000_000.0;
             overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
 
-            // Build end_time ISO 8601 string from the last pulse absolute time.
-            let end_secs = self.last_pulse_ns / 1_000_000_000;
-            let end_time = epoch_secs_to_iso8601(end_secs);
-            overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+            // Derive end_time by adding duration to the human-supplied start_time.
+            if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
+                let end_epoch = start_epoch + duration_s.round() as u64;
+                let end_time = epoch_secs_to_iso8601(end_epoch);
+                overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+            }
         }
 
         Ok(())
@@ -714,6 +723,69 @@ fn epoch_secs_to_iso8601(secs: u64) -> String {
         m + 1,
         d + 1,
     )
+}
+
+/// Parse a subset of ISO 8601 strings into Unix epoch seconds (UTC).
+///
+/// Accepted formats: `YYYY-MM-DDThh:mm:ssZ`, `YYYY-MM-DDThh:mm:ss±hh:mm`.
+/// Returns `None` for unparseable input.
+fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
+    // Minimum length: "2025-01-01T00:00:00Z" = 20 chars
+    if s.len() < 20 {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    let min: i64 = s.get(14..16)?.parse().ok()?;
+    let sec: i64 = s.get(17..19)?.parse().ok()?;
+
+    // Timezone offset (after position 19): 'Z' or ±hh:mm
+    let tz_offset_s: i64 = {
+        let tz = s.get(19..)?;
+        if tz == "Z" || tz.is_empty() {
+            0
+        } else {
+            let sign: i64 = if tz.starts_with('+') { 1 } else { -1 };
+            let tz = &tz[1..];
+            let oh: i64 = tz.get(0..2).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let om: i64 = tz.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
+            sign * (oh * 3600 + om * 60)
+        }
+    };
+
+    // Days from epoch to start of `year`
+    let mut days: i64 = 0;
+    for y in 1970..year {
+        days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days: [u32; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for &md in &month_days[..((month as usize).saturating_sub(1))] {
+        days += i64::from(md);
+    }
+    days += i64::from(day.saturating_sub(1));
+
+    let utc_secs = days * 86400 + hour * 3600 + min * 60 + sec - tz_offset_s;
+    u64::try_from(utc_secs).ok()
 }
 
 // ---------------------------------------------------------------------------
