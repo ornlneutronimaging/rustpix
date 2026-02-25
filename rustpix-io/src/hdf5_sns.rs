@@ -229,13 +229,21 @@ impl SnsBankEventWriter {
         )?;
         self.pulse_count += 1;
 
-        // Pixel IDs
+        // Pixel IDs — clamp to bank bounds to avoid ID wrap-around when
+        // the internal detector grid (e.g. 514×514) exceeds the bank grid
+        // (e.g. 512×512).
+        let col_max = bank.width.saturating_sub(1);
+        let row_max = bank.height.saturating_sub(1);
         let pixel_ids: Vec<u32> = batch
             .hits
             .x
             .iter()
             .zip(batch.hits.y.iter())
-            .map(|(&x, &y)| bank.pixel_id_offset + u32::from(y) * bank.width + u32::from(x))
+            .map(|(&x, &y)| {
+                let px = u32::from(x).min(col_max);
+                let py = u32::from(y).min(row_max);
+                bank.pixel_id_offset + py * bank.width + px
+            })
             .collect();
         append_slice(&self.event_id, self.event_count as usize, &pixel_ids)?;
 
@@ -277,16 +285,20 @@ impl SnsBankEventWriter {
         )?;
         self.pulse_count += 1;
 
-        // Pixel IDs — convert super-resolution coords to pixel coords
+        // Pixel IDs — convert super-resolution coords to pixel coords,
+        // clamping to bank bounds to avoid ID wrap-around when the internal
+        // detector grid (e.g. 514×514) exceeds the bank grid (e.g. 512×512).
         let inv = 1.0 / super_resolution_factor;
+        let col_max = bank.width.saturating_sub(1);
+        let row_max = bank.height.saturating_sub(1);
         let pixel_ids: Vec<u32> = batch
             .neutrons
             .x
             .iter()
             .zip(batch.neutrons.y.iter())
             .map(|(&x, &y)| {
-                let px = (x * inv).round().max(0.0) as u32;
-                let py = (y * inv).round().max(0.0) as u32;
+                let px = ((x * inv).round().max(0.0) as u32).min(col_max);
+                let py = ((y * inv).round().max(0.0) as u32).min(row_max);
                 bank.pixel_id_offset + py * bank.width + px
             })
             .collect();
@@ -1192,6 +1204,57 @@ mod tests {
         // event_index should be u64
         let idx = bank.dataset("event_index").unwrap();
         assert!(idx.read_raw::<u64>().is_ok());
+    }
+
+    // --- Coordinate clamping ---
+
+    #[test]
+    fn test_hit_pixel_id_clamped_to_bank_bounds() {
+        // Hit at (513, 513) should be clamped to (511, 511) for a 512×512 bank.
+        // Expected: offset + 511*512 + 511 = 1_262_143
+        let opts = make_test_options();
+        let batch = make_hit_batch(1000, &[513], &[513], &[100]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(ids, vec![1_000_000 + 511 * 512 + 511]);
+    }
+
+    #[test]
+    fn test_neutron_pixel_id_clamped_to_bank_bounds() {
+        // Neutron at super-res (4104.0, 4104.0) with factor 8.0 -> pixel (513, 513)
+        // Should be clamped to (511, 511) for a 512×512 bank.
+        let mut opts = make_test_options();
+        opts.super_resolution_factor = 8.0;
+        let batch = make_neutron_batch(1000, &[4104.0], &[4104.0], &[100]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_neutrons(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(ids, vec![1_000_000 + 511 * 512 + 511]);
     }
 
     // --- Bank index bounds ---

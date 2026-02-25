@@ -75,6 +75,41 @@ enum BitDepth {
     Bit32,
 }
 
+/// Output format override (auto-detected from file extension when omitted).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Format {
+    /// Comma-separated values
+    Csv,
+    /// Compact binary
+    Binary,
+    /// Generic `NeXus` HDF5
+    Hdf5,
+    /// ORNL SNS `NXsnsevent` HDF5
+    #[value(name = "sns-hdf5")]
+    SnsHdf5,
+    /// TIFF image stack
+    Tiff,
+}
+
+impl From<Format> for OutputFormat {
+    fn from(f: Format) -> Self {
+        match f {
+            Format::Csv => OutputFormat::Csv,
+            Format::Binary => OutputFormat::Binary,
+            Format::Hdf5 => OutputFormat::Hdf5,
+            Format::SnsHdf5 => OutputFormat::SnsHdf5,
+            Format::Tiff => OutputFormat::Tiff,
+        }
+    }
+}
+
+/// Instrument preset for SNS HDF5 export.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum Instrument {
+    /// VENUS (BL10) imaging beamline
+    Venus,
+}
+
 fn detect_output_format(path: &Path) -> OutputFormat {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     // Check for .nxs.h5 (SNS convention) before .h5
@@ -120,6 +155,10 @@ enum Commands {
         /// Output file path
         #[arg(short, long)]
         output: PathBuf,
+
+        /// Output format (auto-detected from file extension if omitted)
+        #[arg(short = 'f', long, value_enum)]
+        format: Option<Format>,
 
         /// Clustering algorithm to use
         #[arg(short, long, value_enum, default_value = "abs")]
@@ -168,6 +207,10 @@ enum Commands {
         /// Experiment identifier for SNS HDF5 (e.g., "IPTS-35004")
         #[arg(long)]
         ipts: Option<String>,
+
+        /// Instrument preset for SNS HDF5 export
+        #[arg(long, value_enum, default_value = "venus")]
+        instrument: Instrument,
 
         /// Number of TOF bins for TIFF histogram output
         #[arg(long, default_value = "200")]
@@ -259,6 +302,7 @@ fn main() -> Result<()> {
         Commands::Process {
             input,
             output,
+            format,
             algorithm,
             radius,
             temporal_window_ns,
@@ -271,6 +315,7 @@ fn main() -> Result<()> {
             async_io,
             run_number,
             ipts,
+            instrument,
             tof_bins,
             tof_max,
             bit_depth,
@@ -278,6 +323,7 @@ fn main() -> Result<()> {
         } => run_process(
             &input,
             &output,
+            format,
             algorithm,
             radius,
             temporal_window_ns,
@@ -290,6 +336,7 @@ fn main() -> Result<()> {
             async_io,
             run_number,
             ipts.as_deref(),
+            instrument,
             tof_bins,
             tof_max,
             bit_depth,
@@ -334,6 +381,7 @@ fn main() -> Result<()> {
 fn run_process(
     input: &[PathBuf],
     output: &PathBuf,
+    format_override: Option<Format>,
     algorithm: Algorithm,
     radius: f64,
     temporal_window_ns: f64,
@@ -346,6 +394,7 @@ fn run_process(
     async_io: bool,
     run_number: Option<u32>,
     ipts: Option<&str>,
+    instrument: Instrument,
     tof_bins: usize,
     tof_max: Option<u32>,
     bit_depth: BitDepth,
@@ -381,7 +430,7 @@ fn run_process(
     };
     let extraction = ExtractionConfig::default();
     let params = AlgorithmParams::default();
-    let format = detect_output_format(output);
+    let format = format_override.map_or_else(|| detect_output_format(output), OutputFormat::from);
 
     if verbose {
         eprintln!("Writing output to: {}", output.display());
@@ -432,6 +481,7 @@ fn run_process(
             &ooc_config,
             run_number,
             ipts,
+            instrument,
             verbose,
         )?,
         OutputFormat::Tiff => run_process_tiff(
@@ -644,6 +694,7 @@ fn run_process_sns_hdf5(
     ooc_config: &OutOfCoreConfig,
     run_number: Option<u32>,
     ipts: Option<&str>,
+    instrument: Instrument,
     verbose: bool,
 ) -> Result<(usize, usize)> {
     let run_meta = SnsRunMetadata {
@@ -656,7 +707,9 @@ fn run_process_sns_hdf5(
         title: None,
     };
 
-    let mut write_options = SnsWriteOptions::venus_defaults(run_meta);
+    let mut write_options = match instrument {
+        Instrument::Venus => SnsWriteOptions::venus_defaults(run_meta),
+    };
     write_options.super_resolution_factor = extraction.super_resolution_factor;
     let mut sink = SnsEventSink::create(output, write_options)
         .map_err(|e| CliError::Other(format!("Failed to create SNS HDF5: {e}")))?;

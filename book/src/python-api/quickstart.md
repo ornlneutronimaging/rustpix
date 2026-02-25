@@ -159,6 +159,34 @@ neutrons = rustpix.process_tpx3_neutrons(
 )
 ```
 
+## HDF5 Export
+
+Write neutron events directly to HDF5 by passing an `output_path`:
+
+```python
+import rustpix
+
+clustering = rustpix.ClusteringConfig.venus_defaults()
+
+# Generic NeXus HDF5 (scipp-compatible)
+rustpix.process_tpx3_neutrons(
+    "venus_data.tpx3",
+    clustering_config=clustering,
+    output_path="neutrons.h5"
+)
+
+# ORNL SNS NXsnsevent HDF5
+rustpix.process_tpx3_neutrons(
+    "venus_data.tpx3",
+    clustering_config=clustering,
+    output_path="VENUS_12345.nxs.h5"
+)
+```
+
+The format is auto-detected from the file extension:
+- `.h5`, `.hdf5`, `.nxs` → Generic NeXus HDF5
+- `.nxs.h5` → ORNL SNS NXsnsevent HDF5
+
 ## Out-of-Core Processing
 
 For files larger than RAM:

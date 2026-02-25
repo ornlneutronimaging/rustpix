@@ -551,7 +551,12 @@ fn process_tpx3_neutrons(
 
         // Write HDF5 if output_path was specified.
         if let Some(ref output_path) = processing.output_path {
-            write_neutrons_hdf5(output_path, &neutrons, extraction.super_resolution_factor)?;
+            write_neutrons_hdf5(
+                output_path,
+                &neutrons,
+                extraction.super_resolution_factor,
+                detector.detector_dimensions(),
+            )?;
         }
 
         let batch = PyNeutronBatch {
@@ -623,7 +628,12 @@ fn cluster_hits(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     if let Some(ref path) = output_path {
-        write_neutrons_hdf5(path, &neutrons, extraction.super_resolution_factor)?;
+        write_neutrons_hdf5(
+            path,
+            &neutrons,
+            extraction.super_resolution_factor,
+            batch.metadata.detector.detector_dimensions(),
+        )?;
     }
 
     Ok(PyNeutronBatch {
@@ -772,6 +782,7 @@ fn write_neutrons_hdf5(
     output_path: &str,
     neutrons: &NeutronBatch,
     super_resolution_factor: f64,
+    detector_dims: (usize, usize),
 ) -> PyResult<()> {
     let path = std::path::Path::new(output_path);
     let format = detect_hdf5_format(output_path);
@@ -802,9 +813,10 @@ fn write_neutrons_hdf5(
         sink.finalize()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to finalize SNS HDF5: {e}")))?;
     } else {
+        #[allow(clippy::cast_possible_truncation)]
         let options = NeutronWriteOptions {
-            x_size: 514,
-            y_size: 514,
+            x_size: detector_dims.0 as u32,
+            y_size: detector_dims.1 as u32,
             super_resolution_factor,
             chunk_events: 100_000,
             compression: Some(1),

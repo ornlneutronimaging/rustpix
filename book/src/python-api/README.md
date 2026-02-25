@@ -8,7 +8,7 @@ The `rustpix` Python package provides thin wrappers around the high-performance 
 |----------|-------------|
 | [`read_tpx3_hits`](quickstart.md#reading-hits) | Read all hits from a TPX3 file |
 | [`stream_tpx3_hits`](quickstart.md#streaming-hits) | Stream hits in batches |
-| [`process_tpx3_neutrons`](quickstart.md#processing-neutrons) | Process hits into neutron events |
+| [`process_tpx3_neutrons`](quickstart.md#processing-neutrons) | Process hits into neutron events (supports `output_path` for HDF5 export) |
 | [`stream_tpx3_neutrons`](quickstart.md#streaming-neutrons) | Stream neutron events in batches |
 | [`cluster_hits`](quickstart.md#clustering-hits) | Cluster an existing HitBatch |
 

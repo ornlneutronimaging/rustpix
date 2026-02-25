@@ -198,6 +198,33 @@ Range: 1,000,000 to 1,262,143
 
 Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps). The SNS schema uses 512x512.
 
+## Format Selection Guide
+
+rustpix supports two HDF5 export schemas. Choose based on your use case:
+
+| | Generic NeXus (`.h5`) | SNS NXsnsevent (`.nxs.h5`) |
+|---|---|---|
+| **Best for** | Analysis with scipp, Mantid, custom tools | Compatibility with ORNL SNS/HFIR workflows |
+| **Schema** | NXevent_data | NXsnsevent |
+| **TOF units** | Nanoseconds (`u64`) | Microseconds (`f32`) |
+| **Pixel ID** | `y * x_size + x` | `bank_offset + row * width + col` |
+| **Run metadata** | Minimal | Full (run number, IPTS, proton charge, timestamps) |
+| **Instrument info** | None | Instrument name, beamline |
+
+### How to Select
+
+**CLI:**
+- Generic NeXus: `rustpix process input.tpx3 -o output.h5`
+- SNS NXsnsevent: `rustpix process input.tpx3 -o output.nxs.h5 --run-number 12345`
+- Or use `--format` to override: `-f hdf5` or `-f sns-hdf5`
+
+**GUI:**
+- File > Export, then choose "HDF5 (NeXus)" or "HDF5 (SNS NXsnsevent)"
+
+**Python:**
+- Generic NeXus: `output_path="neutrons.h5"`
+- SNS NXsnsevent: `output_path="output.nxs.h5"`
+
 ## Implementation Notes
 
 ### Chunking Strategy
