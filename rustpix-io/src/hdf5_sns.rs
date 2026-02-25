@@ -351,6 +351,13 @@ impl SnsEventSink {
     /// # Errors
     /// Returns an error if the file or HDF5 structures cannot be created.
     pub fn create<P: AsRef<Path>>(path: P, options: SnsWriteOptions) -> Result<Self> {
+        let srf = options.super_resolution_factor;
+        if !srf.is_finite() || srf <= 0.0 {
+            return Err(crate::Error::InvalidFormat(format!(
+                "super_resolution_factor must be finite and positive, got {srf}"
+            )));
+        }
+
         let file = File::create(path)?;
 
         // Root-level entry

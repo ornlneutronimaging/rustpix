@@ -768,9 +768,9 @@ fn rustpix(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Detect output format from file path extension.
+/// Detect output format from file path extension (case-insensitive).
 fn detect_hdf5_format(path: &str) -> &'static str {
-    if path.ends_with(".nxs.h5") {
+    if path.to_ascii_lowercase().ends_with(".nxs.h5") {
         "sns"
     } else {
         "nexus"

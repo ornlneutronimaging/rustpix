@@ -111,12 +111,20 @@ enum Instrument {
 }
 
 fn detect_output_format(path: &Path) -> OutputFormat {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     // Check for .nxs.h5 (SNS convention) before .h5
     if name.ends_with(".nxs.h5") {
         return OutputFormat::SnsHdf5;
     }
-    match path.extension().and_then(|e| e.to_str()) {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
         Some("h5" | "hdf5" | "nxs") => OutputFormat::Hdf5,
         Some("tif" | "tiff") => OutputFormat::Tiff,
         Some("csv") => OutputFormat::Csv,
