@@ -796,6 +796,9 @@ fn run_process_tiff(
     if tof_bins == 0 {
         return Err(CliError::Other("--tof-bins must be >= 1".to_string()));
     }
+    if tof_max_override == Some(0) {
+        return Err(CliError::Other("--tof-max must be >= 1".to_string()));
+    }
 
     let width: usize = 514;
     let height: usize = 514;

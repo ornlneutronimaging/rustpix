@@ -338,6 +338,9 @@ pub struct SnsEventSink {
     options: SnsWriteOptions,
     run_start_ns: Option<u64>,
     last_pulse_ns: u64,
+    /// Pulse timestamp of the most recent `total_pulses` increment, used to
+    /// de-duplicate counts when the same physical pulse is written to multiple banks.
+    last_counted_pulse_ns: Option<u64>,
     total_counts: u64,
     total_pulses: u64,
     finalized: bool,
@@ -445,6 +448,7 @@ impl SnsEventSink {
             options,
             run_start_ns: None,
             last_pulse_ns: 0,
+            last_counted_pulse_ns: None,
             total_counts: 0,
             total_pulses: 0,
             finalized: false,
@@ -474,7 +478,10 @@ impl SnsEventSink {
 
         if n > 0 {
             self.total_counts += n as u64;
-            self.total_pulses += 1;
+            if self.last_counted_pulse_ns != Some(pulse_ns) {
+                self.total_pulses += 1;
+                self.last_counted_pulse_ns = Some(pulse_ns);
+            }
         }
         Ok(())
     }
@@ -507,7 +514,10 @@ impl SnsEventSink {
 
         if n > 0 {
             self.total_counts += n as u64;
-            self.total_pulses += 1;
+            if self.last_counted_pulse_ns != Some(pulse_ns) {
+                self.total_pulses += 1;
+                self.last_counted_pulse_ns = Some(pulse_ns);
+            }
         }
         Ok(())
     }
@@ -1082,6 +1092,43 @@ mod tests {
             .read_raw()
             .unwrap();
         assert_eq!(bank_tc, vec![5u64]);
+    }
+
+    #[test]
+    fn test_pulse_count_deduplication_across_banks() {
+        // Two banks, same pulse written to both — total_pulses should be 1, not 2.
+        let mut opts = make_test_options();
+        opts.banks.push(SnsBankConfig {
+            name: "bank200".to_string(),
+            pixel_id_offset: 2_000_000,
+            width: 512,
+            height: 512,
+        });
+        let batch = make_hit_batch(1000, &[0], &[0], &[100]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.write_hits(1, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let entry = f.group("entry").unwrap();
+
+        let tc: u64 = entry
+            .dataset("total_counts")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tc, 2); // 1 event per bank = 2 total events
+
+        let tp: u64 = entry
+            .dataset("total_pulses")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tp, 1); // Same pulse, counted once
     }
 
     // --- Empty batch ---
