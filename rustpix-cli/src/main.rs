@@ -762,6 +762,9 @@ fn run_process_sns_hdf5(
                 let batch = batch?;
                 total_hits = total_hits.saturating_add(batch.hits_processed);
                 total_neutrons = total_neutrons.saturating_add(batch.neutrons.len());
+                if batch.neutrons.is_empty() {
+                    continue;
+                }
                 let base = *file_base_tdc.get_or_insert(batch.tdc_timestamp_25ns);
                 let rebased_tdc = (batch.tdc_timestamp_25ns - base).saturating_add(tdc_offset);
                 last_tdc_seen = last_tdc_seen.max(rebased_tdc);
@@ -780,6 +783,9 @@ fn run_process_sns_hdf5(
                 let neutrons =
                     cluster_and_extract_batch(&mut hits, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
+                if neutrons.is_empty() {
+                    continue;
+                }
                 let base = *file_base_tdc.get_or_insert(event.tdc_timestamp_25ns);
                 let rebased_tdc = (event.tdc_timestamp_25ns - base).saturating_add(tdc_offset);
                 last_tdc_seen = last_tdc_seen.max(rebased_tdc);

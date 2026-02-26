@@ -604,6 +604,14 @@ impl SnsEventSink {
         }
         let daslogs = self.entry.group("DASlogs")?;
         for log in logs {
+            if log.time.len() != log.value.len() {
+                return Err(Error::InvalidFormat(format!(
+                    "DASlog '{}': time length ({}) != value length ({})",
+                    log.name,
+                    log.time.len(),
+                    log.value.len(),
+                )));
+            }
             let group = daslogs.create_group(&log.name)?;
             set_attr_str_group(&group, "NX_class", "NXlog")?;
 
@@ -1315,6 +1323,27 @@ mod tests {
 
         let values: Vec<f64> = log.dataset("value").unwrap().read_raw().unwrap();
         assert_eq!(values, vec![-212.0, -212.0, -212.0]);
+    }
+
+    #[test]
+    fn test_daslogs_mismatched_lengths_rejected() {
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let sink = SnsEventSink::create(path, opts).unwrap();
+        let err = sink
+            .write_daslogs(&[DasLogEntry {
+                name: "BL10:Mot:S1:X".to_string(),
+                time: vec![0.0, 1.0],
+                value: vec![-212.0],
+                units: Some("mm".to_string()),
+            }])
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("time length"),
+            "Expected length mismatch error, got: {err}"
+        );
     }
 
     // --- VENUS defaults ---
