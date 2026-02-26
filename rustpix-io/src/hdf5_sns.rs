@@ -867,8 +867,8 @@ fn epoch_secs_to_iso8601(secs: u64) -> String {
 /// Accepted formats: `YYYY-MM-DDThh:mm:ssZ`, `YYYY-MM-DDThh:mm:ss±hh:mm`.
 /// Returns `None` for unparseable input.
 fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
-    // Minimum length: "2025-01-01T00:00:00Z" = 20 chars
-    if s.len() < 20 {
+    // Minimum length: "2025-01-01T00:00:00" = 19 chars (no timezone suffix)
+    if s.len() < 19 {
         return None;
     }
     let year: i64 = s.get(0..4)?.parse().ok()?;

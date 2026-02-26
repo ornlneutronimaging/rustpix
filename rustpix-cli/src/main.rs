@@ -224,7 +224,8 @@ enum Commands {
         #[arg(long, default_value = "200")]
         tof_bins: usize,
 
-        /// Maximum TOF in 25ns ticks for TIFF histogram (auto-detect if omitted)
+        /// Maximum TOF in 25ns ticks for TIFF histogram (auto-detect if omitted).
+        /// Providing this value avoids a full extra clustering pass over the data.
         #[arg(long)]
         tof_max: Option<u32>,
 
@@ -1011,6 +1012,7 @@ fn write_tiff_stack_file(
         format!("ImageJ=1.53\nimages={n_bins}\nslices={n_bins}\nhyperstack=true\nmode=grayscale\n");
 
     let xy_size = height * width;
+    let mut clamped = 0usize;
     for tof in 0..n_bins {
         let start = tof * xy_size;
         let end = start + xy_size;
@@ -1018,7 +1020,7 @@ fn write_tiff_stack_file(
 
         match bit_depth {
             BitDepth::Bit16 => {
-                let pixels = convert_slice_u16(slice);
+                let pixels = convert_slice_u16(slice, &mut clamped);
                 let mut image = encoder.new_image::<Gray16>(w, h)?;
                 if tof == 0 {
                     image
@@ -1028,7 +1030,7 @@ fn write_tiff_stack_file(
                 image.write_data(&pixels)?;
             }
             BitDepth::Bit32 => {
-                let pixels = convert_slice_u32(slice);
+                let pixels = convert_slice_u32(slice, &mut clamped);
                 let mut image = encoder.new_image::<Gray32>(w, h)?;
                 if tof == 0 {
                     image
@@ -1040,20 +1042,36 @@ fn write_tiff_stack_file(
         }
     }
 
+    if clamped > 0 {
+        eprintln!(
+            "Warning: {clamped} pixel value(s) clamped to {bit_depth:?} max during TIFF export"
+        );
+    }
+
     Ok(())
 }
 
-fn convert_slice_u16(counts: &[u64]) -> Vec<u16> {
+fn convert_slice_u16(counts: &[u64], clamped: &mut usize) -> Vec<u16> {
     counts
         .iter()
-        .map(|&v| u16::try_from(v).unwrap_or(u16::MAX))
+        .map(|&v| {
+            u16::try_from(v).unwrap_or_else(|_| {
+                *clamped += 1;
+                u16::MAX
+            })
+        })
         .collect()
 }
 
-fn convert_slice_u32(counts: &[u64]) -> Vec<u32> {
+fn convert_slice_u32(counts: &[u64], clamped: &mut usize) -> Vec<u32> {
     counts
         .iter()
-        .map(|&v| u32::try_from(v).unwrap_or(u32::MAX))
+        .map(|&v| {
+            u32::try_from(v).unwrap_or_else(|_| {
+                *clamped += 1;
+                u32::MAX
+            })
+        })
         .collect()
 }
 

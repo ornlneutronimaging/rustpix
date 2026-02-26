@@ -107,11 +107,17 @@ def sync_pyproject(version: str) -> None:
     )
 
     # Update optional dependency: gui = ["rustpix-gui==X.Y.Z"]
-    new_content = re.sub(
+    new_content, gui_sub_count = re.subn(
         r'(gui\s*=\s*\["rustpix-gui)==[^"]+("\])',
         f'\\1=={version}\\2',
         new_content,
     )
+    if gui_sub_count == 0:
+        raise ValueError(
+            f"Could not update gui optional dependency version in {PYPROJECT}. "
+            "Check that the 'gui' optional dependency is defined as a single-line "
+            'array containing "rustpix-gui==<version>".'
+        )
 
     PYPROJECT.write_text(new_content)
     print(f"  Updated {PYPROJECT.relative_to(REPO_ROOT)}")
