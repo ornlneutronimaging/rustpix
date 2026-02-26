@@ -18,5 +18,6 @@ numpy = { workspace = true }
 
 rustpix-core = { workspace = true }
 rustpix-tpx = { workspace = true }
-rustpix-io = { workspace = true }
+rustpix-io = { workspace = true, features = ["hdf5"] }
+hdf5 = { workspace = true }
 rustpix-algorithms = { workspace = true }

@@ -146,6 +146,85 @@ where:
 
 Preferred storage: UTF-8 string dataset named `metadata_json`.
 
+## ORNL SNS/HFIR NXsnsevent Schema
+
+rustpix also supports export in the ORNL SNS/HFIR `NXsnsevent` schema used by instruments like VENUS (BL10). This is a separate export mode available in the GUI (as "HDF5 (SNS NXsnsevent)") and the CLI (via `.nxs.h5` file extension).
+
+### SNS File Structure
+
+```text
+/
+  entry/                           (NXentry, definition="NXsnsevent")
+    run_number                     (string)
+    experiment_identifier          (string, e.g. "IPTS-35004")
+    start_time                     (string, ISO 8601)
+    end_time                       (string, ISO 8601)
+    duration                       (f64, seconds)
+    proton_charge                  (f64, picoCoulombs)
+    total_counts                   (u64)
+    total_pulses                   (u64)
+    bank{N}_events/                (NXevent_data)
+      event_id                     (u32, N) [units=""]
+      event_time_offset            (f32, N) [units="microsecond"]
+      event_time_zero              (f64, P) [units="second"]
+      event_index                  (u64, P)
+      total_counts                 (u64, scalar)
+    instrument/                    (NXinstrument)
+      name                         (string, e.g. "VENUS")
+      beamline                     (string, e.g. "BL10")
+      bank{N}/                     hard link to /entry/bank{N}_events
+    DASlogs/                       (NXcollection)
+    sample/                        (NXsample)
+```
+
+### Key Differences from Generic Schema
+
+| Aspect | Generic rustpix | SNS NXsnsevent |
+| ------ | --------------- | -------------- |
+| Pixel ID | `i32`, `y * x_size + x` | `u32`, `bank_offset + row * width + col` |
+| TOF | `u64` nanoseconds | `f32` microseconds |
+| Pulse time | `u64` nanoseconds | `f64` seconds (from run start) |
+| Event index | `i32` | `u64` |
+| Groups | `/entry/hits/`, `/entry/neutrons/` | `/entry/bank{N}_events/` |
+
+### VENUS Pixel ID Mapping
+
+For VENUS bank100 (512x512 TPX3 detector):
+
+```text
+event_id = 1,000,000 + row * 512 + col
+Range: 1,000,000 to 1,262,143
+```
+
+Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps), whereas the SNS schema uses a 512x512 pixel grid. The SNS writer handles the 514x514→512x512 gap-pixel remapping automatically via `SnsBankConfig.gap_columns`/`gap_rows`, so callers should provide logical detector coordinates and must not pre-remap them.
+
+## Format Selection Guide
+
+rustpix supports two HDF5 export schemas. Choose based on your use case:
+
+| | Generic NeXus (`.h5`) | SNS NXsnsevent (`.nxs.h5`) |
+|---|---|---|
+| **Best for** | Analysis with scipp, Mantid, custom tools | Compatibility with ORNL SNS/HFIR workflows |
+| **Schema** | NXevent_data | NXsnsevent |
+| **TOF units** | Nanoseconds (`u64`) | Microseconds (`f32`) |
+| **Pixel ID** | `y * x_size + x` | `bank_offset + row * width + col` |
+| **Run metadata** | Minimal | Full (run number, IPTS, proton charge, timestamps) |
+| **Instrument info** | None | Instrument name, beamline |
+
+### How to Select
+
+**CLI:**
+- Generic NeXus: `rustpix process input.tpx3 -o output.h5`
+- SNS NXsnsevent: `rustpix process input.tpx3 -o output.nxs.h5 --run-number 12345`
+- Or use `--format` to override: `-f hdf5` or `-f sns-hdf5`
+
+**GUI:**
+- File > Export, then choose "HDF5 (NeXus)" or "HDF5 (SNS NXsnsevent)"
+
+**Python:**
+- Generic NeXus: `output_path="neutrons.h5"`
+- SNS NXsnsevent: `output_path="output.nxs.h5"`
+
 ## Implementation Notes
 
 ### Chunking Strategy

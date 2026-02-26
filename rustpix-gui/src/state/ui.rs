@@ -456,6 +456,8 @@ pub struct UiExportState {
     pub format: ExportFormat,
     /// HDF5 export configuration.
     pub options: Hdf5ExportOptions,
+    /// SNS HDF5 export configuration.
+    pub sns: SnsExportOptions,
     /// TIFF export configuration.
     pub tiff: TiffExportOptions,
 }
@@ -464,6 +466,7 @@ pub struct UiExportState {
 pub enum ExportFormat {
     #[default]
     Hdf5,
+    SnsHdf5,
     TiffFolder,
     TiffStack,
 }
@@ -472,6 +475,7 @@ impl fmt::Display for ExportFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Hdf5 => write!(f, "HDF5 (NeXus)"),
+            Self::SnsHdf5 => write!(f, "HDF5 (SNS NXsnsevent)"),
             Self::TiffFolder => write!(f, "TIFF Folder"),
             Self::TiffStack => write!(f, "TIFF Stack"),
         }
@@ -632,6 +636,54 @@ impl Default for Hdf5ExportOptions {
             hist_chunk_y: 128,
             hist_chunk_x: 128,
             hist_chunk_tof: 64,
+        }
+    }
+}
+
+/// Which event data to write into the SNS `NXsnsevent` bank.
+///
+/// The SNS schema stores a single event stream per bank — either raw hits
+/// or processed neutrons, never both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SnsEventSource {
+    /// Write raw detector hits as events.
+    Hits,
+    /// Write clustered/extracted neutrons as events.
+    #[default]
+    Neutrons,
+}
+
+#[derive(Clone)]
+pub struct SnsExportOptions {
+    /// Which event data to write (hits or neutrons, mutually exclusive).
+    pub event_source: SnsEventSource,
+    /// Run number for SNS metadata.
+    pub run_number: String,
+    /// Experiment identifier (e.g., "IPTS-35004").
+    pub experiment_identifier: String,
+    /// Optional run title.
+    pub title: String,
+    /// Proton charge in picoCoulombs (0 = omit).
+    pub proton_charge: String,
+    /// Compression level (0-9, 0 = none).
+    pub compression_level: u8,
+    /// Events per HDF5 chunk.
+    pub chunk_events: usize,
+    /// Enable shuffle filter.
+    pub shuffle: bool,
+}
+
+impl Default for SnsExportOptions {
+    fn default() -> Self {
+        Self {
+            event_source: SnsEventSource::default(),
+            run_number: String::new(),
+            experiment_identifier: String::new(),
+            title: String::new(),
+            proton_charge: String::new(),
+            compression_level: 1,
+            chunk_events: 100_000,
+            shuffle: true,
         }
     }
 }

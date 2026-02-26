@@ -81,9 +81,10 @@ pixi run gui-debug
 
 1. Click **File > Export**
 2. Choose format:
-   - **HDF5**: Full data with metadata
-   - **CSV**: Simple tabular export
-   - **TIFF**: Image export
+   - **HDF5 (NeXus)**: Generic NeXus event data, scipp-compatible (`.h5`)
+   - **HDF5 (SNS NXsnsevent)**: ORNL SNS/HFIR schema with run metadata (`.nxs.h5`)
+   - **CSV**: Spectrum CSV (via spectrum toolbar, not File > Export)
+   - **TIFF**: Image stack with TOF bins and spectrum CSV sidecar (`.tiff`)
 3. Select output location
 
 ## Keyboard Shortcuts

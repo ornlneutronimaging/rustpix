@@ -1,0 +1,237 @@
+name: GUI Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: rustpix-gui
+          target: x86_64
+          manylinux: 2_28
+          args: --release --out dist
+          before-script-linux: |
+            # Install CMake for static HDF5 build
+            yum install -y cmake3 || yum install -y cmake
+            ln -sf /usr/bin/cmake3 /usr/bin/cmake || true
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-wheel-linux-x86_64
+          path: rustpix-gui/dist/*.whl
+
+  build-macos:
+    name: Build macOS ARM64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake
+        run: brew install cmake
+
+      - name: Build wheel with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: rustpix-gui
+          target: aarch64-apple-darwin
+          args: --release --out dist
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-wheel-macos-arm64
+          path: rustpix-gui/dist/*.whl
+
+  build-macos-app:
+    name: Build macOS App Bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CMake and cargo-bundle
+        run: |
+          brew install cmake
+          cargo install cargo-bundle
+
+      - name: Build macOS app bundle
+        working-directory: rustpix-gui
+        run: cargo bundle --release
+
+      - name: Create DMG
+        run: |
+          # Get version from tag or use default
+          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION=${VERSION#v}  # Remove 'v' prefix if present
+
+          # Create DMG from the app bundle
+          hdiutil create -volname "Rustpix ${VERSION}" \
+            -srcfolder target/release/bundle/osx/Rustpix.app \
+            -ov -format UDZO \
+            rustpix-${VERSION}-macos-arm64.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos-app
+          path: "*.dmg"
+
+  publish-pypi:
+    name: Publish GUI to PyPI
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi-gui
+      url: https://pypi.org/p/rustpix-gui
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: gui-wheel-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  upload-release-assets:
+    name: Upload to GitHub Release
+    needs: [build-linux, build-macos, build-macos-app]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: gui-wheel-*
+          merge-multiple: true
+
+      - name: Download macOS app artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: gui-macos-app
+          merge-multiple: true
+
+      - name: List all artifacts
+        run: ls -la dist/
+
+      - name: Upload assets to existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: false
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: upload-release-assets
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, 'rc') && !contains(github.ref, 'alpha') && !contains(github.ref, 'beta')
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Updating Homebrew tap for version $VERSION"
+
+      - name: Wait for release asset to be available
+        run: |
+          echo "Waiting for DMG to be available on GitHub Release..."
+          for i in {1..30}; do
+            if curl -sL --head --fail \
+              "https://github.com/ornlneutronimaging/rustpix/releases/download/v${{ steps.version.outputs.version }}/rustpix-${{ steps.version.outputs.version }}-macos-arm64.dmg" \
+              > /dev/null 2>&1; then
+              echo "DMG is available"
+              exit 0
+            fi
+            echo "Attempt $i/30: DMG not yet available, waiting 10s..."
+            sleep 10
+          done
+          echo "DMG not available after 5 minutes"
+          exit 1
+
+      - name: Download DMG and calculate SHA256
+        id: sha256
+        run: |
+          DMG_URL="https://github.com/ornlneutronimaging/rustpix/releases/download/v${{ steps.version.outputs.version }}/rustpix-${{ steps.version.outputs.version }}-macos-arm64.dmg"
+          echo "Downloading $DMG_URL"
+          curl -fSL --retry 3 --retry-delay 5 "$DMG_URL" -o rustpix.dmg
+
+          # Verify the downloaded file is a valid DMG (not an error page)
+          if [ ! -s rustpix.dmg ]; then
+            echo "Error: Downloaded file is empty"
+            exit 1
+          fi
+
+          # Check for DMG magic bytes (first 4 bytes should not be HTML)
+          if head -c 15 rustpix.dmg | grep -q '<!DOCTYPE\|<html'; then
+            echo "Error: Downloaded file appears to be HTML, not a DMG"
+            exit 1
+          fi
+
+          SHA256=$(sha256sum rustpix.dmg | cut -d' ' -f1)
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+          echo "SHA256: $SHA256"
+
+      - name: Clone Homebrew tap repository
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/ornlneutronimaging/homebrew-rustpix.git
+          cd homebrew-rustpix
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update cask formula
+        run: |
+          cd homebrew-rustpix
+
+          # Update version
+          sed -i 's/version "[^"]*"/version "${{ steps.version.outputs.version }}"/' Casks/rustpix.rb
+
+          # Update sha256
+          sed -i 's/sha256 "[^"]*"/sha256 "${{ steps.sha256.outputs.sha256 }}"/' Casks/rustpix.rb
+
+          echo "Updated Casks/rustpix.rb:"
+          cat Casks/rustpix.rb
+
+      - name: Commit and push changes
+        run: |
+          cd homebrew-rustpix
+          git add Casks/rustpix.rb
+
+          # Only commit and push if there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit - tap is already up to date for version ${{ steps.version.outputs.version }}"
+          else
+            git commit -m "Update rustpix to ${{ steps.version.outputs.version }}"
+            git push origin main
+            echo "Successfully updated Homebrew tap to version ${{ steps.version.outputs.version }}"
+          fi
