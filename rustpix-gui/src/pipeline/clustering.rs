@@ -15,7 +15,7 @@ use rustpix_io::Tpx3FileReader;
 use rustpix_tpx::DetectorConfig;
 
 use super::AlgorithmType;
-use crate::message::AppMessage;
+use crate::message::{AppMessage, PulseBounds};
 use crate::util::usize_to_f32;
 
 /// Configuration for the clustering worker.
@@ -98,7 +98,7 @@ pub fn run_clustering_worker(
         min_tot_threshold: config.min_tot_threshold,
     };
 
-    let stream = match reader.stream_time_ordered() {
+    let stream = match reader.stream_time_ordered_events() {
         Ok(s) => s,
         Err(e) => {
             let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
@@ -109,17 +109,31 @@ pub fn run_clustering_worker(
     let mut processed_hits = 0usize;
     let mut last_update = Instant::now();
     let mut neutrons = NeutronBatch::default();
+    let mut pulse_bounds = Vec::new();
     let total_hits = config.total_hits;
 
-    for mut batch in stream {
+    for event in stream {
         if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        processed_hits = processed_hits.saturating_add(batch.len());
-        let res = cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params);
+        let tdc_ts = event.tdc_timestamp_25ns;
+        let mut hits = event.hits;
+        processed_hits = processed_hits.saturating_add(hits.len());
+        let res = cluster_and_extract_batch(&mut hits, algo, &clustering, &extraction, &params);
 
         match res {
-            Ok(n) => neutrons.append(&n),
+            Ok(n) => {
+                let start_idx = neutrons.len();
+                let count = n.len();
+                neutrons.append(&n);
+                if count > 0 {
+                    pulse_bounds.push(PulseBounds {
+                        tdc_timestamp_25ns: tdc_ts,
+                        start: start_idx,
+                        len: count,
+                    });
+                }
+            }
             Err(e) => {
                 let _ = tx.send(AppMessage::ProcessingError(e.to_string()));
                 return;
@@ -139,5 +153,9 @@ pub fn run_clustering_worker(
     if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let _ = tx.send(AppMessage::ProcessingComplete(neutrons, start.elapsed()));
+    let _ = tx.send(AppMessage::ProcessingComplete(
+        neutrons,
+        pulse_bounds,
+        start.elapsed(),
+    ));
 }

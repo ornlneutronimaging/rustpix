@@ -213,6 +213,8 @@ pub struct RustpixApp {
     pub(crate) masked_tof_spectrum: Option<Vec<u64>>,
     /// Extracted neutron events.
     pub(crate) neutrons: Arc<NeutronBatch>,
+    /// Pulse boundary metadata for cached neutron batches.
+    pub(crate) neutron_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
     /// 3D hyperstack for neutron data.
     pub(crate) neutron_hyperstack: Option<Arc<Hyperstack3D>>,
     /// Cached 2D projection for neutron visualization.
@@ -306,6 +308,7 @@ impl Default for RustpixApp {
             tof_spectrum: None,
             masked_tof_spectrum: None,
             neutrons: Arc::new(NeutronBatch::default()),
+            neutron_pulse_bounds: None,
             neutron_hyperstack: None,
             neutron_counts: None,
             neutron_spectrum: None,
@@ -381,6 +384,7 @@ impl RustpixApp {
         self.tof_spectrum = None;
         self.masked_tof_spectrum = None;
         self.neutrons = Arc::new(NeutronBatch::default());
+        self.neutron_pulse_bounds = None;
         self.neutron_hyperstack = None;
         self.neutron_counts = None;
         self.neutron_spectrum = None;
@@ -987,6 +991,7 @@ impl RustpixApp {
             hit_batch: self.hit_batch.clone(),
             hit_pulse_bounds: self.hit_pulse_bounds.clone(),
             neutrons: Arc::clone(&self.neutrons),
+            neutron_pulse_bounds: self.neutron_pulse_bounds.clone(),
         };
 
         self.ui_state.export.in_progress = true;
@@ -1501,8 +1506,8 @@ impl RustpixApp {
                     );
                 }
                 AppMessage::LoadError(e) => self.handle_load_error(&e),
-                AppMessage::ProcessingComplete(neutrons, dur) => {
-                    self.handle_processing_complete(neutrons, dur);
+                AppMessage::ProcessingComplete(neutrons, pulse_bounds, dur) => {
+                    self.handle_processing_complete(neutrons, pulse_bounds, dur);
                 }
                 AppMessage::ProcessingError(e) => self.handle_processing_error(&e),
                 AppMessage::ExportProgress(progress, status) => {
@@ -1569,7 +1574,12 @@ impl RustpixApp {
         self.processing.status_text = format!("Error: {error}");
     }
 
-    fn handle_processing_complete(&mut self, neutrons: NeutronBatch, dur: Duration) {
+    fn handle_processing_complete(
+        &mut self,
+        neutrons: NeutronBatch,
+        neutron_pulse_bounds: Vec<PulseBounds>,
+        dur: Duration,
+    ) {
         if !self.processing.is_processing {
             return;
         }
@@ -1604,6 +1614,7 @@ impl RustpixApp {
         }
 
         self.neutrons = Arc::new(neutrons);
+        self.neutron_pulse_bounds = Some(Arc::new(neutron_pulse_bounds));
         self.neutron_super_resolution_factor = super_res_factor;
     }
 
@@ -1686,6 +1697,7 @@ struct ExportSnsHdf5Request {
     hit_batch: Option<Arc<HitBatch>>,
     hit_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
     neutrons: Arc<NeutronBatch>,
+    neutron_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
 }
 
 struct ExportTiffRequest {
@@ -1753,6 +1765,7 @@ fn send_export_progress(tx: &Sender<AppMessage>, progress: f32, status: &str) {
     let _ = tx.send(AppMessage::ExportProgress(progress, status.to_string()));
 }
 
+#[allow(clippy::too_many_lines)]
 fn export_sns_hdf5_worker(
     request: &ExportSnsHdf5Request,
     tx: &Sender<AppMessage>,
@@ -1817,14 +1830,44 @@ fn export_sns_hdf5_worker(
                 warnings.push("No neutron data available for SNS export".to_string());
             } else {
                 send_export_progress(tx, 0.20, "Writing neutron events");
-                let neutron_batch = NeutronEventBatch {
-                    tdc_timestamp_25ns: 0,
-                    neutrons: neutrons.clone(),
-                };
-                sink.write_neutrons(0, &neutron_batch).map_err(|err| {
-                    remove_partial_file(&request.path);
-                    anyhow!("Failed writing neutrons: {err}")
-                })?;
+                if let Some(bounds) = request.neutron_pulse_bounds.as_deref() {
+                    let total = bounds.len();
+                    for (i, bound) in bounds.iter().enumerate() {
+                        let end = bound.start.saturating_add(bound.len);
+                        if end > neutrons.len() {
+                            warnings
+                                .push("Pulse boundary exceeds cached neutron range".to_string());
+                            break;
+                        }
+                        let pulse_neutrons = slice_neutron_batch(neutrons, bound.start, bound.len);
+                        if pulse_neutrons.is_empty() {
+                            continue;
+                        }
+                        let event_batch = NeutronEventBatch {
+                            tdc_timestamp_25ns: bound.tdc_timestamp_25ns,
+                            neutrons: pulse_neutrons,
+                        };
+                        sink.write_neutrons(0, &event_batch).map_err(|err| {
+                            remove_partial_file(&request.path);
+                            anyhow!("Failed writing neutron pulse {i}: {err}")
+                        })?;
+                        if i % 500 == 0 {
+                            #[allow(clippy::cast_precision_loss)]
+                            let progress = 0.20 + 0.70 * (i as f32 / total as f32);
+                            send_export_progress(tx, progress, "Writing neutron events");
+                        }
+                    }
+                } else {
+                    // No pulse boundaries — write all neutrons as a single pulse.
+                    let neutron_batch = NeutronEventBatch {
+                        tdc_timestamp_25ns: 0,
+                        neutrons: neutrons.clone(),
+                    };
+                    sink.write_neutrons(0, &neutron_batch).map_err(|err| {
+                        remove_partial_file(&request.path);
+                        anyhow!("Failed writing neutrons: {err}")
+                    })?;
+                }
             }
         }
     }
@@ -2709,6 +2752,18 @@ fn slice_hit_batch(batch: &HitBatch, start: usize, len: usize) -> HitBatch {
         timestamp: batch.timestamp[start..end].to_vec(),
         chip_id: batch.chip_id[start..end].to_vec(),
         cluster_id: batch.cluster_id[start..end].to_vec(),
+    }
+}
+
+fn slice_neutron_batch(batch: &NeutronBatch, start: usize, len: usize) -> NeutronBatch {
+    let end = start.saturating_add(len);
+    NeutronBatch {
+        x: batch.x[start..end].to_vec(),
+        y: batch.y[start..end].to_vec(),
+        tof: batch.tof[start..end].to_vec(),
+        tot: batch.tot[start..end].to_vec(),
+        n_hits: batch.n_hits[start..end].to_vec(),
+        chip_id: batch.chip_id[start..end].to_vec(),
     }
 }
 

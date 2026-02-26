@@ -55,8 +55,9 @@ pub enum AppMessage {
     ///
     /// Contains:
     /// - `NeutronBatch`: Extracted neutron events
+    /// - `Vec<PulseBounds>`: Per-pulse boundaries into the neutron batch
     /// - `Duration`: Time taken to process
-    ProcessingComplete(NeutronBatch, Duration),
+    ProcessingComplete(NeutronBatch, Vec<PulseBounds>, Duration),
 
     /// Clustering failed.
     ProcessingError(String),

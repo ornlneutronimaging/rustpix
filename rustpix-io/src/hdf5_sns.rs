@@ -20,10 +20,25 @@ use crate::reader::EventBatch;
 use crate::{Error, Result};
 use hdf5::types::VarLenUnicode;
 use hdf5::{Dataset, File, Group};
+use std::collections::HashSet;
 use std::path::Path;
 
 const NS_PER_TICK: u64 = 25;
 const US_PER_TICK: f64 = 25.0 / 1000.0;
+
+/// Remap a coordinate from the source grid (which may contain chip-gap pixels)
+/// to the target grid (which does not).
+///
+/// Gap positions are given as a sorted slice.  A coordinate that falls on a gap
+/// returns `None`.  Coordinates beyond the gap are shifted down by the number
+/// of gap positions below them.
+fn remap_gap(coord: u32, gaps: &[u32]) -> Option<u32> {
+    let shift = gaps.partition_point(|&g| g < coord);
+    if gaps.get(shift).copied() == Some(coord) {
+        return None; // coord is a gap pixel
+    }
+    Some(coord - shift as u32)
+}
 
 // ---------------------------------------------------------------------------
 // Configuration types
@@ -40,6 +55,13 @@ pub struct SnsBankConfig {
     pub width: u32,
     /// Number of rows.
     pub height: u32,
+    /// Column indices that are chip-gap pixels in the source coordinate space.
+    /// Events at these columns are silently dropped; columns beyond the gap
+    /// are shifted down by the gap width.  For VENUS this is `[256, 257]`.
+    pub gap_columns: Vec<u32>,
+    /// Row indices that are chip-gap pixels in the source coordinate space.
+    /// Same semantics as `gap_columns`.  For VENUS this is `[256, 257]`.
+    pub gap_rows: Vec<u32>,
 }
 
 /// Run-level metadata for an SNS `NXsnsevent` file.
@@ -108,6 +130,8 @@ impl SnsWriteOptions {
                 pixel_id_offset: 1_000_000,
                 width: 512,
                 height: 512,
+                gap_columns: vec![256, 257],
+                gap_rows: vec![256, 257],
             }],
             run,
             instrument: SnsInstrumentConfig {
@@ -203,15 +227,17 @@ impl SnsBankEventWriter {
         })
     }
 
+    /// Append hit events, returning the number of events actually written
+    /// (may be fewer than the batch size when gap pixels are dropped).
     fn append_hits(
         &mut self,
         bank: &SnsBankConfig,
         batch: &EventBatch,
         pulse_time_s: f64,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let n = batch.hits.x.len();
         if n == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
         // event_index: start of this pulse's events
@@ -229,47 +255,43 @@ impl SnsBankEventWriter {
         )?;
         self.pulse_count += 1;
 
-        // Pixel IDs — clamp to bank bounds to avoid ID wrap-around when
-        // the internal detector grid (e.g. 514×514) exceeds the bank grid
-        // (e.g. 512×512).
-        let col_max = bank.width.saturating_sub(1);
-        let row_max = bank.height.saturating_sub(1);
-        let pixel_ids: Vec<u32> = batch
-            .hits
-            .x
-            .iter()
-            .zip(batch.hits.y.iter())
-            .map(|(&x, &y)| {
-                let px = u32::from(x).min(col_max);
-                let py = u32::from(y).min(row_max);
-                bank.pixel_id_offset + py * bank.width + px
-            })
-            .collect();
+        // Pixel IDs — remap through chip-gap positions.  Events that land
+        // on a gap pixel are silently dropped; coordinates beyond the gap are
+        // shifted to close the gap.
+        let mut pixel_ids = Vec::with_capacity(n);
+        let mut tof_us = Vec::with_capacity(n);
+        for i in 0..n {
+            let raw_x = u32::from(batch.hits.x[i]);
+            let raw_y = u32::from(batch.hits.y[i]);
+            let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
+                continue; // gap pixel — skip
+            };
+            let Some(py) = remap_gap(raw_y, &bank.gap_rows) else {
+                continue;
+            };
+            pixel_ids.push(bank.pixel_id_offset + py * bank.width + px);
+            tof_us.push((f64::from(batch.hits.tof[i]) * US_PER_TICK) as f32);
+        }
         append_slice(&self.event_id, self.event_count as usize, &pixel_ids)?;
-
-        // TOF in microseconds
-        let tof_us: Vec<f32> = batch
-            .hits
-            .tof
-            .iter()
-            .map(|&t| (f64::from(t) * US_PER_TICK) as f32)
-            .collect();
         append_slice(&self.event_time_offset, self.event_count as usize, &tof_us)?;
 
-        self.event_count += n as u64;
-        Ok(())
+        let written = pixel_ids.len();
+        self.event_count += written as u64;
+        Ok(written)
     }
 
+    /// Append neutron events, returning the number of events actually written
+    /// (may be fewer than the batch size when gap pixels are dropped).
     fn append_neutrons(
         &mut self,
         bank: &SnsBankConfig,
         batch: &NeutronEventBatch,
         pulse_time_s: f64,
         super_resolution_factor: f64,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let n = batch.neutrons.x.len();
         if n == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
         // event_index + event_time_zero
@@ -286,35 +308,28 @@ impl SnsBankEventWriter {
         self.pulse_count += 1;
 
         // Pixel IDs — convert super-resolution coords to pixel coords,
-        // clamping to bank bounds to avoid ID wrap-around when the internal
-        // detector grid (e.g. 514×514) exceeds the bank grid (e.g. 512×512).
+        // remap through chip-gap positions, and drop gap-pixel events.
         let inv = 1.0 / super_resolution_factor;
-        let col_max = bank.width.saturating_sub(1);
-        let row_max = bank.height.saturating_sub(1);
-        let pixel_ids: Vec<u32> = batch
-            .neutrons
-            .x
-            .iter()
-            .zip(batch.neutrons.y.iter())
-            .map(|(&x, &y)| {
-                let px = ((x * inv).round().max(0.0) as u32).min(col_max);
-                let py = ((y * inv).round().max(0.0) as u32).min(row_max);
-                bank.pixel_id_offset + py * bank.width + px
-            })
-            .collect();
+        let mut pixel_ids = Vec::with_capacity(n);
+        let mut tof_us = Vec::with_capacity(n);
+        for i in 0..n {
+            let raw_x = (batch.neutrons.x[i] * inv).round().max(0.0) as u32;
+            let raw_y = (batch.neutrons.y[i] * inv).round().max(0.0) as u32;
+            let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
+                continue;
+            };
+            let Some(py) = remap_gap(raw_y, &bank.gap_rows) else {
+                continue;
+            };
+            pixel_ids.push(bank.pixel_id_offset + py * bank.width + px);
+            tof_us.push((f64::from(batch.neutrons.tof[i]) * US_PER_TICK) as f32);
+        }
         append_slice(&self.event_id, self.event_count as usize, &pixel_ids)?;
-
-        // TOF in microseconds
-        let tof_us: Vec<f32> = batch
-            .neutrons
-            .tof
-            .iter()
-            .map(|&t| (f64::from(t) * US_PER_TICK) as f32)
-            .collect();
         append_slice(&self.event_time_offset, self.event_count as usize, &tof_us)?;
 
-        self.event_count += n as u64;
-        Ok(())
+        let written = pixel_ids.len();
+        self.event_count += written as u64;
+        Ok(written)
     }
 
     fn write_total_counts(&self) -> Result<()> {
@@ -338,9 +353,10 @@ pub struct SnsEventSink {
     options: SnsWriteOptions,
     run_start_ns: Option<u64>,
     last_pulse_ns: u64,
-    /// Pulse timestamp of the most recent `total_pulses` increment, used to
-    /// de-duplicate counts when the same physical pulse is written to multiple banks.
-    last_counted_pulse_ns: Option<u64>,
+    /// Set of pulse timestamps already counted toward `total_pulses`, used to
+    /// de-duplicate counts when the same physical pulse is written to multiple
+    /// banks regardless of write ordering.
+    counted_pulse_ns: HashSet<u64>,
     total_counts: u64,
     total_pulses: u64,
     finalized: bool,
@@ -448,7 +464,7 @@ impl SnsEventSink {
             options,
             run_start_ns: None,
             last_pulse_ns: 0,
-            last_counted_pulse_ns: None,
+            counted_pulse_ns: HashSet::new(),
             total_counts: 0,
             total_pulses: 0,
             finalized: false,
@@ -469,18 +485,16 @@ impl SnsEventSink {
             )));
         }
 
-        let n = batch.hits.x.len();
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        let pulse_time_s = self.pulse_time_seconds(pulse_ns);
+        let pulse_time_s = self.pulse_time_seconds(pulse_ns)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
-        writer.append_hits(bank, batch, pulse_time_s)?;
+        let written = writer.append_hits(bank, batch, pulse_time_s)?;
 
-        if n > 0 {
-            self.total_counts += n as u64;
-            if self.last_counted_pulse_ns != Some(pulse_ns) {
+        if written > 0 {
+            self.total_counts += written as u64;
+            if self.counted_pulse_ns.insert(pulse_ns) {
                 self.total_pulses += 1;
-                self.last_counted_pulse_ns = Some(pulse_ns);
             }
         }
         Ok(())
@@ -500,23 +514,21 @@ impl SnsEventSink {
             )));
         }
 
-        let n = batch.neutrons.x.len();
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        let pulse_time_s = self.pulse_time_seconds(pulse_ns);
+        let pulse_time_s = self.pulse_time_seconds(pulse_ns)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
-        writer.append_neutrons(
+        let written = writer.append_neutrons(
             bank,
             batch,
             pulse_time_s,
             self.options.super_resolution_factor,
         )?;
 
-        if n > 0 {
-            self.total_counts += n as u64;
-            if self.last_counted_pulse_ns != Some(pulse_ns) {
+        if written > 0 {
+            self.total_counts += written as u64;
+            if self.counted_pulse_ns.insert(pulse_ns) {
                 self.total_pulses += 1;
-                self.last_counted_pulse_ns = Some(pulse_ns);
             }
         }
         Ok(())
@@ -596,13 +608,23 @@ impl SnsEventSink {
     }
 
     /// Compute pulse time in seconds relative to run start.
-    fn pulse_time_seconds(&mut self, pulse_ns: u64) -> f64 {
+    ///
+    /// # Errors
+    /// Returns an error if the pulse timestamp is earlier than the previous
+    /// pulse (non-monotonic).
+    fn pulse_time_seconds(&mut self, pulse_ns: u64) -> Result<f64> {
+        if pulse_ns < self.last_pulse_ns {
+            return Err(Error::InvalidFormat(format!(
+                "non-monotonic pulse timestamp: {pulse_ns} ns < previous {prev} ns",
+                prev = self.last_pulse_ns
+            )));
+        }
         self.last_pulse_ns = pulse_ns;
         if let Some(start) = self.run_start_ns {
-            (pulse_ns.saturating_sub(start)) as f64 / 1_000_000_000.0
+            Ok((pulse_ns - start) as f64 / 1_000_000_000.0)
         } else {
             self.run_start_ns = Some(pulse_ns);
-            0.0
+            Ok(0.0)
         }
     }
 }
@@ -902,7 +924,9 @@ mod tests {
 
     #[test]
     fn test_pixel_id_corner() {
-        // (511, 511) -> offset + 511*512 + 511 = 1_000_000 + 261_632 + 511 = 1_262_143
+        // 514-space (511, 511) is beyond the gap at [256, 257], so it remaps
+        // to 512-space (509, 509): 511 − 2 gap positions = 509.
+        // event_id = 1_000_000 + 509*512 + 509 = 1_261_117
         let opts = make_test_options();
         let batch = make_hit_batch(1000, &[511], &[511], &[100]);
         let file = NamedTempFile::new().unwrap();
@@ -920,7 +944,7 @@ mod tests {
             .unwrap()
             .read_raw()
             .unwrap();
-        assert_eq!(ids, vec![1_262_143u32]);
+        assert_eq!(ids, vec![1_000_000 + 509 * 512 + 509]);
     }
 
     // --- Time conversion tests ---
@@ -1103,6 +1127,8 @@ mod tests {
             pixel_id_offset: 2_000_000,
             width: 512,
             height: 512,
+            gap_columns: vec![256, 257],
+            gap_rows: vec![256, 257],
         });
         let batch = make_hit_batch(1000, &[0], &[0], &[100]);
         let file = NamedTempFile::new().unwrap();
@@ -1263,8 +1289,9 @@ mod tests {
     // --- Coordinate clamping ---
 
     #[test]
-    fn test_hit_pixel_id_clamped_to_bank_bounds() {
-        // Hit at (513, 513) should be clamped to (511, 511) for a 512×512 bank.
+    fn test_hit_pixel_id_remapped_through_gap() {
+        // Hit at (513, 513) is beyond the gap (256, 257) so it is remapped
+        // to (513 − 2, 513 − 2) = (511, 511) for a 512×512 bank.
         // Expected: offset + 511*512 + 511 = 1_262_143
         let opts = make_test_options();
         let batch = make_hit_batch(1000, &[513], &[513], &[100]);
@@ -1287,9 +1314,9 @@ mod tests {
     }
 
     #[test]
-    fn test_neutron_pixel_id_clamped_to_bank_bounds() {
+    fn test_neutron_pixel_id_remapped_through_gap() {
         // Neutron at super-res (4104.0, 4104.0) with factor 8.0 -> pixel (513, 513)
-        // Should be clamped to (511, 511) for a 512×512 bank.
+        // Remapped through gap to (511, 511) for a 512×512 bank.
         let mut opts = make_test_options();
         opts.super_resolution_factor = 8.0;
         let batch = make_neutron_batch(1000, &[4104.0], &[4104.0], &[100]);
@@ -1311,6 +1338,79 @@ mod tests {
         assert_eq!(ids, vec![1_000_000 + 511 * 512 + 511]);
     }
 
+    #[test]
+    fn test_hit_gap_pixel_dropped() {
+        // Hit at (256, 100) — column 256 is a gap pixel, should be dropped.
+        let opts = make_test_options();
+        let batch = make_hit_batch(1000, &[256], &[100], &[100]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert!(ids.is_empty(), "Gap pixel should have been dropped");
+    }
+
+    #[test]
+    fn test_hit_edge_column_preserved() {
+        // Hit at (258, 0) — first real column after the gap — should remap
+        // to column 256 (258 − 2 gap positions).
+        let opts = make_test_options();
+        let batch = make_hit_batch(1000, &[258], &[0], &[100]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        // row 0, col 256 → offset + 256
+        assert_eq!(ids, vec![1_000_256]);
+    }
+
+    #[test]
+    fn test_hit_no_gap_bank_passes_through() {
+        // A bank with no gap columns/rows should pass coordinates unchanged.
+        let mut opts = make_test_options();
+        opts.banks[0].gap_columns = vec![];
+        opts.banks[0].gap_rows = vec![];
+        let batch = make_hit_batch(1000, &[256], &[257], &[100]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(ids, vec![1_000_000 + 257 * 512 + 256]);
+    }
+
     // --- Bank index bounds ---
 
     #[test]
@@ -1323,5 +1423,51 @@ mod tests {
         let mut sink = SnsEventSink::create(path, opts).unwrap();
         let result = sink.write_hits(99, &batch);
         assert!(result.is_err());
+    }
+
+    // --- Non-monotonic pulse timestamps ---
+
+    #[test]
+    fn test_non_monotonic_pulse_timestamp_rejected() {
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // First pulse at timestamp 2000 (25ns ticks).
+        let batch1 = make_hit_batch(2000, &[0], &[0], &[100]);
+        sink.write_hits(0, &batch1).unwrap();
+
+        // Second pulse at earlier timestamp 1000 — should fail.
+        let batch2 = make_hit_batch(1000, &[1], &[1], &[200]);
+        let result = sink.write_hits(0, &batch2);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("non-monotonic"),
+            "Expected non-monotonic error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_non_monotonic_regression_intermediate_decrease() {
+        // Regression: sequence 1000→2000→1500 must be rejected even though
+        // 1500 > run_start (1000). The check must compare against the
+        // *previous* pulse, not just run start.
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        sink.write_hits(0, &make_hit_batch(1000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(2000, &[1], &[1], &[200]))
+            .unwrap();
+        // 1500 < 2000 (previous pulse) → must error.
+        let result = sink.write_hits(0, &make_hit_batch(1500, &[2], &[2], &[300]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-monotonic"),);
     }
 }
