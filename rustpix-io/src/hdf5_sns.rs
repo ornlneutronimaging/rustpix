@@ -676,8 +676,10 @@ impl SnsEventSink {
             overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
 
             // Derive end_time by adding duration to the human-supplied start_time.
+            // Truncate to whole seconds — the exact duration is already stored
+            // as an f64 in the `duration` dataset.
             if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
-                let end_epoch = start_epoch + duration_s.ceil() as u64;
+                let end_epoch = start_epoch + duration_s as u64;
                 let end_time = epoch_secs_to_iso8601(end_epoch);
                 overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
             }
