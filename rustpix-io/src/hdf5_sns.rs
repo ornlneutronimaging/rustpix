@@ -240,24 +240,8 @@ impl SnsBankEventWriter {
             return Ok(0);
         }
 
-        // event_index: start of this pulse's events
-        append_slice(
-            &self.event_index,
-            self.pulse_count as usize,
-            &[self.event_count],
-        )?;
-
-        // event_time_zero: pulse time in seconds
-        append_slice(
-            &self.event_time_zero,
-            self.pulse_count as usize,
-            &[pulse_time_s],
-        )?;
-        self.pulse_count += 1;
-
-        // Pixel IDs — remap through chip-gap positions.  Events that land
-        // on a gap pixel are silently dropped; coordinates beyond the gap are
-        // shifted to close the gap.
+        // 1. Filter events first — remap through chip-gap positions, drop
+        //    gap pixels and out-of-bounds coordinates.
         let mut pixel_ids = Vec::with_capacity(n);
         let mut tof_us = Vec::with_capacity(n);
         for i in 0..n {
@@ -269,9 +253,31 @@ impl SnsBankEventWriter {
             let Some(py) = remap_gap(raw_y, &bank.gap_rows) else {
                 continue;
             };
+            if px >= bank.width || py >= bank.height {
+                continue; // out-of-bounds — skip
+            }
             pixel_ids.push(bank.pixel_id_offset + py * bank.width + px);
             tof_us.push((f64::from(batch.hits.tof[i]) * US_PER_TICK) as f32);
         }
+
+        if pixel_ids.is_empty() {
+            return Ok(0); // no surviving events — no pulse entry
+        }
+
+        // 2. Write pulse metadata (only if events survived filtering)
+        append_slice(
+            &self.event_index,
+            self.pulse_count as usize,
+            &[self.event_count],
+        )?;
+        append_slice(
+            &self.event_time_zero,
+            self.pulse_count as usize,
+            &[pulse_time_s],
+        )?;
+        self.pulse_count += 1;
+
+        // 3. Write events
         append_slice(&self.event_id, self.event_count as usize, &pixel_ids)?;
         append_slice(&self.event_time_offset, self.event_count as usize, &tof_us)?;
 
@@ -294,21 +300,8 @@ impl SnsBankEventWriter {
             return Ok(0);
         }
 
-        // event_index + event_time_zero
-        append_slice(
-            &self.event_index,
-            self.pulse_count as usize,
-            &[self.event_count],
-        )?;
-        append_slice(
-            &self.event_time_zero,
-            self.pulse_count as usize,
-            &[pulse_time_s],
-        )?;
-        self.pulse_count += 1;
-
-        // Pixel IDs — convert super-resolution coords to pixel coords,
-        // remap through chip-gap positions, and drop gap-pixel events.
+        // 1. Filter events first — convert super-resolution coords to pixel
+        //    coords, remap through chip-gap positions, and drop gap/OOB events.
         let inv = 1.0 / super_resolution_factor;
         let mut pixel_ids = Vec::with_capacity(n);
         let mut tof_us = Vec::with_capacity(n);
@@ -321,9 +314,31 @@ impl SnsBankEventWriter {
             let Some(py) = remap_gap(raw_y, &bank.gap_rows) else {
                 continue;
             };
+            if px >= bank.width || py >= bank.height {
+                continue; // out-of-bounds — skip
+            }
             pixel_ids.push(bank.pixel_id_offset + py * bank.width + px);
             tof_us.push((f64::from(batch.neutrons.tof[i]) * US_PER_TICK) as f32);
         }
+
+        if pixel_ids.is_empty() {
+            return Ok(0); // no surviving events — no pulse entry
+        }
+
+        // 2. Write pulse metadata (only if events survived filtering)
+        append_slice(
+            &self.event_index,
+            self.pulse_count as usize,
+            &[self.event_count],
+        )?;
+        append_slice(
+            &self.event_time_zero,
+            self.pulse_count as usize,
+            &[pulse_time_s],
+        )?;
+        self.pulse_count += 1;
+
+        // 3. Write events
         append_slice(&self.event_id, self.event_count as usize, &pixel_ids)?;
         append_slice(&self.event_time_offset, self.event_count as usize, &tof_us)?;
 
@@ -1469,5 +1484,242 @@ mod tests {
         let result = sink.write_hits(0, &make_hit_batch(1500, &[2], &[2], &[300]));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("non-monotonic"),);
+    }
+
+    // --- Out-of-bounds coordinate filtering (Bug 2) ---
+
+    #[test]
+    fn test_hit_out_of_bounds_dropped() {
+        // Bank is 512×512. A hit at remapped (5, 3) is valid, but a hit at
+        // raw coordinate 520 (no gaps) remaps to 520 which is >= 512 and
+        // must be dropped.
+        let mut opts = make_test_options();
+        opts.banks[0].gap_columns = vec![];
+        opts.banks[0].gap_rows = vec![];
+        // Two hits: (5, 3) valid, (520, 3) out-of-bounds
+        let batch = make_hit_batch(1000, &[5, 520], &[3, 3], &[100, 200]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        // Only the in-bounds hit survives: offset + 3*512 + 5
+        assert_eq!(ids, vec![1_000_000 + 3 * 512 + 5]);
+    }
+
+    #[test]
+    fn test_neutron_out_of_bounds_dropped() {
+        // Same as above but for neutrons. Super-resolution factor 1.0,
+        // no gaps, one valid neutron and one OOB.
+        let mut opts = make_test_options();
+        opts.banks[0].gap_columns = vec![];
+        opts.banks[0].gap_rows = vec![];
+        opts.super_resolution_factor = 1.0;
+        // Two neutrons: (5.0, 3.0) valid, (520.0, 3.0) out-of-bounds
+        let batch = make_neutron_batch(1000, &[5.0, 520.0], &[3.0, 3.0], &[100, 200]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_neutrons(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let ids: Vec<u32> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(ids, vec![1_000_000 + 3 * 512 + 5]);
+    }
+
+    // --- Pulse metadata filtering (Bug 3) ---
+
+    #[test]
+    fn test_all_gap_pulse_no_pulse_entry() {
+        // A pulse where all hits land on gap pixels should produce no pulse
+        // array entries and total_pulses = 0.
+        let opts = make_test_options();
+        // Both hits at gap columns (256, 257)
+        let batch = make_hit_batch(1000, &[256, 257], &[0, 0], &[100, 200]);
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let entry = f.group("entry").unwrap();
+
+        let tp: u64 = entry
+            .dataset("total_pulses")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tp, 0, "All-gap pulse should not increment total_pulses");
+
+        let tc: u64 = entry
+            .dataset("total_counts")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tc, 0);
+
+        // No pulse entries should have been written
+        let etz: Vec<f64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_time_zero")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert!(
+            etz.is_empty(),
+            "No event_time_zero entries for all-gap pulse"
+        );
+
+        let idx: Vec<u64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_index")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert!(idx.is_empty(), "No event_index entries for all-gap pulse");
+    }
+
+    #[test]
+    fn test_mixed_gap_and_valid_pulses() {
+        // First pulse: all hits on gaps → no pulse entry.
+        // Second pulse: one valid hit → exactly 1 pulse entry.
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // Pulse 1: all gap hits
+        let gap_batch = make_hit_batch(1000, &[256, 257], &[0, 0], &[100, 200]);
+        sink.write_hits(0, &gap_batch).unwrap();
+
+        // Pulse 2: one valid hit at (5, 3)
+        let valid_batch = make_hit_batch(2000, &[5], &[3], &[300]);
+        sink.write_hits(0, &valid_batch).unwrap();
+
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let entry = f.group("entry").unwrap();
+
+        let tp: u64 = entry
+            .dataset("total_pulses")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tp, 1, "Only the valid pulse should be counted");
+
+        let tc: u64 = entry
+            .dataset("total_counts")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tc, 1);
+
+        let etz: Vec<f64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_time_zero")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(etz.len(), 1, "Only one pulse entry");
+
+        let idx: Vec<u64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_index")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(idx, vec![0u64], "Single pulse starts at event 0");
+    }
+
+    // --- TDC rebase monotonicity (Bug 1) ---
+
+    #[test]
+    fn test_monotonic_rebased_timestamps_accepted() {
+        // Simulates what the CLI rebase does: File 1 has timestamps
+        // 1000→2000, File 2 has timestamps 500→1500 rebased to 2001→2501.
+        // The sink should accept all four pulses without error.
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // File 1 timestamps (no offset)
+        sink.write_hits(0, &make_hit_batch(1000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(2000, &[1], &[1], &[200]))
+            .unwrap();
+
+        // File 2 timestamps rebased: 500 + 2001 = 2501, 1500 + 2001 = 3501
+        let tdc_offset: u64 = 2001; // last_tdc_seen(2000) + 1
+        sink.write_hits(0, &make_hit_batch(500 + tdc_offset, &[2], &[2], &[300]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(1500 + tdc_offset, &[3], &[3], &[400]))
+            .unwrap();
+
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let entry = f.group("entry").unwrap();
+
+        let tp: u64 = entry
+            .dataset("total_pulses")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tp, 4);
+
+        let tc: u64 = entry
+            .dataset("total_counts")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tc, 4);
+
+        // Verify pulse times are monotonically increasing
+        let etz: Vec<f64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_time_zero")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(etz.len(), 4);
+        for i in 1..etz.len() {
+            assert!(
+                etz[i] > etz[i - 1],
+                "Pulse times must be monotonically increasing: etz[{}]={} <= etz[{}]={}",
+                i,
+                etz[i],
+                i - 1,
+                etz[i - 1]
+            );
+        }
     }
 }

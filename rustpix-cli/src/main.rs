@@ -725,10 +725,23 @@ fn run_process_sns_hdf5(
     let mut total_hits = 0usize;
     let mut total_neutrons = 0usize;
 
+    // TDC rebase state: each TPX3 file has an independent TDC clock, so when
+    // concatenating multiple files the timestamps must be shifted to stay
+    // monotonically increasing across file boundaries.
+    let mut tdc_offset: u64 = 0;
+    let mut last_tdc_seen: u64 = 0;
+    let mut is_first_file = true;
+
     for path in input {
         if verbose {
             eprintln!("Reading: {}", path.display());
         }
+
+        if !is_first_file {
+            tdc_offset = last_tdc_seen + 1;
+        }
+        is_first_file = false;
+
         let reader = Tpx3FileReader::open(path)?;
 
         if out_of_core {
@@ -739,8 +752,10 @@ fn run_process_sns_hdf5(
                 let batch = batch?;
                 total_hits = total_hits.saturating_add(batch.hits_processed);
                 total_neutrons = total_neutrons.saturating_add(batch.neutrons.len());
+                let rebased_tdc = batch.tdc_timestamp_25ns.saturating_add(tdc_offset);
+                last_tdc_seen = last_tdc_seen.max(rebased_tdc);
                 let event_batch = NeutronEventBatch {
-                    tdc_timestamp_25ns: batch.tdc_timestamp_25ns,
+                    tdc_timestamp_25ns: rebased_tdc,
                     neutrons: batch.neutrons,
                 };
                 sink.write_neutrons(0, &event_batch)
@@ -754,8 +769,10 @@ fn run_process_sns_hdf5(
                 let neutrons =
                     cluster_and_extract_batch(&mut hits, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
+                let rebased_tdc = event.tdc_timestamp_25ns.saturating_add(tdc_offset);
+                last_tdc_seen = last_tdc_seen.max(rebased_tdc);
                 let event_batch = NeutronEventBatch {
-                    tdc_timestamp_25ns: event.tdc_timestamp_25ns,
+                    tdc_timestamp_25ns: rebased_tdc,
                     neutrons,
                 };
                 sink.write_neutrons(0, &event_batch)
