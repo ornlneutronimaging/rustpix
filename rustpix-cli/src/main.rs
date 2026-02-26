@@ -999,7 +999,7 @@ fn accumulate_neutrons_into_histogram(
         let y = (batch.y[i] * inv).round();
         let tof = batch.tof[i];
 
-        if x < 0.0 || y < 0.0 {
+        if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
             continue;
         }
         let x = x as usize;

@@ -259,7 +259,11 @@ Range: 1,000,000 to 1,262,143
 ```
 
 Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps).
-The SNS schema uses 512x512. Coordinate remapping is the caller's responsibility.
+The SNS schema uses a 512x512 pixel grid. The SNS writer handles the
+514x514→512x512 gap-pixel remapping automatically via `SnsBankConfig.gap_columns`
+and `SnsBankConfig.gap_rows` (e.g., `SnsWriteOptions::venus_defaults()` sets
+these for VENUS). Callers should provide raw 514x514 TPX3 coordinates and must
+not pre-remap them.
 
 ### Time conversions
 

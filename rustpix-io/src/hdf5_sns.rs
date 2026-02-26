@@ -316,8 +316,13 @@ impl SnsBankEventWriter {
         let mut pixel_ids = Vec::with_capacity(n);
         let mut tof_us = Vec::with_capacity(n);
         for i in 0..n {
-            let raw_x = (batch.neutrons.x[i] * inv).round().max(0.0) as u32;
-            let raw_y = (batch.neutrons.y[i] * inv).round().max(0.0) as u32;
+            let fx = (batch.neutrons.x[i] * inv).round();
+            let fy = (batch.neutrons.y[i] * inv).round();
+            if !fx.is_finite() || !fy.is_finite() || fx < 0.0 || fy < 0.0 {
+                continue;
+            }
+            let raw_x = fx as u32;
+            let raw_y = fy as u32;
             let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
                 continue;
             };
@@ -672,7 +677,7 @@ impl SnsEventSink {
 
             // Derive end_time by adding duration to the human-supplied start_time.
             if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
-                let end_epoch = start_epoch + duration_s.round() as u64;
+                let end_epoch = start_epoch + duration_s.ceil() as u64;
                 let end_time = epoch_secs_to_iso8601(end_epoch);
                 overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
             }

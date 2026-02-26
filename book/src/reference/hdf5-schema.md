@@ -196,7 +196,7 @@ event_id = 1,000,000 + row * 512 + col
 Range: 1,000,000 to 1,262,143
 ```
 
-Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps). The SNS schema uses 512x512.
+Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps), whereas the SNS schema uses a 512x512 pixel grid. The SNS writer handles the 514x514→512x512 gap-pixel remapping automatically via `SnsBankConfig.gap_columns`/`gap_rows`, so callers should provide logical detector coordinates and must not pre-remap them.
 
 ## Format Selection Guide
 
