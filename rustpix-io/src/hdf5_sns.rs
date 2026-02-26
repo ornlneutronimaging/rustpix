@@ -927,7 +927,10 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
         30,
         31,
     ];
-    for &md in &month_days[..((month as usize).saturating_sub(1))] {
+    if month == 0 || month > 12 || day == 0 {
+        return None;
+    }
+    for &md in &month_days[..(month as usize - 1)] {
         days += i64::from(md);
     }
     days += i64::from(day.saturating_sub(1));
