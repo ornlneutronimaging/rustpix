@@ -934,9 +934,14 @@ fn run_process_tiff(
     // Write TIFF stack.
     write_tiff_stack_file(output, &data, tof_bins, width, height, bit_depth)?;
 
-    // Write spectrum CSV alongside the TIFF.
+    // Write spectrum CSV alongside the TIFF, unless the CSV path collides
+    // with the TIFF output (e.g. user passed `-o foo.csv -f tiff`).
     let spectrum_path = output.with_extension("csv");
-    write_spectrum_csv(&spectrum_path, &data, tof_bins, width, height, bin_width)?;
+    if spectrum_path == output {
+        eprintln!("Warning: skipping spectrum CSV — output path already has .csv extension");
+    } else {
+        write_spectrum_csv(&spectrum_path, &data, tof_bins, width, height, bin_width)?;
+    }
     if verbose {
         eprintln!("Wrote spectrum to: {}", spectrum_path.display());
     }

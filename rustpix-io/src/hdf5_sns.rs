@@ -526,6 +526,11 @@ impl SnsEventSink {
     /// # Errors
     /// Returns an error if the bank index is out of bounds or HDF5 write fails.
     pub fn write_hits(&mut self, bank_index: usize, batch: &EventBatch) -> Result<()> {
+        if self.finalized {
+            return Err(Error::InvalidFormat(
+                "cannot write after finalization".into(),
+            ));
+        }
         if bank_index >= self.writers.len() {
             return Err(Error::InvalidFormat(format!(
                 "bank index {bank_index} out of range (have {} banks)",
@@ -556,6 +561,11 @@ impl SnsEventSink {
     /// # Errors
     /// Returns an error if the bank index is out of bounds or HDF5 write fails.
     pub fn write_neutrons(&mut self, bank_index: usize, batch: &NeutronEventBatch) -> Result<()> {
+        if self.finalized {
+            return Err(Error::InvalidFormat(
+                "cannot write after finalization".into(),
+            ));
+        }
         if bank_index >= self.writers.len() {
             return Err(Error::InvalidFormat(format!(
                 "bank index {bank_index} out of range (have {} banks)",
@@ -587,6 +597,11 @@ impl SnsEventSink {
     /// # Errors
     /// Returns an error if the HDF5 write fails.
     pub fn write_daslogs(&self, logs: &[DasLogEntry]) -> Result<()> {
+        if self.finalized {
+            return Err(Error::InvalidFormat(
+                "cannot write after finalization".into(),
+            ));
+        }
         let daslogs = self.entry.group("DASlogs")?;
         for log in logs {
             let group = daslogs.create_group(&log.name)?;
@@ -2022,6 +2037,48 @@ mod tests {
         assert!(
             (duration - expected_dur).abs() < 1e-12,
             "Expected duration {expected_dur}, got {duration}"
+        );
+    }
+
+    // --- Post-finalization guard ---
+
+    #[test]
+    fn test_write_hits_after_finalize_rejected() {
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_hits(0, &make_hit_batch(1000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.finalize().unwrap();
+
+        let err = sink
+            .write_hits(0, &make_hit_batch(2000, &[1], &[1], &[200]))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("finalization"),
+            "Expected finalization error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_write_neutrons_after_finalize_rejected() {
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+        sink.write_neutrons(0, &make_neutron_batch(1000, &[0.5], &[0.5], &[100]))
+            .unwrap();
+        sink.finalize().unwrap();
+
+        let err = sink
+            .write_neutrons(0, &make_neutron_batch(2000, &[1.5], &[1.5], &[200]))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("finalization"),
+            "Expected finalization error, got: {err}"
         );
     }
 }
