@@ -534,12 +534,13 @@ impl SnsEventSink {
         }
 
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        self.validate_and_track_pulse(pulse_ns, bank_index)?;
+        self.validate_pulse_monotonicity(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
         let written = writer.append_hits(bank, batch, pulse_ns)?;
 
         if written > 0 {
+            self.track_written_pulse(pulse_ns);
             self.total_counts += written as u64;
             if self.counted_pulse_ns.insert(pulse_ns) {
                 self.total_pulses += 1;
@@ -563,13 +564,14 @@ impl SnsEventSink {
         }
 
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        self.validate_and_track_pulse(pulse_ns, bank_index)?;
+        self.validate_pulse_monotonicity(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
         let written =
             writer.append_neutrons(bank, batch, pulse_ns, self.options.super_resolution_factor)?;
 
         if written > 0 {
+            self.track_written_pulse(pulse_ns);
             self.total_counts += written as u64;
             if self.counted_pulse_ns.insert(pulse_ns) {
                 self.total_pulses += 1;
@@ -656,16 +658,21 @@ impl SnsEventSink {
         Ok(())
     }
 
-    /// Validate per-bank monotonicity and track global min/max timestamps.
+    /// Validate per-bank monotonicity.
     ///
     /// Monotonicity is enforced **per bank**: each bank's pulse stream must be
     /// independently non-decreasing, but different banks may be written in any
     /// order (e.g., all pulses for bank 0, then all pulses for bank 1).
     ///
+    /// This is called for every pulse *before* event filtering.  The global
+    /// min/max tracking is deferred to [`Self::track_written_pulse`] so that
+    /// empty pulses (all events filtered) do not affect `event_time_zero` or
+    /// duration metadata.
+    ///
     /// # Errors
     /// Returns an error if the pulse timestamp is earlier than the previous
     /// pulse *for the same bank* (non-monotonic).
-    fn validate_and_track_pulse(&mut self, pulse_ns: u64, bank_index: usize) -> Result<()> {
+    fn validate_pulse_monotonicity(&mut self, pulse_ns: u64, bank_index: usize) -> Result<()> {
         let bank_last = self.last_pulse_ns_per_bank[bank_index];
         if pulse_ns < bank_last {
             return Err(Error::InvalidFormat(format!(
@@ -674,9 +681,14 @@ impl SnsEventSink {
             )));
         }
         self.last_pulse_ns_per_bank[bank_index] = pulse_ns;
+        Ok(())
+    }
+
+    /// Update global min/max pulse timestamps for a pulse that produced at
+    /// least one written event.  Called only when `written > 0`.
+    fn track_written_pulse(&mut self, pulse_ns: u64) {
         self.min_pulse_ns = Some(self.min_pulse_ns.map_or(pulse_ns, |m| m.min(pulse_ns)));
         self.max_pulse_ns = self.max_pulse_ns.max(pulse_ns);
-        Ok(())
     }
 }
 
@@ -1691,6 +1703,83 @@ mod tests {
             .read_raw()
             .unwrap();
         assert_eq!(idx, vec![0u64], "Single pulse starts at event 0");
+    }
+
+    // --- Empty pulse time-origin exclusion ---
+
+    #[test]
+    fn test_empty_pulse_does_not_shift_time_origin() {
+        // Empty pulse at tdc=1000, valid pulse at tdc=2000.
+        // min_pulse_ns must be based on tdc=2000 (the first *written* pulse),
+        // so event_time_zero[0] must be 0.0, NOT offset by the empty pulse.
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // Pulse 1 (tdc=1000): all gap-column hits → 0 events written
+        let gap_batch = make_hit_batch(1000, &[256, 257], &[0, 0], &[100, 200]);
+        sink.write_hits(0, &gap_batch).unwrap();
+
+        // Pulse 2 (tdc=2000): one valid hit
+        let valid_batch = make_hit_batch(2000, &[5], &[3], &[300]);
+        sink.write_hits(0, &valid_batch).unwrap();
+
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+
+        let etz: Vec<f64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_time_zero")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(etz.len(), 1, "Only the non-empty pulse gets an entry");
+        assert!(
+            (etz[0] - 0.0).abs() < 1e-12,
+            "First written pulse must be time-origin zero, got {}",
+            etz[0]
+        );
+    }
+
+    #[test]
+    fn test_empty_pulse_does_not_shift_duration() {
+        // Empty pulse at tdc=5000, two valid pulses at tdc=1000 and tdc=2000.
+        // max_pulse_ns should be based on tdc=2000 (not tdc=5000), so
+        // duration should reflect only the written pulses.
+        let opts = make_test_options();
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // Pulse 1 (tdc=1000): valid hit
+        sink.write_hits(0, &make_hit_batch(1000, &[5], &[3], &[100]))
+            .unwrap();
+
+        // Pulse 2 (tdc=2000): valid hit
+        sink.write_hits(0, &make_hit_batch(2000, &[5], &[3], &[200]))
+            .unwrap();
+
+        // Pulse 3 (tdc=5000): all gap hits → 0 written events
+        sink.write_hits(0, &make_hit_batch(5000, &[256], &[0], &[300]))
+            .unwrap();
+
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let entry = f.group("entry").unwrap();
+
+        let duration: f64 = entry.dataset("duration").unwrap().read_scalar().unwrap();
+        // Duration should be (2000 - 1000) * 25 ns = 25 µs = 25e-6 s
+        let expected = f64::from(2000 - 1000) * 25e-9;
+        assert!(
+            (duration - expected).abs() < 1e-12,
+            "Duration must reflect only written pulses: expected {expected}, got {duration}"
+        );
     }
 
     // --- TDC rebase monotonicity (Bug 1) ---
