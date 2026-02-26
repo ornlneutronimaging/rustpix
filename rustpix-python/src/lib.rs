@@ -536,28 +536,42 @@ fn process_tpx3_neutrons(
     }
 
     if collect {
-        // Determine if we need per-pulse SNS export.
-        let sns_output = processing
+        // When time_ordered=True and an HDF5 output path is given, stream
+        // per-pulse to preserve pulse timestamps in event_time_zero/event_index.
+        let hdf5_output = processing
             .output_path
             .as_deref()
-            .filter(|p| detect_hdf5_format(p) == "sns");
+            .filter(|_| processing.time_ordered);
 
         let mut already_written = false;
-        let neutrons = if let Some(output_path) = sns_output.filter(|_| processing.time_ordered) {
-            // Stream per-pulse: cluster each pulse separately and write to SNS
+        let neutrons = if let Some(output_path) = hdf5_output {
+            // Stream per-pulse: cluster each pulse separately and write to
             // HDF5 with the correct tdc_timestamp_25ns.
             let stream = reader
                 .stream_time_ordered_events()
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            let n = collect_and_write_sns_neutrons(
-                stream,
-                algo,
-                &clustering,
-                &extraction,
-                &params,
-                output_path,
-                extraction.super_resolution_factor,
-            )?;
+            let n = if detect_hdf5_format(output_path) == "sns" {
+                collect_and_write_sns_neutrons(
+                    stream,
+                    algo,
+                    &clustering,
+                    &extraction,
+                    &params,
+                    output_path,
+                    extraction.super_resolution_factor,
+                )?
+            } else {
+                collect_and_write_nexus_neutrons(
+                    stream,
+                    algo,
+                    &clustering,
+                    &extraction,
+                    &params,
+                    output_path,
+                    extraction.super_resolution_factor,
+                    detector.detector_dimensions(),
+                )?
+            };
             already_written = true;
             n
         } else if processing.time_ordered {
@@ -854,10 +868,63 @@ fn collect_and_write_sns_neutrons(
     Ok(all_neutrons)
 }
 
+/// Stream per-pulse events, cluster each pulse, write to generic NeXus HDF5,
+/// and collect all neutrons into a single batch for return to Python.
+#[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
+fn collect_and_write_nexus_neutrons(
+    stream: TimeOrderedEventStream,
+    algo: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    extraction: &ExtractionConfig,
+    params: &AlgorithmParams,
+    output_path: &str,
+    super_resolution_factor: f64,
+    detector_dims: (usize, usize),
+) -> PyResult<NeutronBatch> {
+    let path = std::path::Path::new(output_path);
+    let options = NeutronWriteOptions {
+        x_size: detector_dims.0 as u32,
+        y_size: detector_dims.1 as u32,
+        super_resolution_factor,
+        chunk_events: 100_000,
+        compression: Some(1),
+        shuffle: true,
+        flight_path_m: None,
+        tof_offset_ns: None,
+        energy_axis_kind: Some("tof".to_string()),
+        include_xy: true,
+        include_tot: true,
+        include_chip_id: true,
+        include_n_hits: true,
+    };
+
+    let mut sink = Hdf5NeutronSink::create(path, options)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create HDF5: {e}")))?;
+
+    let mut all_neutrons = NeutronBatch::default();
+    for event in stream {
+        let tdc_ts = event.tdc_timestamp_25ns;
+        let mut hits = event.hits;
+        let neutrons = cluster_and_extract_batch(&mut hits, algo, clustering, extraction, params)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        all_neutrons.append(&neutrons);
+        let event_batch = NeutronEventBatch {
+            tdc_timestamp_25ns: tdc_ts,
+            neutrons,
+        };
+        sink.write_neutrons(&event_batch)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed writing neutrons: {e}")))?;
+    }
+
+    drop(sink);
+    Ok(all_neutrons)
+}
+
 /// Write a `NeutronBatch` to a generic NeXus HDF5 file.
 ///
 /// Rejects SNS `NXsnsevent` output (`*.nxs.h5`) because this path lacks
 /// per-pulse TDC timestamps required for correct `event_time_zero`/`event_index`.
+/// For per-pulse generic NeXus output, use [`collect_and_write_nexus_neutrons`].
 fn write_neutrons_hdf5(
     output_path: &str,
     neutrons: &NeutronBatch,

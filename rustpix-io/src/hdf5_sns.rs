@@ -367,7 +367,13 @@ pub struct SnsEventSink {
     writers: Vec<(SnsBankConfig, SnsBankEventWriter)>,
     options: SnsWriteOptions,
     run_start_ns: Option<u64>,
-    last_pulse_ns: u64,
+    /// Per-bank last pulse timestamp for monotonicity enforcement.
+    /// Each bank's event stream must be independently monotonic, but banks
+    /// may be written in any order (e.g., all pulses for bank 0, then bank 1).
+    last_pulse_ns_per_bank: Vec<u64>,
+    /// Global maximum pulse timestamp across all banks, used for computing
+    /// run duration in [`Self::finalize`].
+    max_pulse_ns: u64,
     /// Set of pulse timestamps already counted toward `total_pulses`, used to
     /// de-duplicate counts when the same physical pulse is written to multiple
     /// banks regardless of write ordering.
@@ -472,13 +478,15 @@ impl SnsEventSink {
         set_attr_str_group(&sample, "NX_class", "NXsample")?;
         write_str_dataset(&sample, "name", "")?;
 
+        let num_banks = writers.len();
         Ok(Self {
             _file: file,
             entry,
             writers,
             options,
             run_start_ns: None,
-            last_pulse_ns: 0,
+            last_pulse_ns_per_bank: vec![0u64; num_banks],
+            max_pulse_ns: 0,
             counted_pulse_ns: HashSet::new(),
             total_counts: 0,
             total_pulses: 0,
@@ -501,7 +509,7 @@ impl SnsEventSink {
         }
 
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        let pulse_time_s = self.pulse_time_seconds(pulse_ns)?;
+        let pulse_time_s = self.pulse_time_seconds(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
         let written = writer.append_hits(bank, batch, pulse_time_s)?;
@@ -530,7 +538,7 @@ impl SnsEventSink {
         }
 
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        let pulse_time_s = self.pulse_time_seconds(pulse_ns)?;
+        let pulse_time_s = self.pulse_time_seconds(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
         let written = writer.append_neutrons(
@@ -608,7 +616,7 @@ impl SnsEventSink {
         // not Unix-epoch nanoseconds — the delta gives the measurement duration.
         if let Some(first_pulse_ns) = self.run_start_ns {
             let duration_s =
-                (self.last_pulse_ns.saturating_sub(first_pulse_ns)) as f64 / 1_000_000_000.0;
+                (self.max_pulse_ns.saturating_sub(first_pulse_ns)) as f64 / 1_000_000_000.0;
             overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
 
             // Derive end_time by adding duration to the human-supplied start_time.
@@ -624,17 +632,23 @@ impl SnsEventSink {
 
     /// Compute pulse time in seconds relative to run start.
     ///
+    /// Monotonicity is enforced **per bank**: each bank's pulse stream must be
+    /// independently non-decreasing, but different banks may be written in any
+    /// order (e.g., all pulses for bank 0, then all pulses for bank 1).
+    ///
     /// # Errors
     /// Returns an error if the pulse timestamp is earlier than the previous
-    /// pulse (non-monotonic).
-    fn pulse_time_seconds(&mut self, pulse_ns: u64) -> Result<f64> {
-        if pulse_ns < self.last_pulse_ns {
+    /// pulse *for the same bank* (non-monotonic).
+    fn pulse_time_seconds(&mut self, pulse_ns: u64, bank_index: usize) -> Result<f64> {
+        let bank_last = self.last_pulse_ns_per_bank[bank_index];
+        if pulse_ns < bank_last {
             return Err(Error::InvalidFormat(format!(
-                "non-monotonic pulse timestamp: {pulse_ns} ns < previous {prev} ns",
-                prev = self.last_pulse_ns
+                "non-monotonic pulse timestamp for bank {bank_index}: \
+                 {pulse_ns} ns < previous {bank_last} ns",
             )));
         }
-        self.last_pulse_ns = pulse_ns;
+        self.last_pulse_ns_per_bank[bank_index] = pulse_ns;
+        self.max_pulse_ns = self.max_pulse_ns.max(pulse_ns);
         if let Some(start) = self.run_start_ns {
             Ok((pulse_ns - start) as f64 / 1_000_000_000.0)
         } else {
@@ -1721,5 +1735,96 @@ mod tests {
                 etz[i - 1]
             );
         }
+    }
+
+    // --- Per-bank monotonicity ---
+
+    #[test]
+    fn test_sequential_multi_bank_writes_accepted() {
+        // Write all pulses for bank 0, then all pulses for bank 1.
+        // Bank 1's first pulse (tdc=1000) is less than bank 0's last (tdc=3000),
+        // but per-bank ordering is valid.
+        let mut opts = make_test_options();
+        opts.banks.push(SnsBankConfig {
+            name: "bank200".to_string(),
+            pixel_id_offset: 2_000_000,
+            width: 512,
+            height: 512,
+            gap_columns: vec![256, 257],
+            gap_rows: vec![256, 257],
+        });
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // Bank 0: timestamps 1000, 2000, 3000
+        sink.write_hits(0, &make_hit_batch(1000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(2000, &[1], &[1], &[200]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(3000, &[2], &[2], &[300]))
+            .unwrap();
+
+        // Bank 1: timestamps 1000, 2000, 3000 (restart from 1000 is fine)
+        sink.write_hits(1, &make_hit_batch(1000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.write_hits(1, &make_hit_batch(2000, &[1], &[1], &[200]))
+            .unwrap();
+        sink.write_hits(1, &make_hit_batch(3000, &[2], &[2], &[300]))
+            .unwrap();
+
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+        let entry = f.group("entry").unwrap();
+
+        let tc: u64 = entry
+            .dataset("total_counts")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tc, 6); // 3 per bank
+
+        let tp: u64 = entry
+            .dataset("total_pulses")
+            .unwrap()
+            .read_scalar()
+            .unwrap();
+        assert_eq!(tp, 3); // 3 unique pulse timestamps, deduplicated
+
+        // Each bank has 3 events and 3 pulse entries
+        for bank_name in &["bank100_events", "bank200_events"] {
+            let bank = f.group(&format!("entry/{bank_name}")).unwrap();
+            let ids: Vec<u32> = bank.dataset("event_id").unwrap().read_raw().unwrap();
+            assert_eq!(ids.len(), 3);
+            let etz: Vec<f64> = bank.dataset("event_time_zero").unwrap().read_raw().unwrap();
+            assert_eq!(etz.len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_per_bank_non_monotonic_rejected() {
+        // Within a single bank, non-monotonic timestamps must still be rejected.
+        let mut opts = make_test_options();
+        opts.banks.push(SnsBankConfig {
+            name: "bank200".to_string(),
+            pixel_id_offset: 2_000_000,
+            width: 512,
+            height: 512,
+            gap_columns: vec![256, 257],
+            gap_rows: vec![256, 257],
+        });
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // Bank 1: timestamps 2000 then 1000 — non-monotonic within same bank
+        sink.write_hits(1, &make_hit_batch(2000, &[0], &[0], &[100]))
+            .unwrap();
+        let result = sink.write_hits(1, &make_hit_batch(1000, &[1], &[1], &[200]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-monotonic"));
     }
 }
