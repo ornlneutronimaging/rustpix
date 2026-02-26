@@ -23,7 +23,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           working-directory: rustpix-gui
-          target: x86_64-unknown-linux-gnu
+          target: x86_64
           manylinux: 2_28
           args: --release --out dist
           before-script-linux: |
