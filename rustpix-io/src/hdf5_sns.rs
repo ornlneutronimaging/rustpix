@@ -172,6 +172,10 @@ struct SnsBankEventWriter {
     total_counts_ds: Dataset,
     event_count: u64,
     pulse_count: u64,
+    /// Buffered absolute pulse timestamps (in nanoseconds).  Written to
+    /// `event_time_zero` as relative seconds during [`SnsEventSink::finalize`],
+    /// once the global minimum timestamp across all banks is known.
+    pulse_timestamps_ns: Vec<u64>,
 }
 
 impl SnsBankEventWriter {
@@ -224,16 +228,21 @@ impl SnsBankEventWriter {
             total_counts_ds,
             event_count: 0,
             pulse_count: 0,
+            pulse_timestamps_ns: Vec::new(),
         })
     }
 
     /// Append hit events, returning the number of events actually written
     /// (may be fewer than the batch size when gap pixels are dropped).
+    ///
+    /// `pulse_ns` is the absolute pulse timestamp in nanoseconds.  It is
+    /// buffered and converted to relative seconds in
+    /// [`Self::write_pulse_times`].
     fn append_hits(
         &mut self,
         bank: &SnsBankConfig,
         batch: &EventBatch,
-        pulse_time_s: f64,
+        pulse_ns: u64,
     ) -> Result<usize> {
         let n = batch.hits.x.len();
         if n == 0 {
@@ -264,17 +273,14 @@ impl SnsBankEventWriter {
             return Ok(0); // no surviving events — no pulse entry
         }
 
-        // 2. Write pulse metadata (only if events survived filtering)
+        // 2. Write event_index and buffer pulse timestamp (event_time_zero
+        //    is written in finalize once the global minimum is known).
         append_slice(
             &self.event_index,
             self.pulse_count as usize,
             &[self.event_count],
         )?;
-        append_slice(
-            &self.event_time_zero,
-            self.pulse_count as usize,
-            &[pulse_time_s],
-        )?;
+        self.pulse_timestamps_ns.push(pulse_ns);
         self.pulse_count += 1;
 
         // 3. Write events
@@ -288,11 +294,15 @@ impl SnsBankEventWriter {
 
     /// Append neutron events, returning the number of events actually written
     /// (may be fewer than the batch size when gap pixels are dropped).
+    ///
+    /// `pulse_ns` is the absolute pulse timestamp in nanoseconds.  It is
+    /// buffered and converted to relative seconds in
+    /// [`Self::write_pulse_times`].
     fn append_neutrons(
         &mut self,
         bank: &SnsBankConfig,
         batch: &NeutronEventBatch,
-        pulse_time_s: f64,
+        pulse_ns: u64,
         super_resolution_factor: f64,
     ) -> Result<usize> {
         let n = batch.neutrons.x.len();
@@ -325,17 +335,14 @@ impl SnsBankEventWriter {
             return Ok(0); // no surviving events — no pulse entry
         }
 
-        // 2. Write pulse metadata (only if events survived filtering)
+        // 2. Write event_index and buffer pulse timestamp (event_time_zero
+        //    is written in finalize once the global minimum is known).
         append_slice(
             &self.event_index,
             self.pulse_count as usize,
             &[self.event_count],
         )?;
-        append_slice(
-            &self.event_time_zero,
-            self.pulse_count as usize,
-            &[pulse_time_s],
-        )?;
+        self.pulse_timestamps_ns.push(pulse_ns);
         self.pulse_count += 1;
 
         // 3. Write events
@@ -345,6 +352,21 @@ impl SnsBankEventWriter {
         let written = pixel_ids.len();
         self.event_count += written as u64;
         Ok(written)
+    }
+
+    /// Flush buffered pulse timestamps to `event_time_zero` as seconds
+    /// relative to `min_start_ns` (the global minimum across all banks).
+    fn write_pulse_times(&self, min_start_ns: u64) -> Result<()> {
+        let times_s: Vec<f64> = self
+            .pulse_timestamps_ns
+            .iter()
+            .map(|&ns| (ns - min_start_ns) as f64 / 1_000_000_000.0)
+            .collect();
+        // Write all pulse times at once (dataset was created empty/extendable).
+        if !times_s.is_empty() {
+            append_slice(&self.event_time_zero, 0, &times_s)?;
+        }
+        Ok(())
     }
 
     fn write_total_counts(&self) -> Result<()> {
@@ -366,7 +388,10 @@ pub struct SnsEventSink {
     entry: Group,
     writers: Vec<(SnsBankConfig, SnsBankEventWriter)>,
     options: SnsWriteOptions,
-    run_start_ns: Option<u64>,
+    /// Global minimum pulse timestamp across all banks.  Computed from the
+    /// minimum first-pulse across every bank and used as the time origin for
+    /// `event_time_zero` (written during [`Self::finalize`]).
+    min_pulse_ns: Option<u64>,
     /// Per-bank last pulse timestamp for monotonicity enforcement.
     /// Each bank's event stream must be independently monotonic, but banks
     /// may be written in any order (e.g., all pulses for bank 0, then bank 1).
@@ -484,7 +509,7 @@ impl SnsEventSink {
             entry,
             writers,
             options,
-            run_start_ns: None,
+            min_pulse_ns: None,
             last_pulse_ns_per_bank: vec![0u64; num_banks],
             max_pulse_ns: 0,
             counted_pulse_ns: HashSet::new(),
@@ -509,10 +534,10 @@ impl SnsEventSink {
         }
 
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        let pulse_time_s = self.pulse_time_seconds(pulse_ns, bank_index)?;
+        self.validate_and_track_pulse(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
-        let written = writer.append_hits(bank, batch, pulse_time_s)?;
+        let written = writer.append_hits(bank, batch, pulse_ns)?;
 
         if written > 0 {
             self.total_counts += written as u64;
@@ -538,15 +563,11 @@ impl SnsEventSink {
         }
 
         let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
-        let pulse_time_s = self.pulse_time_seconds(pulse_ns, bank_index)?;
+        self.validate_and_track_pulse(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
-        let written = writer.append_neutrons(
-            bank,
-            batch,
-            pulse_time_s,
-            self.options.super_resolution_factor,
-        )?;
+        let written =
+            writer.append_neutrons(bank, batch, pulse_ns, self.options.super_resolution_factor)?;
 
         if written > 0 {
             self.total_counts += written as u64;
@@ -602,8 +623,13 @@ impl SnsEventSink {
         }
         self.finalized = true;
 
-        // Per-bank total counts
+        // Compute the global minimum pulse timestamp across all banks.
+        // This is the time origin for event_time_zero.
+        let min_start_ns = self.min_pulse_ns.unwrap_or(0);
+
+        // Per-bank: write buffered pulse times and total counts
         for (_bank, writer) in &self.writers {
+            writer.write_pulse_times(min_start_ns)?;
             writer.write_total_counts()?;
         }
 
@@ -612,11 +638,11 @@ impl SnsEventSink {
         overwrite_u64_dataset(&self.entry, "total_pulses", self.total_pulses)?;
 
         // Compute and write end_time and duration from pulse timestamps.
-        // `run_start_ns` and `last_pulse_ns` are *relative* detector tick counts,
+        // `min_pulse_ns` and `max_pulse_ns` are *relative* detector tick counts,
         // not Unix-epoch nanoseconds — the delta gives the measurement duration.
-        if let Some(first_pulse_ns) = self.run_start_ns {
+        if self.min_pulse_ns.is_some() {
             let duration_s =
-                (self.max_pulse_ns.saturating_sub(first_pulse_ns)) as f64 / 1_000_000_000.0;
+                (self.max_pulse_ns.saturating_sub(min_start_ns)) as f64 / 1_000_000_000.0;
             overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
 
             // Derive end_time by adding duration to the human-supplied start_time.
@@ -630,7 +656,7 @@ impl SnsEventSink {
         Ok(())
     }
 
-    /// Compute pulse time in seconds relative to run start.
+    /// Validate per-bank monotonicity and track global min/max timestamps.
     ///
     /// Monotonicity is enforced **per bank**: each bank's pulse stream must be
     /// independently non-decreasing, but different banks may be written in any
@@ -639,7 +665,7 @@ impl SnsEventSink {
     /// # Errors
     /// Returns an error if the pulse timestamp is earlier than the previous
     /// pulse *for the same bank* (non-monotonic).
-    fn pulse_time_seconds(&mut self, pulse_ns: u64, bank_index: usize) -> Result<f64> {
+    fn validate_and_track_pulse(&mut self, pulse_ns: u64, bank_index: usize) -> Result<()> {
         let bank_last = self.last_pulse_ns_per_bank[bank_index];
         if pulse_ns < bank_last {
             return Err(Error::InvalidFormat(format!(
@@ -648,13 +674,9 @@ impl SnsEventSink {
             )));
         }
         self.last_pulse_ns_per_bank[bank_index] = pulse_ns;
+        self.min_pulse_ns = Some(self.min_pulse_ns.map_or(pulse_ns, |m| m.min(pulse_ns)));
         self.max_pulse_ns = self.max_pulse_ns.max(pulse_ns);
-        if let Some(start) = self.run_start_ns {
-            Ok((pulse_ns - start) as f64 / 1_000_000_000.0)
-        } else {
-            self.run_start_ns = Some(pulse_ns);
-            Ok(0.0)
-        }
+        Ok(())
     }
 }
 
@@ -1826,5 +1848,91 @@ mod tests {
         let result = sink.write_hits(1, &make_hit_batch(1000, &[1], &[1], &[200]));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("non-monotonic"));
+    }
+
+    #[test]
+    fn test_later_bank_with_earlier_timestamps() {
+        // Bank 0 written first with later timestamps (5000, 6000),
+        // then bank 1 written with earlier timestamps (1000, 2000).
+        // event_time_zero must use global min (1000*25=25000 ns) as origin,
+        // so bank 0's first pulse is at (5000*25 - 1000*25)/1e9 seconds
+        // and bank 1's first pulse is at 0.0.
+        let mut opts = make_test_options();
+        opts.banks.push(SnsBankConfig {
+            name: "bank200".to_string(),
+            pixel_id_offset: 2_000_000,
+            width: 512,
+            height: 512,
+            gap_columns: vec![256, 257],
+            gap_rows: vec![256, 257],
+        });
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+
+        let mut sink = SnsEventSink::create(path, opts).unwrap();
+
+        // Bank 0: later timestamps
+        sink.write_hits(0, &make_hit_batch(5000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(6000, &[1], &[1], &[200]))
+            .unwrap();
+
+        // Bank 1: earlier timestamps (this used to underflow/fail)
+        sink.write_hits(1, &make_hit_batch(1000, &[0], &[0], &[100]))
+            .unwrap();
+        sink.write_hits(1, &make_hit_batch(2000, &[1], &[1], &[200]))
+            .unwrap();
+
+        sink.finalize().unwrap();
+
+        let f = File::open(path).unwrap();
+
+        // Bank 1 has the global minimum (1000*25ns = 25000ns),
+        // so its first pulse should be at t=0.0
+        let etz1: Vec<f64> = f
+            .group("entry/bank200_events")
+            .unwrap()
+            .dataset("event_time_zero")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(etz1.len(), 2);
+        assert!(
+            etz1[0].abs() < 1e-12,
+            "Bank 1's first pulse should be at t=0, got {}",
+            etz1[0]
+        );
+        // Bank 1's second pulse: (2000-1000)*25ns = 25000ns = 25µs
+        let expected_1 = (2000.0 - 1000.0) * 25.0 / 1_000_000_000.0;
+        assert!(
+            (etz1[1] - expected_1).abs() < 1e-12,
+            "Expected {expected_1}, got {}",
+            etz1[1]
+        );
+
+        // Bank 0's first pulse: (5000-1000)*25ns = 100000ns = 100µs
+        let etz0: Vec<f64> = f
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_time_zero")
+            .unwrap()
+            .read_raw()
+            .unwrap();
+        assert_eq!(etz0.len(), 2);
+        let expected_0_first = (5000.0 - 1000.0) * 25.0 / 1_000_000_000.0;
+        assert!(
+            (etz0[0] - expected_0_first).abs() < 1e-12,
+            "Expected {expected_0_first}, got {}",
+            etz0[0]
+        );
+
+        // Duration should be from min(1000) to max(6000): 5000*25ns
+        let entry = f.group("entry").unwrap();
+        let duration: f64 = entry.dataset("duration").unwrap().read_scalar().unwrap();
+        let expected_dur = 5000.0 * 25.0 / 1_000_000_000.0;
+        assert!(
+            (duration - expected_dur).abs() < 1e-12,
+            "Expected duration {expected_dur}, got {duration}"
+        );
     }
 }
