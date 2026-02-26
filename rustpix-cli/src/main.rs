@@ -726,8 +726,14 @@ fn run_process_sns_hdf5(
     let mut total_neutrons = 0usize;
 
     // TDC rebase state: each TPX3 file has an independent TDC clock, so when
-    // concatenating multiple files the timestamps must be shifted to stay
-    // monotonically increasing across file boundaries.
+    // concatenating multiple files the timestamps must be normalised to each
+    // file's first-pulse baseline and then offset to stay monotonically
+    // increasing across file boundaries.
+    //
+    //   rebased = (raw_tdc − file_base) + tdc_offset
+    //
+    // This avoids inflating event_time_zero/duration when a file's device
+    // clock starts from a large non-zero value.
     let mut tdc_offset: u64 = 0;
     let mut last_tdc_seen: u64 = 0;
     let mut is_first_file = true;
@@ -742,6 +748,10 @@ fn run_process_sns_hdf5(
         }
         is_first_file = false;
 
+        // Will be set to the first raw TDC timestamp of this file so that
+        // all timestamps in the file are relative to its own start.
+        let mut file_base_tdc: Option<u64> = None;
+
         let reader = Tpx3FileReader::open(path)?;
 
         if out_of_core {
@@ -752,7 +762,8 @@ fn run_process_sns_hdf5(
                 let batch = batch?;
                 total_hits = total_hits.saturating_add(batch.hits_processed);
                 total_neutrons = total_neutrons.saturating_add(batch.neutrons.len());
-                let rebased_tdc = batch.tdc_timestamp_25ns.saturating_add(tdc_offset);
+                let base = *file_base_tdc.get_or_insert(batch.tdc_timestamp_25ns);
+                let rebased_tdc = (batch.tdc_timestamp_25ns - base).saturating_add(tdc_offset);
                 last_tdc_seen = last_tdc_seen.max(rebased_tdc);
                 let event_batch = NeutronEventBatch {
                     tdc_timestamp_25ns: rebased_tdc,
@@ -769,7 +780,8 @@ fn run_process_sns_hdf5(
                 let neutrons =
                     cluster_and_extract_batch(&mut hits, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
-                let rebased_tdc = event.tdc_timestamp_25ns.saturating_add(tdc_offset);
+                let base = *file_base_tdc.get_or_insert(event.tdc_timestamp_25ns);
+                let rebased_tdc = (event.tdc_timestamp_25ns - base).saturating_add(tdc_offset);
                 last_tdc_seen = last_tdc_seen.max(rebased_tdc);
                 let event_batch = NeutronEventBatch {
                     tdc_timestamp_25ns: rebased_tdc,
