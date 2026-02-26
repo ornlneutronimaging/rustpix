@@ -28,6 +28,7 @@ CARGO_WORKSPACE = REPO_ROOT / "Cargo.toml"
 
 # Files to sync
 PYPROJECT = REPO_ROOT / "pyproject.toml"
+GUI_PYPROJECT = REPO_ROOT / "rustpix-gui" / "pyproject.toml"
 
 # All crate Cargo.toml files (for verification)
 CRATE_CARGO_FILES = [
@@ -60,6 +61,15 @@ def read_pyproject_version() -> str:
     return match.group(1)
 
 
+def read_gui_pyproject_version() -> str:
+    """Read version from GUI pyproject.toml."""
+    content = GUI_PYPROJECT.read_text()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE)
+    if not match:
+        raise ValueError(f"Could not find version in {GUI_PYPROJECT}")
+    return match.group(1)
+
+
 def write_workspace_version(version: str) -> None:
     """Write version to workspace Cargo.toml (both package and dependencies)."""
     content = CARGO_WORKSPACE.read_text()
@@ -85,16 +95,39 @@ def write_workspace_version(version: str) -> None:
 
 
 def sync_pyproject(version: str) -> None:
-    """Sync version to pyproject.toml."""
+    """Sync version to pyproject.toml (package version + gui optional dep)."""
     content = PYPROJECT.read_text()
+
+    # Update [project].version
     new_content = re.sub(
         r'^(version\s*=\s*)"[^"]+"',
         f'\\1"{version}"',
         content,
         flags=re.MULTILINE,
     )
+
+    # Update optional dependency: gui = ["rustpix-gui==X.Y.Z"]
+    new_content = re.sub(
+        r'(gui\s*=\s*\["rustpix-gui)==[^"]+("\])',
+        f'\\1=={version}\\2',
+        new_content,
+    )
+
     PYPROJECT.write_text(new_content)
     print(f"  Updated {PYPROJECT.relative_to(REPO_ROOT)}")
+
+
+def sync_gui_pyproject(version: str) -> None:
+    """Sync version to GUI pyproject.toml."""
+    content = GUI_PYPROJECT.read_text()
+    new_content = re.sub(
+        r'^(version\s*=\s*)"[^"]+"',
+        f'\\1"{version}"',
+        content,
+        flags=re.MULTILINE,
+    )
+    GUI_PYPROJECT.write_text(new_content)
+    print(f"  Updated {GUI_PYPROJECT.relative_to(REPO_ROOT)}")
 
 
 def check_crate_uses_workspace_version(cargo_path: Path) -> bool:
@@ -127,11 +160,13 @@ def cmd_show() -> None:
     """Show current version."""
     cargo_version = read_workspace_version()
     pyproject_version = read_pyproject_version()
+    gui_pyproject_version = read_gui_pyproject_version()
 
-    print(f"Cargo workspace version: {cargo_version}")
-    print(f"pyproject.toml version:  {pyproject_version}")
+    print(f"Cargo workspace version:     {cargo_version}")
+    print(f"pyproject.toml version:       {pyproject_version}")
+    print(f"rustpix-gui pyproject version: {gui_pyproject_version}")
 
-    if cargo_version != pyproject_version:
+    if cargo_version != pyproject_version or cargo_version != gui_pyproject_version:
         print("\n⚠️  Versions are out of sync! Run: pixi run version-sync")
 
 
@@ -150,6 +185,14 @@ def cmd_check() -> int:
     else:
         print(f"  ✗ pyproject.toml: {pyproject_version} (expected {cargo_version})")
         issues.append("pyproject.toml version mismatch")
+
+    # Check GUI pyproject.toml
+    gui_pyproject_version = read_gui_pyproject_version()
+    if cargo_version == gui_pyproject_version:
+        print(f"  ✓ rustpix-gui/pyproject.toml: {gui_pyproject_version}")
+    else:
+        print(f"  ✗ rustpix-gui/pyproject.toml: {gui_pyproject_version} (expected {cargo_version})")
+        issues.append("rustpix-gui/pyproject.toml version mismatch")
 
     # Check all crate Cargo.toml files use workspace inheritance
     print()
@@ -194,10 +237,11 @@ def cmd_check() -> int:
 
 
 def cmd_sync() -> None:
-    """Sync version from Cargo.toml to pyproject.toml."""
+    """Sync version from Cargo.toml to pyproject.toml and GUI pyproject.toml."""
     version = read_workspace_version()
-    print(f"Syncing version {version} to pyproject.toml...")
+    print(f"Syncing version {version} to Python files...")
     sync_pyproject(version)
+    sync_gui_pyproject(version)
     print("Done!")
 
 
@@ -213,17 +257,18 @@ def cmd_bump(component: str) -> None:
     print("Updating Cargo workspace...")
     write_workspace_version(new_version)
 
-    # Sync to pyproject.toml
+    # Sync to Python files
     print()
     print("Syncing to Python...")
     sync_pyproject(new_version)
+    sync_gui_pyproject(new_version)
 
     print()
     print(f"✓ Version bumped to {new_version}")
     print()
     print("Next steps:")
     print("  1. Review changes: git diff")
-    print("  2. Stage files: git add Cargo.toml pyproject.toml")
+    print("  2. Stage files: git add Cargo.toml pyproject.toml rustpix-gui/pyproject.toml")
     print(f'  3. Commit: git commit -m "chore: bump version to {new_version}"')
     print(f"  4. Tag (optional): git tag v{new_version}")
 
