@@ -854,7 +854,10 @@ fn collect_and_write_sns_neutrons(
     Ok(all_neutrons)
 }
 
-/// Write a `NeutronBatch` to an HDF5 file (generic `NeXus` or SNS `NXsnsevent`).
+/// Write a `NeutronBatch` to a generic NeXus HDF5 file.
+///
+/// Rejects SNS `NXsnsevent` output (`*.nxs.h5`) because this path lacks
+/// per-pulse TDC timestamps required for correct `event_time_zero`/`event_index`.
 fn write_neutrons_hdf5(
     output_path: &str,
     neutrons: &NeutronBatch,
@@ -864,54 +867,41 @@ fn write_neutrons_hdf5(
     let path = std::path::Path::new(output_path);
     let format = detect_hdf5_format(output_path);
 
+    if format == "sns" {
+        return Err(PyValueError::new_err(
+            "SNS NXsnsevent output (*.nxs.h5) requires per-pulse TDC timestamps \
+             which are not available in this code path. Use \
+             process_tpx3_neutrons(collect=True, time_ordered=True) for SNS export, \
+             or use a .h5 extension for generic NeXus output.",
+        ));
+    }
+
     let event_batch = NeutronEventBatch {
         tdc_timestamp_25ns: 0,
         neutrons: neutrons.clone(),
     };
 
-    let now = iso8601_now();
-
-    if format == "sns" {
-        let run_meta = SnsRunMetadata {
-            run_number: 0,
-            experiment_identifier: String::new(),
-            start_time: now,
-            end_time: None,
-            duration: None,
-            proton_charge: None,
-            title: None,
-        };
-        let mut options = SnsWriteOptions::venus_defaults(run_meta);
-        options.super_resolution_factor = super_resolution_factor;
-        let mut sink = SnsEventSink::create(path, options)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create SNS HDF5: {e}")))?;
-        sink.write_neutrons(0, &event_batch)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed writing SNS neutrons: {e}")))?;
-        sink.finalize()
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to finalize SNS HDF5: {e}")))?;
-    } else {
-        #[allow(clippy::cast_possible_truncation)]
-        let options = NeutronWriteOptions {
-            x_size: detector_dims.0 as u32,
-            y_size: detector_dims.1 as u32,
-            super_resolution_factor,
-            chunk_events: 100_000,
-            compression: Some(1),
-            shuffle: true,
-            flight_path_m: None,
-            tof_offset_ns: None,
-            energy_axis_kind: Some("tof".to_string()),
-            include_xy: true,
-            include_tot: true,
-            include_chip_id: true,
-            include_n_hits: true,
-        };
-        let mut sink = Hdf5NeutronSink::create(path, options)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create HDF5: {e}")))?;
-        sink.write_neutrons(&event_batch)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed writing neutrons: {e}")))?;
-        drop(sink);
-    }
+    #[allow(clippy::cast_possible_truncation)]
+    let options = NeutronWriteOptions {
+        x_size: detector_dims.0 as u32,
+        y_size: detector_dims.1 as u32,
+        super_resolution_factor,
+        chunk_events: 100_000,
+        compression: Some(1),
+        shuffle: true,
+        flight_path_m: None,
+        tof_offset_ns: None,
+        energy_axis_kind: Some("tof".to_string()),
+        include_xy: true,
+        include_tot: true,
+        include_chip_id: true,
+        include_n_hits: true,
+    };
+    let mut sink = Hdf5NeutronSink::create(path, options)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create HDF5: {e}")))?;
+    sink.write_neutrons(&event_batch)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed writing neutrons: {e}")))?;
+    drop(sink);
 
     Ok(())
 }
