@@ -535,6 +535,18 @@ fn process_tpx3_neutrons(
         ));
     }
 
+    // Reject SNS output early when time_ordered=False — the SNS format
+    // requires per-pulse TDC timestamps which are only available in the
+    // time-ordered streaming path.
+    if let Some(ref output_path) = processing.output_path {
+        if !processing.time_ordered && detect_hdf5_format(output_path) == "sns" {
+            return Err(PyValueError::new_err(
+                "SNS NXsnsevent output (*.nxs.h5) requires time_ordered=True \
+                 for per-pulse TDC timestamps",
+            ));
+        }
+    }
+
     if collect {
         // When time_ordered=True and an HDF5 output path is given, stream
         // per-pulse to preserve pulse timestamps in event_time_zero/event_index.

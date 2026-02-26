@@ -883,17 +883,21 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
     let min: i64 = s.get(14..16)?.parse().ok()?;
     let sec: i64 = s.get(17..19)?.parse().ok()?;
 
-    // Timezone offset (after position 19): 'Z' or ±hh:mm
+    // Timezone offset (after position 19): 'Z', ±hh:mm, or absent.
+    // Reject any other suffix (e.g. fractional seconds like ".123Z",
+    // lowercase "z") to avoid silently miscomputing the epoch.
     let tz_offset_s: i64 = {
-        let tz = s.get(19..)?;
+        let tz = s.get(19..).unwrap_or("");
         if tz == "Z" || tz.is_empty() {
             0
-        } else {
+        } else if tz.starts_with('+') || tz.starts_with('-') {
             let sign: i64 = if tz.starts_with('+') { 1 } else { -1 };
             let tz = &tz[1..];
-            let oh: i64 = tz.get(0..2).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let oh: i64 = tz.get(0..2).and_then(|v| v.parse().ok())?;
             let om: i64 = tz.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
             sign * (oh * 3600 + om * 60)
+        } else {
+            return None; // unsupported suffix
         }
     };
 
