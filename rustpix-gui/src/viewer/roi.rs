@@ -591,10 +591,11 @@ impl RoiState {
 
     /// Render all ROIs to the plot.
     pub fn draw(&self, plot_ui: &mut PlotUi) {
-        for (i, roi) in self.rois.iter().enumerate() {
+        for roi in &self.rois {
             if !roi.visibility.visible {
                 continue;
             }
+            let rid = roi.id;
             let stroke_width = if roi.selection.selected { 2.0 } else { 1.0 };
             let stroke = Stroke::new(stroke_width, roi.color);
             let fill = roi_fill_color(roi.color);
@@ -603,7 +604,7 @@ impl RoiState {
                 if polygon_is_convex(vertices) {
                     let points = roi.plot_points();
                     plot_ui.polygon(
-                        Polygon::new(format!("roi_{i}_poly"), points)
+                        Polygon::new(format!("roi_{rid}_poly"), points)
                             .stroke(stroke)
                             .fill_color(fill),
                     );
@@ -612,7 +613,7 @@ impl RoiState {
                     if triangles.is_empty() {
                         let line_points = roi.closed_line_points();
                         plot_ui.line(
-                            Line::new(format!("roi_{i}_line"), PlotPoints::new(line_points))
+                            Line::new(format!("roi_{rid}_line"), PlotPoints::new(line_points))
                                 .color(roi.color)
                                 .width(stroke_width),
                         );
@@ -620,7 +621,7 @@ impl RoiState {
                         for (ti, tri) in triangles.iter().enumerate() {
                             plot_ui.polygon(
                                 Polygon::new(
-                                    format!("roi_{i}_tri_{ti}"),
+                                    format!("roi_{rid}_tri_{ti}"),
                                     vec![tri[0], tri[1], tri[2]],
                                 )
                                 .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
@@ -629,7 +630,7 @@ impl RoiState {
                         }
                         let line_points = roi.closed_line_points();
                         plot_ui.line(
-                            Line::new(format!("roi_{i}_outline"), PlotPoints::new(line_points))
+                            Line::new(format!("roi_{rid}_outline"), PlotPoints::new(line_points))
                                 .color(roi.color)
                                 .width(stroke_width),
                         );
@@ -638,7 +639,7 @@ impl RoiState {
             } else {
                 let points = roi.plot_points();
                 plot_ui.polygon(
-                    Polygon::new(format!("roi_{i}_shape"), points)
+                    Polygon::new(format!("roi_{rid}_shape"), points)
                         .stroke(stroke)
                         .fill_color(fill),
                 );
@@ -646,7 +647,7 @@ impl RoiState {
 
             let label_pos = roi.label_position();
             plot_ui.text(
-                Text::new(format!("roi_{i}_label"), label_pos, roi.name.clone())
+                Text::new(format!("roi_{rid}_label"), label_pos, roi.name.clone())
                     .color(roi.color)
                     .anchor(Align2::LEFT_TOP),
             );
@@ -655,7 +656,7 @@ impl RoiState {
                 let handle_points = roi.handle_points();
                 if !handle_points.is_empty() {
                     plot_ui.points(
-                        Points::new(format!("roi_{i}_handles"), handle_points)
+                        Points::new(format!("roi_{rid}_handles"), handle_points)
                             .color(roi.color)
                             .shape(MarkerShape::Square)
                             .radius(3.0),
