@@ -36,10 +36,16 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[allow(clippy::default_trait_access)]
 fn load_app_icon() -> Option<egui::IconData> {
     let bytes = include_bytes!("../assets/icons/app-icon.svg");
+    let size_hint = egui::SizeHint::Size {
+        width: 256,
+        height: 256,
+        maintain_aspect_ratio: true,
+    };
     let image =
-        egui_extras::image::load_svg_bytes_with_size(bytes, Some(egui::SizeHint::Size(256, 256)))
+        egui_extras::image::load_svg_bytes_with_size(bytes, size_hint, &Default::default())
             .ok()?;
     let [width, height] = image.size;
     let width = u32::try_from(width).ok()?;

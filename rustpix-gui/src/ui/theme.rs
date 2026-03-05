@@ -3,7 +3,7 @@
 //! Provides light and dark themes with monospace fonts, following system preference.
 
 use eframe::egui::{
-    self, Color32, FontFamily, FontId, Rounding, Stroke, TextStyle, Theme, Visuals,
+    self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Theme, Visuals,
 };
 
 /// Color palette for the application (dark theme).
@@ -144,27 +144,27 @@ fn build_dark_visuals() -> Visuals {
     visuals.widgets.noninteractive.bg_fill = dark::BG_INPUT;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, dark::TEXT_MUTED);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, dark::BORDER);
-    visuals.widgets.noninteractive.rounding = Rounding::same(4.0);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.inactive.bg_fill = dark::BG_INPUT;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, dark::TEXT_PRIMARY);
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, dark::BORDER_LIGHT);
-    visuals.widgets.inactive.rounding = Rounding::same(4.0);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.hovered.bg_fill = dark::BUTTON_HOVER;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, dark::TEXT_PRIMARY);
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent::BLUE);
-    visuals.widgets.hovered.rounding = Rounding::same(4.0);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.active.bg_fill = accent::BLUE;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, accent::BLUE);
-    visuals.widgets.active.rounding = Rounding::same(4.0);
+    visuals.widgets.active.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.open.bg_fill = dark::BG_INPUT;
     visuals.widgets.open.fg_stroke = Stroke::new(1.0, dark::TEXT_PRIMARY);
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, dark::BORDER_LIGHT);
-    visuals.widgets.open.rounding = Rounding::same(4.0);
+    visuals.widgets.open.corner_radius = CornerRadius::same(4);
 
     visuals.selection.bg_fill = accent::BLUE.gamma_multiply(0.3);
     visuals.selection.stroke = Stroke::new(1.0, accent::BLUE);
@@ -184,27 +184,27 @@ fn build_light_visuals() -> Visuals {
     visuals.widgets.noninteractive.bg_fill = light::BG_INPUT;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, light::TEXT_MUTED);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, light::BORDER);
-    visuals.widgets.noninteractive.rounding = Rounding::same(4.0);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.inactive.bg_fill = light::BG_INPUT;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, light::TEXT_PRIMARY);
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, light::BORDER_LIGHT);
-    visuals.widgets.inactive.rounding = Rounding::same(4.0);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.hovered.bg_fill = light::BUTTON_HOVER;
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, light::TEXT_PRIMARY);
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent::BLUE);
-    visuals.widgets.hovered.rounding = Rounding::same(4.0);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.active.bg_fill = accent::BLUE;
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, accent::BLUE);
-    visuals.widgets.active.rounding = Rounding::same(4.0);
+    visuals.widgets.active.corner_radius = CornerRadius::same(4);
 
     visuals.widgets.open.bg_fill = light::BG_INPUT;
     visuals.widgets.open.fg_stroke = Stroke::new(1.0, light::TEXT_PRIMARY);
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, light::BORDER_LIGHT);
-    visuals.widgets.open.rounding = Rounding::same(4.0);
+    visuals.widgets.open.corner_radius = CornerRadius::same(4);
 
     visuals.selection.bg_fill = accent::BLUE.gamma_multiply(0.2);
     visuals.selection.stroke = Stroke::new(1.0, accent::BLUE);
@@ -241,7 +241,7 @@ fn configure_fonts_and_spacing(ctx: &egui::Context) {
 pub fn primary_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(egui::RichText::new(text).color(Color32::WHITE))
         .fill(accent::BLUE)
-        .rounding(Rounding::same(4.0))
+        .corner_radius(CornerRadius::same(4))
 }
 
 /// Create a form label.

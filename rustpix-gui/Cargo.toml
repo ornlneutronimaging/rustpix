@@ -37,10 +37,10 @@ memmap2.workspace = true
 rayon.workspace = true
 
 # GUI
-eframe = "0.29"
-egui = "0.29"
-egui_plot = "0.29"
-egui_extras = { version = "0.29", features = ["svg"] }
+eframe = "0.33"
+egui = "0.33"
+egui_plot = "0.34"
+egui_extras = { version = "0.33", features = ["svg"] }
 rfd = "0.15"
 image = "0.25"
 tiff = "0.10"
