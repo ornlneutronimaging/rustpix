@@ -76,7 +76,7 @@ default = { features = [] }
 
 [tool.pixi.tasks]
 # Core tasks
-test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && test -d tests && python -m pytest tests/ -v || echo 'No Python tests yet'", description = "Run all tests (Rust + Python)" }
+test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && (test -d tests && python -m pytest tests/ -v || echo 'No Python tests yet')", depends-on = ["build-debug"], description = "Run all tests (Rust + Python)" }
 clippy = { cmd = "cargo clippy --workspace --all-targets --all-features", description = "Run clippy for all Rust crates/targets/features" }
 fmt = { cmd = "cargo fmt --all", description = "Format all Rust crates" }
 lint = { cmd = "cargo fmt --all && cargo clippy --workspace --all-targets --all-features", description = "Format and clippy all Rust crates/targets/features" }
