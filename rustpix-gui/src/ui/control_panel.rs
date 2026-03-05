@@ -1,6 +1,6 @@
 //! Control panel (left sidebar) and top/bottom bars rendering.
 
-use eframe::egui::{self, Color32, FontFamily, FontId, Rect, Rounding, Stroke};
+use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Rect, Stroke, StrokeKind};
 use rfd::FileDialog;
 
 use super::theme::{accent, form_label, primary_button, ThemeColors};
@@ -35,13 +35,13 @@ impl RustpixApp {
 
         egui::TopBottomPanel::top("top_bar")
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(colors.bg_header)
                     .inner_margin(egui::Margin {
-                        left: 16.0,
-                        right: 16.0,
-                        top: 8.0,
-                        bottom: 8.0,
+                        left: 16,
+                        right: 16,
+                        top: 8,
+                        bottom: 8,
                     }),
             )
             .show(ctx, |ui| {
@@ -111,8 +111,9 @@ impl RustpixApp {
         } else {
             FontId::new(12.0, FontFamily::Monospace)
         };
-        let galley =
-            ui.fonts(|fonts| fonts.layout_no_wrap(status_text.clone(), status_font, status_color));
+        let galley = ui
+            .painter()
+            .layout_no_wrap(status_text.clone(), status_font, status_color);
         let text_width = galley.size().x;
         let text_y = status_rect.center().y - galley.size().y / 2.0;
         let painter = ui.painter().with_clip_rect(status_rect);
@@ -208,9 +209,9 @@ impl RustpixApp {
     ) -> egui::Response {
         let image = Self::file_icon_image(icon, colors.text_primary)
             .fit_to_exact_size(egui::vec2(16.0, 16.0));
-        let btn = egui::ImageButton::new(image)
+        let btn = egui::Button::image(image)
             .frame(true)
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         let response = ui
             .add_enabled_ui(enabled, |ui| ui.add_sized(egui::vec2(30.0, 28.0), btn))
             .inner;
@@ -223,11 +224,11 @@ impl RustpixApp {
         let old_mode = self.ui_state.view_mode;
 
         // Container frame for the toggle group
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(colors.bg_dark)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::same(2.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::same(2))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let colors = ThemeColors::from_ui(ui);
@@ -249,7 +250,7 @@ impl RustpixApp {
                             Color32::TRANSPARENT
                         })
                         .stroke(Stroke::NONE)
-                        .rounding(Rounding::same(3.0))
+                        .corner_radius(CornerRadius::same(3))
                         .min_size(egui::vec2(70.0, 0.0));
 
                     if ui.add(hits_btn).clicked() {
@@ -276,7 +277,7 @@ impl RustpixApp {
                         Color32::TRANSPARENT
                     })
                     .stroke(Stroke::NONE)
-                    .rounding(Rounding::same(3.0))
+                    .corner_radius(CornerRadius::same(3))
                     .min_size(egui::vec2(90.0, 0.0));
 
                     if ui.add_enabled(neutrons_enabled, neutrons_btn).clicked() {
@@ -297,13 +298,13 @@ impl RustpixApp {
 
         egui::TopBottomPanel::bottom("status_bar")
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(colors.bg_header)
                     .inner_margin(egui::Margin {
-                        left: 16.0,
-                        right: 16.0,
-                        top: 6.0,
-                        bottom: 6.0,
+                        left: 16,
+                        right: 16,
+                        top: 6,
+                        bottom: 6,
                     }),
             )
             .show(ctx, |ui| {
@@ -514,11 +515,11 @@ impl RustpixApp {
             "Cache hits in RAM (enables rebuild + HDF5 export). Higher memory, slower load.";
         let stream_tooltip = "Stream only (faster load, lower memory). Rebuild/export disabled.";
 
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(colors.bg_dark)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::same(2.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::same(2))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
@@ -530,7 +531,7 @@ impl RustpixApp {
                             Color32::TRANSPARENT
                         })
                         .stroke(Stroke::NONE)
-                        .rounding(Rounding::same(3.0))
+                        .corner_radius(CornerRadius::same(3))
                         .min_size(egui::vec2(28.0, 0.0));
 
                     if ui.add(cache_btn).on_hover_text(cache_tooltip).clicked() {
@@ -544,7 +545,7 @@ impl RustpixApp {
                             accent::BLUE
                         })
                         .stroke(Stroke::NONE)
-                        .rounding(Rounding::same(3.0))
+                        .corner_radius(CornerRadius::same(3))
                         .min_size(egui::vec2(28.0, 0.0));
 
                     if ui.add(stream_btn).on_hover_text(stream_tooltip).clicked() {
@@ -561,7 +562,7 @@ impl RustpixApp {
         egui::SidePanel::left("ctrl")
             .default_width(240.0)
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(colors.bg_panel)
                     .inner_margin(egui::Margin::ZERO),
             )
@@ -681,7 +682,8 @@ impl RustpixApp {
             } else {
                 Color32::TRANSPARENT
             };
-            ui.painter().rect_filled(header_rect, 0.0, header_fill);
+            ui.painter()
+                .rect_filled(header_rect, CornerRadius::ZERO, header_fill);
 
             let text_pos = header_rect.left_center() + egui::vec2(16.0, 0.0);
             ui.painter().text(
@@ -700,10 +702,11 @@ impl RustpixApp {
                 };
                 ui.painter().rect_stroke(
                     rect,
-                    Rounding::same(3.0),
+                    CornerRadius::same(3),
                     Stroke::new(1.0, colors.border_light),
+                    StrokeKind::Inside,
                 );
-                ui.painter().rect_filled(rect, Rounding::same(3.0), fill);
+                ui.painter().rect_filled(rect, CornerRadius::same(3), fill);
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -732,12 +735,12 @@ impl RustpixApp {
 
             // Content
             if is_open {
-                egui::Frame::none()
+                egui::Frame::new()
                     .inner_margin(egui::Margin {
-                        left: 16.0,
-                        right: 16.0,
-                        top: 12.0,
-                        bottom: 16.0,
+                        left: 16,
+                        right: 16,
+                        top: 12,
+                        bottom: 16,
                     })
                     .show(ui, |ui| {
                         content(self, ui);
@@ -758,8 +761,8 @@ impl RustpixApp {
         let is_busy = self.processing.is_loading || self.processing.is_processing;
 
         if is_busy {
-            egui::Frame::none()
-                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.add(
                         egui::ProgressBar::new(self.processing.progress)
@@ -868,7 +871,7 @@ impl RustpixApp {
                     egui::Button::new("⚙")
                         .fill(Color32::TRANSPARENT)
                         .stroke(Stroke::new(1.0, colors.border_light))
-                        .rounding(Rounding::same(4.0)),
+                        .corner_radius(CornerRadius::same(4)),
                 )
                 .on_hover_text("Algorithm parameters")
                 .clicked()
@@ -881,11 +884,11 @@ impl RustpixApp {
 
     fn render_clustering_params(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
         ui.add_space(8.0);
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(colors.bg_header)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::same(12.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 self.render_detector_profile_controls(ui);
                 ui.add_space(6.0);
@@ -947,10 +950,9 @@ impl RustpixApp {
                                 custom_label,
                             );
                         } else {
-                            ui.add_enabled(
-                                false,
-                                egui::SelectableLabel::new(false, "Custom (load...)"),
-                            );
+                            ui.add_enabled_ui(false, |ui| {
+                                let _ = ui.selectable_label(false, "Custom (load...)");
+                            });
                         }
                         if kind != self.detector_profile.kind {
                             self.detector_profile.kind = kind;
@@ -1092,7 +1094,7 @@ impl RustpixApp {
                             egui::Button::new("?")
                                 .fill(Color32::TRANSPARENT)
                                 .stroke(Stroke::new(1.0, colors.border_light))
-                                .rounding(Rounding::same(4.0)),
+                                .corner_radius(CornerRadius::same(4)),
                         )
                         .on_hover_text(
                             "Affine transform per chip:\n\
@@ -1651,7 +1653,7 @@ x,y are local chip coordinates (pixels).",
                 let gear = Self::file_icon_image(FileToolbarIcon::Gear, colors.text_muted)
                     .fit_to_exact_size(egui::vec2(14.0, 14.0));
                 if ui
-                    .add(egui::ImageButton::new(gear).frame(true))
+                    .add(egui::Button::image(gear).frame(true))
                     .on_hover_text("Pixel mask settings")
                     .clicked()
                 {
@@ -2325,7 +2327,7 @@ x,y are local chip coordinates (pixels).",
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let gear = Self::file_icon_image(FileToolbarIcon::Gear, colors.text_muted);
                 if ui
-                    .add(egui::ImageButton::new(gear).frame(true))
+                    .add(egui::Button::image(gear).frame(true))
                     .on_hover_text("Advanced export options")
                     .clicked()
                 {

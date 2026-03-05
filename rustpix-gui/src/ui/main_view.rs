@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
-use eframe::egui::{self, Color32, LayerId, Order, Pos2, Rect, Rounding, Stroke, Vec2, Vec2b};
+use eframe::egui::{
+    self, Color32, CornerRadius, LayerId, Order, Pos2, Rect, Stroke, StrokeKind, Vec2, Vec2b,
+};
 use egui_plot::{
     Line, MarkerShape, Plot, PlotBounds, PlotImage, PlotPoint, PlotPoints, Points, VLine,
 };
@@ -192,9 +194,9 @@ struct SpectrumExportGeometry {
     label_color: Rgba<u8>,
 }
 
-struct HistogramDragContext<'a> {
+struct HistogramDragContext<'a, 'b> {
     ctx: &'a egui::Context,
-    plot_ui: &'a mut egui_plot::PlotUi,
+    plot_ui: &'a mut egui_plot::PlotUi<'b>,
     response: &'a egui::Response,
     pointer_pos: Option<PlotPoint>,
     handle_radius: f64,
@@ -361,9 +363,9 @@ impl RustpixApp {
     ) {
         egui::CentralPanel::default()
             .frame(
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(colors.bg_dark)
-                    .inner_margin(egui::Margin::same(16.0)),
+                    .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
                 let layout = self.central_panel_layout(ui, inputs);
@@ -455,9 +457,9 @@ impl RustpixApp {
         if inputs.visibility.slicer_enabled && inputs.n_bins > 0 {
             let colors = ThemeColors::from_ui(ui);
             ui.add_space(8.0);
-            let margin = egui::Margin::symmetric(16.0, 12.0);
+            let margin = egui::Margin::symmetric(16, 12);
             let content_height = ui.spacing().interact_size.y.max(20.0);
-            let frame_height = content_height + margin.top + margin.bottom;
+            let frame_height = content_height + f32::from(margin.top) + f32::from(margin.bottom);
 
             let left = ui.max_rect().left();
             let right = ui.max_rect().right();
@@ -468,11 +470,17 @@ impl RustpixApp {
             );
             let _ = ui.allocate_rect(rect, egui::Sense::hover());
 
-            ui.painter().rect_filled(rect, 4.0, colors.bg_panel);
             ui.painter()
-                .rect_stroke(rect, 4.0, Stroke::new(1.0, colors.border));
+                .rect_filled(rect, CornerRadius::same(4), colors.bg_panel);
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(4),
+                Stroke::new(1.0, colors.border),
+                StrokeKind::Inside,
+            );
 
-            let inner_rect = rect.shrink2(egui::vec2(margin.left, margin.top));
+            let inner_rect =
+                rect.shrink2(egui::vec2(f32::from(margin.left), f32::from(margin.top)));
             let mut slicer_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(inner_rect)
@@ -589,7 +597,7 @@ impl RustpixApp {
                 .min_size(egui::vec2(0.0, 28.0))
                 .fill(Color32::TRANSPARENT)
                 .stroke(Stroke::new(1.0, colors.border_light))
-                .rounding(Rounding::same(4.0));
+                .corner_radius(CornerRadius::same(4));
 
                 if ui
                     .add(reset_btn)
@@ -626,7 +634,7 @@ impl RustpixApp {
                     Color32::TRANSPARENT
                 })
                 .stroke(Stroke::new(1.0, colors.border_light))
-                .rounding(Rounding::same(4.0));
+                .corner_radius(CornerRadius::same(4));
 
                 if ui.add(grid_btn).on_hover_text("Toggle grid").clicked() {
                     self.ui_state.histogram_view.show_grid =
@@ -700,7 +708,7 @@ impl RustpixApp {
                 Color32::TRANSPARENT
             })
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         ui.add(btn)
     }
 
@@ -719,7 +727,6 @@ impl RustpixApp {
 
         let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
             .data_aspect(1.0)
-            .auto_bounds(Vec2b::new(false, false))
             .include_x(0.0)
             .include_x(inputs.data_width_f64)
             .include_y(0.0)
@@ -806,10 +813,10 @@ impl RustpixApp {
         } else {
             Color32::from_rgb(0xe8, 0xe8, 0xe8)
         };
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(no_data_bg)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
+            .corner_radius(CornerRadius::same(4))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.centered_and_justified(|ui| {
@@ -937,6 +944,7 @@ impl RustpixApp {
         geometry: &HistogramGeometry,
     ) {
         plot_ui.image(PlotImage::new(
+            "histogram",
             tex_id,
             PlotPoint::new(geometry.half_x, geometry.half_y),
             [geometry.data_width_f32, geometry.data_height_f32],
@@ -964,7 +972,7 @@ impl RustpixApp {
                             .map(|(x, y)| [x, y])
                             .collect()
                     };
-                    let hot_points = Points::new(PlotPoints::new(hot_points))
+                    let hot_points = Points::new("hot_pixels", PlotPoints::new(hot_points))
                         .shape(MarkerShape::Square)
                         .radius(2.0)
                         .color(accent::RED)
@@ -1143,7 +1151,7 @@ impl RustpixApp {
         }
     }
 
-    fn handle_histogram_roi_drag(&mut self, drag: &mut HistogramDragContext<'_>) {
+    fn handle_histogram_roi_drag(&mut self, drag: &mut HistogramDragContext<'_, '_>) {
         if drag.response.drag_started() {
             if let Some(pos) = drag.pointer_pos {
                 if let Some((roi_id, index)) =
@@ -1287,17 +1295,17 @@ impl RustpixApp {
 
         response.context_menu(|ui| {
             if suppress_context_menu {
-                ui.close_menu();
+                ui.close();
                 return;
             }
             if let Some(target) = self.roi_state.context_menu_target() {
                 if ui.button("Edit").clicked() {
                     self.roi_state.set_edit_mode(target, true);
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Delete").clicked() {
                     self.roi_state.delete_id(target);
-                    ui.close_menu();
+                    ui.close();
                 }
             } else {
                 ui.label("No ROI");
@@ -1332,13 +1340,14 @@ impl RustpixApp {
             .with_clip_rect(response.rect);
         painter.rect_filled(
             rect,
-            Rounding::same(2.0),
+            CornerRadius::same(2),
             Color32::from_rgba_unmultiplied(58, 130, 246, 32),
         );
         painter.rect_stroke(
             rect,
-            Rounding::same(2.0),
+            CornerRadius::same(2),
             Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
+            StrokeKind::Inside,
         );
     }
 
@@ -1372,13 +1381,18 @@ impl RustpixApp {
                         egui::pos2(rect.1.left(), y_start),
                         egui::vec2(rect.1.width(), step_height + 1.0),
                     ),
-                    0.0,
+                    CornerRadius::ZERO,
                     color,
                 );
             }
 
             // Border
-            painter.rect_stroke(rect.1, Rounding::ZERO, Stroke::new(1.0, colors.border));
+            painter.rect_stroke(
+                rect.1,
+                CornerRadius::ZERO,
+                Stroke::new(1.0, colors.border),
+                StrokeKind::Inside,
+            );
 
             // "0" label at bottom
             ui.add_space(4.0);
@@ -1392,10 +1406,10 @@ impl RustpixApp {
     /// Render ROI tool group controls.
     fn render_roi_toolbar(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
-        egui::Frame::none()
+        egui::Frame::new()
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(4, 2))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let selection_mode = self.render_roi_mode_menu(ui, &colors);
@@ -1429,31 +1443,35 @@ impl RustpixApp {
             .min_size(egui::vec2(34.0, 22.0))
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
-        let menu_response = egui::menu::menu_custom_button(ui, menu_button, |ui| {
-            ui.horizontal(|ui| {
-                Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Rectangle, colors.text_muted);
-                if ui
-                    .selectable_label(
-                        self.roi_state.mode == RoiSelectionMode::Rectangle,
-                        "Rectangle",
-                    )
-                    .clicked()
-                {
-                    selection_mode = RoiSelectionMode::Rectangle;
-                }
+            .corner_radius(CornerRadius::same(4));
+        let menu_response =
+            egui::containers::menu::MenuButton::from_button(menu_button).ui(ui, |ui| {
+                ui.horizontal(|ui| {
+                    Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Rectangle, colors.text_muted);
+                    if ui
+                        .selectable_label(
+                            self.roi_state.mode == RoiSelectionMode::Rectangle,
+                            "Rectangle",
+                        )
+                        .clicked()
+                    {
+                        selection_mode = RoiSelectionMode::Rectangle;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Polygon, colors.text_muted);
+                    if ui
+                        .selectable_label(
+                            self.roi_state.mode == RoiSelectionMode::Polygon,
+                            "Polygon",
+                        )
+                        .clicked()
+                    {
+                        selection_mode = RoiSelectionMode::Polygon;
+                    }
+                });
             });
-            ui.horizontal(|ui| {
-                Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Polygon, colors.text_muted);
-                if ui
-                    .selectable_label(self.roi_state.mode == RoiSelectionMode::Polygon, "Polygon")
-                    .clicked()
-                {
-                    selection_mode = RoiSelectionMode::Polygon;
-                }
-            });
-        });
-        let icon_rect = menu_response.response.rect.shrink2(egui::vec2(4.0, 4.0));
+        let icon_rect = menu_response.0.rect.shrink2(egui::vec2(4.0, 4.0));
         let icon_rect = Rect::from_min_max(
             icon_rect.min,
             Pos2::new(icon_rect.center().x + 2.0, icon_rect.max.y),
@@ -1466,7 +1484,7 @@ impl RustpixApp {
             colors.text_muted,
         );
         image.paint_at(ui, icon_rect);
-        Self::paint_dropdown_caret(ui.painter(), menu_response.response.rect, colors.text_muted);
+        Self::paint_dropdown_caret(ui.painter(), menu_response.0.rect, colors.text_muted);
         selection_mode
     }
 
@@ -1488,16 +1506,17 @@ impl RustpixApp {
             .min_size(egui::vec2(28.0, 22.0))
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
-        let gear_response = egui::menu::menu_custom_button(ui, gear_button, |ui| {
-            ui.checkbox(
-                &mut self.roi_state.debounce_updates,
-                "Debounce spectrum updates",
-            );
-        });
+            .corner_radius(CornerRadius::same(4));
+        let gear_response =
+            egui::containers::menu::MenuButton::from_button(gear_button).ui(ui, |ui| {
+                ui.checkbox(
+                    &mut self.roi_state.debounce_updates,
+                    "Debounce spectrum updates",
+                );
+            });
         let image = Self::roi_icon_image(RoiToolbarIcon::Gear, colors.text_muted);
-        image.paint_at(ui, gear_response.response.rect.shrink(4.0));
-        gear_response.response.on_hover_text("ROI settings");
+        image.paint_at(ui, gear_response.0.rect.shrink(4.0));
+        gear_response.0.on_hover_text("ROI settings");
     }
 
     fn render_roi_help_button(&mut self, ui: &mut egui::Ui, colors: &ThemeColors) {
@@ -1505,7 +1524,7 @@ impl RustpixApp {
             .min_size(egui::vec2(24.0, 22.0))
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         let response = ui.add(help_button);
         if response.clicked() {
             self.ui_state.panel_popups.show_roi_help = !self.ui_state.panel_popups.show_roi_help;
@@ -1614,11 +1633,11 @@ impl RustpixApp {
         has_visible_spectrum: bool,
     ) -> SpectrumToolbarActions {
         let mut actions = SpectrumToolbarActions::default();
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(colors.bg_panel)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let colors = ThemeColors::from_ui(ui);
@@ -1670,13 +1689,13 @@ impl RustpixApp {
                 }
 
                 if ui
-                    .add_enabled(
-                        energy_available,
-                        egui::SelectableLabel::new(
+                    .add_enabled_ui(energy_available, |ui| {
+                        ui.selectable_label(
                             self.ui_state.spectrum_x_axis == SpectrumXAxis::EnergyEv,
                             SpectrumXAxis::EnergyEv.to_string(),
-                        ),
-                    )
+                        )
+                    })
+                    .inner
                     .on_hover_text(if energy_available {
                         "Energy axis"
                     } else {
@@ -1699,7 +1718,7 @@ impl RustpixApp {
                 egui::Button::new("⚙")
                     .fill(Color32::TRANSPARENT)
                     .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0)),
+                    .corner_radius(CornerRadius::same(4)),
             )
             .on_hover_text("Spectrum settings")
             .clicked()
@@ -1718,7 +1737,7 @@ impl RustpixApp {
                 Color32::TRANSPARENT
             })
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         let data_response = ui.add(data_button);
         let data_icon = Self::roi_icon_image(RoiToolbarIcon::Data, colors.text_muted);
         data_icon.paint_at(ui, data_response.rect.shrink(4.0));
@@ -1741,7 +1760,7 @@ impl RustpixApp {
         )
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, colors.border_light))
-        .rounding(Rounding::same(4.0));
+        .corner_radius(CornerRadius::same(4));
         if ui.add(range_btn).clicked() {
             let opening = !self.ui_state.panel_popups.show_spectrum_range;
             self.ui_state.panel_popups.show_spectrum_range = opening;
@@ -1760,7 +1779,7 @@ impl RustpixApp {
                 Color32::TRANSPARENT
             })
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         if ui.add(help_button).on_hover_text("Spectrum help").clicked() {
             self.ui_state.panel_popups.show_spectrum_help =
                 !self.ui_state.panel_popups.show_spectrum_help;
@@ -1782,7 +1801,7 @@ impl RustpixApp {
         )
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, colors.border_light))
-        .rounding(Rounding::same(4.0));
+        .corner_radius(CornerRadius::same(4));
         if ui
             .add_enabled(has_full_spectrum, png_btn)
             .on_hover_text("Export spectrum as PNG")
@@ -1798,7 +1817,7 @@ impl RustpixApp {
         )
         .fill(Color32::TRANSPARENT)
         .stroke(Stroke::new(1.0, colors.border_light))
-        .rounding(Rounding::same(4.0));
+        .corner_radius(CornerRadius::same(4));
         if ui
             .add_enabled(has_visible_spectrum, csv_btn)
             .on_hover_text("Export spectrum as CSV")
@@ -1826,7 +1845,7 @@ impl RustpixApp {
                     )
                     .fill(Color32::TRANSPARENT)
                     .stroke(Stroke::new(1.0, colors.border_light))
-                    .rounding(Rounding::same(4.0)),
+                    .corner_radius(CornerRadius::same(4)),
                 )
                 .on_hover_text("Reset spectrum view (or double-click)")
                 .clicked()
@@ -1869,7 +1888,7 @@ impl RustpixApp {
         let button = egui::Button::new(egui::RichText::new(label).size(10.0).color(text_color))
             .fill(fill)
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         ui.add(button).clicked()
     }
 
@@ -2158,11 +2177,8 @@ impl RustpixApp {
             }
 
             for (name, color, points) in &data.lines {
-                plot_ui.line(
-                    Line::new(PlotPoints::new(points.clone()))
-                        .color(*color)
-                        .name(name.as_str()),
-                );
+                plot_ui
+                    .line(Line::new(name.as_str(), PlotPoints::new(points.clone())).color(*color));
             }
 
             let response = plot_ui.response().clone();
@@ -2269,11 +2285,10 @@ impl RustpixApp {
                     }
                 }
                 plot_ui.vline(
-                    VLine::new(slice_x)
+                    VLine::new(format!("Slice {}", inputs.current_tof_bin + 1), slice_x)
                         .color(accent::RED)
                         .width(1.0)
-                        .style(egui_plot::LineStyle::Dashed { length: 4.0 })
-                        .name(format!("Slice {}", inputs.current_tof_bin + 1)),
+                        .style(egui_plot::LineStyle::Dashed { length: 4.0 }),
                 );
             }
         }
@@ -2374,11 +2389,11 @@ impl RustpixApp {
         } else {
             Color32::from_rgb(0xe8, 0xe8, 0xe8)
         };
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(no_data_bg)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::same(16.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
                 let colors = ThemeColors::from_ui(ui);
                 ui.set_min_height(140.0);
@@ -2537,7 +2552,7 @@ impl RustpixApp {
                             .tint(colors.text_muted)
                             .fit_to_exact_size(egui::vec2(12.0, 12.0));
                     if ui
-                        .add(egui::ImageButton::new(rename_icon).frame(true))
+                        .add(egui::Button::image(rename_icon).frame(true))
                         .on_hover_text("Rename ROI")
                         .clicked()
                     {
@@ -2726,11 +2741,11 @@ impl RustpixApp {
 
     fn render_spectrum_legend(ui: &mut egui::Ui, items: &[(String, Color32)]) {
         let colors = ThemeColors::from_ui(ui);
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(colors.bg_panel)
             .stroke(Stroke::new(1.0, colors.border))
-            .rounding(Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
@@ -2818,7 +2833,7 @@ impl RustpixApp {
                 Color32::TRANSPARENT
             })
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         let response = ui.add(button);
         let image = Self::zoom_icon_image(icon, tint);
         image.paint_at(ui, response.rect.shrink(5.0));
@@ -2852,7 +2867,7 @@ impl RustpixApp {
         move |ui: &mut egui::Ui| {
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, Rounding::same(2.0), color);
+            ui.painter().rect_filled(rect, CornerRadius::same(2), color);
             response
         }
     }
@@ -2863,7 +2878,7 @@ impl RustpixApp {
             .min_size(egui::vec2(28.0, 22.0))
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, colors.border_light))
-            .rounding(Rounding::same(4.0));
+            .corner_radius(CornerRadius::same(4));
         let response = ui.add(button);
         let image = Self::roi_icon_image(icon, colors.text_muted);
         image.paint_at(ui, response.rect.shrink(4.0));

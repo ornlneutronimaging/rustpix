@@ -38,9 +38,16 @@ fn main() -> eframe::Result<()> {
 
 fn load_app_icon() -> Option<egui::IconData> {
     let bytes = include_bytes!("../assets/icons/app-icon.svg");
+    let size_hint = egui::SizeHint::Size {
+        width: 256,
+        height: 256,
+        maintain_aspect_ratio: true,
+    };
+    // Options type is resvg::usvg::Options (transitive dep, not directly nameable)
+    #[allow(clippy::default_trait_access)]
+    let svg_options = Default::default();
     let image =
-        egui_extras::image::load_svg_bytes_with_size(bytes, Some(egui::SizeHint::Size(256, 256)))
-            .ok()?;
+        egui_extras::image::load_svg_bytes_with_size(bytes, size_hint, &svg_options).ok()?;
     let [width, height] = image.size;
     let width = u32::try_from(width).ok()?;
     let height = u32::try_from(height).ok()?;
