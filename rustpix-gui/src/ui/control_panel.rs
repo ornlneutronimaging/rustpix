@@ -111,8 +111,9 @@ impl RustpixApp {
         } else {
             FontId::new(12.0, FontFamily::Monospace)
         };
-        let galley =
-            ui.painter().layout_no_wrap(status_text.clone(), status_font, status_color);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(status_text.clone(), status_font, status_color);
         let text_width = galley.size().x;
         let text_y = status_rect.center().y - galley.size().y / 2.0;
         let painter = ui.painter().with_clip_rect(status_rect);
@@ -681,7 +682,8 @@ impl RustpixApp {
             } else {
                 Color32::TRANSPARENT
             };
-            ui.painter().rect_filled(header_rect, CornerRadius::ZERO, header_fill);
+            ui.painter()
+                .rect_filled(header_rect, CornerRadius::ZERO, header_fill);
 
             let text_pos = header_rect.left_center() + egui::vec2(16.0, 0.0);
             ui.painter().text(

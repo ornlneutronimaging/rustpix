@@ -630,7 +630,10 @@ impl RustpixApp {
 
         let Some(counts) = counts else {
             let pixel_count = disp_w.max(1) * disp_h.max(1);
-            return egui::ColorImage::new([disp_w.max(1), disp_h.max(1)], vec![egui::Color32::BLACK; pixel_count]);
+            return egui::ColorImage::new(
+                [disp_w.max(1), disp_h.max(1)],
+                vec![egui::Color32::BLACK; pixel_count],
+            );
         };
         generate_histogram_image_transformed(
             counts,

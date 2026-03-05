@@ -45,8 +45,7 @@ fn load_app_icon() -> Option<egui::IconData> {
         maintain_aspect_ratio: true,
     };
     let image =
-        egui_extras::image::load_svg_bytes_with_size(bytes, size_hint, &Default::default())
-            .ok()?;
+        egui_extras::image::load_svg_bytes_with_size(bytes, size_hint, &Default::default()).ok()?;
     let [width, height] = image.size;
     let width = u32::try_from(width).ok()?;
     let height = u32::try_from(height).ok()?;

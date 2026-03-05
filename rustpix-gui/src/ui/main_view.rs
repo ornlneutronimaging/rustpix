@@ -470,11 +470,17 @@ impl RustpixApp {
             );
             let _ = ui.allocate_rect(rect, egui::Sense::hover());
 
-            ui.painter().rect_filled(rect, CornerRadius::same(4), colors.bg_panel);
             ui.painter()
-                .rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, colors.border), StrokeKind::Inside);
+                .rect_filled(rect, CornerRadius::same(4), colors.bg_panel);
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(4),
+                Stroke::new(1.0, colors.border),
+                StrokeKind::Inside,
+            );
 
-            let inner_rect = rect.shrink2(egui::vec2(f32::from(margin.left), f32::from(margin.top)));
+            let inner_rect =
+                rect.shrink2(egui::vec2(f32::from(margin.left), f32::from(margin.top)));
             let mut slicer_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(inner_rect)
@@ -1381,7 +1387,12 @@ impl RustpixApp {
             }
 
             // Border
-            painter.rect_stroke(rect.1, CornerRadius::ZERO, Stroke::new(1.0, colors.border), StrokeKind::Inside);
+            painter.rect_stroke(
+                rect.1,
+                CornerRadius::ZERO,
+                Stroke::new(1.0, colors.border),
+                StrokeKind::Inside,
+            );
 
             // "0" label at bottom
             ui.add_space(4.0);
@@ -1433,29 +1444,33 @@ impl RustpixApp {
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, colors.border_light))
             .corner_radius(CornerRadius::same(4));
-        let menu_response = egui::containers::menu::MenuButton::from_button(menu_button).ui(ui, |ui| {
-            ui.horizontal(|ui| {
-                Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Rectangle, colors.text_muted);
-                if ui
-                    .selectable_label(
-                        self.roi_state.mode == RoiSelectionMode::Rectangle,
-                        "Rectangle",
-                    )
-                    .clicked()
-                {
-                    selection_mode = RoiSelectionMode::Rectangle;
-                }
+        let menu_response =
+            egui::containers::menu::MenuButton::from_button(menu_button).ui(ui, |ui| {
+                ui.horizontal(|ui| {
+                    Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Rectangle, colors.text_muted);
+                    if ui
+                        .selectable_label(
+                            self.roi_state.mode == RoiSelectionMode::Rectangle,
+                            "Rectangle",
+                        )
+                        .clicked()
+                    {
+                        selection_mode = RoiSelectionMode::Rectangle;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Polygon, colors.text_muted);
+                    if ui
+                        .selectable_label(
+                            self.roi_state.mode == RoiSelectionMode::Polygon,
+                            "Polygon",
+                        )
+                        .clicked()
+                    {
+                        selection_mode = RoiSelectionMode::Polygon;
+                    }
+                });
             });
-            ui.horizontal(|ui| {
-                Self::paint_roi_icon_in_ui(ui, RoiToolbarIcon::Polygon, colors.text_muted);
-                if ui
-                    .selectable_label(self.roi_state.mode == RoiSelectionMode::Polygon, "Polygon")
-                    .clicked()
-                {
-                    selection_mode = RoiSelectionMode::Polygon;
-                }
-            });
-        });
         let icon_rect = menu_response.0.rect.shrink2(egui::vec2(4.0, 4.0));
         let icon_rect = Rect::from_min_max(
             icon_rect.min,
@@ -1492,12 +1507,13 @@ impl RustpixApp {
             .fill(Color32::TRANSPARENT)
             .stroke(Stroke::new(1.0, colors.border_light))
             .corner_radius(CornerRadius::same(4));
-        let gear_response = egui::containers::menu::MenuButton::from_button(gear_button).ui(ui, |ui| {
-            ui.checkbox(
-                &mut self.roi_state.debounce_updates,
-                "Debounce spectrum updates",
-            );
-        });
+        let gear_response =
+            egui::containers::menu::MenuButton::from_button(gear_button).ui(ui, |ui| {
+                ui.checkbox(
+                    &mut self.roi_state.debounce_updates,
+                    "Debounce spectrum updates",
+                );
+            });
         let image = Self::roi_icon_image(RoiToolbarIcon::Gear, colors.text_muted);
         image.paint_at(ui, gear_response.0.rect.shrink(4.0));
         gear_response.0.on_hover_text("ROI settings");
@@ -2161,10 +2177,8 @@ impl RustpixApp {
             }
 
             for (name, color, points) in &data.lines {
-                plot_ui.line(
-                    Line::new(name.as_str(), PlotPoints::new(points.clone()))
-                        .color(*color),
-                );
+                plot_ui
+                    .line(Line::new(name.as_str(), PlotPoints::new(points.clone())).color(*color));
             }
 
             let response = plot_ui.response().clone();
