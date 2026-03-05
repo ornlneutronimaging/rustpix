@@ -721,7 +721,6 @@ impl RustpixApp {
 
         let mut plot = Plot::new(HISTOGRAM_PLOT_ID)
             .data_aspect(1.0)
-            .auto_bounds(Vec2b::new(false, false))
             .include_x(0.0)
             .include_x(inputs.data_width_f64)
             .include_y(0.0)
