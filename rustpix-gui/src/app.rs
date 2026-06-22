@@ -849,7 +849,7 @@ impl RustpixApp {
             }
         }
 
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         entries
     }
 
@@ -1758,9 +1758,7 @@ fn export_hdf5_worker(
         Err(err) => vec![format!("Validation failed: {err}")],
     };
 
-    let size = std::fs::metadata(&request.path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(&request.path).map_or(0, |m| m.len());
     send_export_progress(tx, 1.0, "Export complete");
     Ok((size, warnings))
 }
@@ -1882,9 +1880,7 @@ fn export_sns_hdf5_worker(
         anyhow!("Failed to finalize SNS HDF5: {err}")
     })?;
 
-    let size = std::fs::metadata(&request.path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(&request.path).map_or(0, |m| m.len());
     send_export_progress(tx, 1.0, "Export complete");
     Ok((size, warnings))
 }

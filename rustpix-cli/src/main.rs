@@ -1288,9 +1288,7 @@ fn run_out_of_core_benchmark(
 
     let mut multi_config = single_config.clone().with_queue_depth(queue_depth);
     let threads = parallelism.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
     });
     multi_config = multi_config.with_parallelism(threads);
     multi_config = multi_config.with_async_io(async_io);
