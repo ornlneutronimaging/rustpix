@@ -1,0 +1,35 @@
+{
+  "title": "rustpix: High-performance Rust library for pixel-detector (Timepix3) data processing",
+  "description": "rustpix is a high-performance Rust library with first-class Python bindings (via PyO3) for pixel-detector data processing in neutron imaging. It processes Timepix3 (TPX3) event data at 96M+ hits/sec, provides multiple clustering algorithms (ABS, DBSCAN, Graph, Grid) and centroid extraction, and is designed to extend to TPX4 and other detector types.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Zhang, Chen",
+      "affiliation": "Oak Ridge National Laboratory",
+      "orcid": "0000-0001-8374-4467"
+    },
+    {
+      "name": "Funama, Fumiaki",
+      "affiliation": "Oak Ridge National Laboratory",
+      "orcid": "0000-0003-3280-8103"
+    },
+    {
+      "name": "Bilheux, Jean",
+      "affiliation": "Oak Ridge National Laboratory",
+      "orcid": "0000-0003-2172-6487"
+    }
+  ],
+  "keywords": [
+    "neutron imaging",
+    "Timepix3",
+    "TPX3",
+    "pixel detector",
+    "event mode",
+    "clustering",
+    "centroiding",
+    "Rust",
+    "Python"
+  ]
+}
