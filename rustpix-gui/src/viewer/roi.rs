@@ -596,7 +596,11 @@ impl RoiState {
                 continue;
             }
             let rid = roi.id;
-            let stroke_width = if roi.selection.selected { 2.0 } else { 1.0 };
+            let stroke_width = if roi.selection.selected {
+                2.0_f32
+            } else {
+                1.0_f32
+            };
             let stroke = Stroke::new(stroke_width, roi.color);
             let fill = roi_fill_color(roi.color);
 
@@ -624,7 +628,7 @@ impl RoiState {
                                     format!("roi_{rid}_tri_{ti}"),
                                     vec![tri[0], tri[1], tri[2]],
                                 )
-                                .stroke(Stroke::new(0.0, Color32::TRANSPARENT))
+                                .stroke(Stroke::new(0.0_f32, Color32::TRANSPARENT))
                                 .fill_color(fill),
                             );
                         }
@@ -659,7 +663,7 @@ impl RoiState {
                         Points::new(format!("roi_{rid}_handles"), handle_points)
                             .color(roi.color)
                             .shape(MarkerShape::Square)
-                            .radius(3.0),
+                            .radius(3.0_f32),
                     );
                 }
             }
@@ -670,7 +674,7 @@ impl RoiState {
     pub fn draw_draft(&self, plot_ui: &mut PlotUi) {
         if let Some(draft) = &self.draft {
             let color = roi_palette_color(self.next_id.saturating_sub(1));
-            let stroke = Stroke::new(1.0, color);
+            let stroke = Stroke::new(1.0_f32, color);
             let fill = roi_fill_color(color);
             let points = draft_plot_points(draft);
             plot_ui.polygon(
@@ -696,7 +700,7 @@ impl RoiState {
                     Points::new("draft_poly_handles", handle_points)
                         .color(color)
                         .shape(MarkerShape::Circle)
-                        .radius(3.0),
+                        .radius(3.0_f32),
                 );
             }
         }

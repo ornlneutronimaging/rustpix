@@ -60,7 +60,7 @@ impl RustpixApp {
                     ui.painter().hline(
                         ui.available_rect_before_wrap().x_range(),
                         ui.cursor().top(),
-                        Stroke::new(1.0, colors.border),
+                        Stroke::new(1.0_f32, colors.border),
                     );
                 });
                 ui.add_space(8.0);
