@@ -475,7 +475,7 @@ impl RustpixApp {
             ui.painter().rect_stroke(
                 rect,
                 CornerRadius::same(4),
-                Stroke::new(1.0, colors.border),
+                Stroke::new(1.0_f32, colors.border),
                 StrokeKind::Inside,
             );
 
@@ -596,7 +596,7 @@ impl RustpixApp {
                 )
                 .min_size(egui::vec2(0.0, 28.0))
                 .fill(Color32::TRANSPARENT)
-                .stroke(Stroke::new(1.0, colors.border_light))
+                .stroke(Stroke::new(1.0_f32, colors.border_light))
                 .corner_radius(CornerRadius::same(4));
 
                 if ui
@@ -633,7 +633,7 @@ impl RustpixApp {
                 } else {
                     Color32::TRANSPARENT
                 })
-                .stroke(Stroke::new(1.0, colors.border_light))
+                .stroke(Stroke::new(1.0_f32, colors.border_light))
                 .corner_radius(CornerRadius::same(4));
 
                 if ui.add(grid_btn).on_hover_text("Toggle grid").clicked() {
@@ -707,7 +707,7 @@ impl RustpixApp {
             } else {
                 Color32::TRANSPARENT
             })
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         ui.add(btn)
     }
@@ -815,7 +815,7 @@ impl RustpixApp {
         };
         egui::Frame::new()
             .fill(no_data_bg)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
@@ -974,7 +974,7 @@ impl RustpixApp {
                     };
                     let hot_points = Points::new("hot_pixels", PlotPoints::new(hot_points))
                         .shape(MarkerShape::Square)
-                        .radius(2.0)
+                        .radius(2.0_f32)
                         .color(accent::RED)
                         .allow_hover(false);
                     plot_ui.points(hot_points);
@@ -1346,7 +1346,7 @@ impl RustpixApp {
         painter.rect_stroke(
             rect,
             CornerRadius::same(2),
-            Stroke::new(1.0, Color32::from_rgb(58, 130, 246)),
+            Stroke::new(1.0_f32, Color32::from_rgb(58, 130, 246)),
             StrokeKind::Inside,
         );
     }
@@ -1390,7 +1390,7 @@ impl RustpixApp {
             painter.rect_stroke(
                 rect.1,
                 CornerRadius::ZERO,
-                Stroke::new(1.0, colors.border),
+                Stroke::new(1.0_f32, colors.border),
                 StrokeKind::Inside,
             );
 
@@ -1407,7 +1407,7 @@ impl RustpixApp {
     fn render_roi_toolbar(&mut self, ui: &mut egui::Ui) {
         let colors = ThemeColors::from_ui(ui);
         egui::Frame::new()
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::symmetric(4, 2))
             .show(ui, |ui| {
@@ -1442,7 +1442,7 @@ impl RustpixApp {
         let menu_button = egui::Button::new("")
             .min_size(egui::vec2(34.0, 22.0))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         let menu_response =
             egui::containers::menu::MenuButton::from_button(menu_button).ui(ui, |ui| {
@@ -1505,7 +1505,7 @@ impl RustpixApp {
         let gear_button = egui::Button::new("")
             .min_size(egui::vec2(28.0, 22.0))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         let gear_response =
             egui::containers::menu::MenuButton::from_button(gear_button).ui(ui, |ui| {
@@ -1523,7 +1523,7 @@ impl RustpixApp {
         let help_button = egui::Button::new("?")
             .min_size(egui::vec2(24.0, 22.0))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         let response = ui.add(help_button);
         if response.clicked() {
@@ -1635,7 +1635,7 @@ impl RustpixApp {
         let mut actions = SpectrumToolbarActions::default();
         egui::Frame::new()
             .fill(colors.bg_panel)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
@@ -1717,7 +1717,7 @@ impl RustpixApp {
             .add(
                 egui::Button::new("⚙")
                     .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .stroke(Stroke::new(1.0_f32, colors.border_light))
                     .corner_radius(CornerRadius::same(4)),
             )
             .on_hover_text("Spectrum settings")
@@ -1736,7 +1736,7 @@ impl RustpixApp {
             } else {
                 Color32::TRANSPARENT
             })
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         let data_response = ui.add(data_button);
         let data_icon = Self::roi_icon_image(RoiToolbarIcon::Data, colors.text_muted);
@@ -1759,7 +1759,7 @@ impl RustpixApp {
                 .color(colors.text_dim),
         )
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, colors.border_light))
+        .stroke(Stroke::new(1.0_f32, colors.border_light))
         .corner_radius(CornerRadius::same(4));
         if ui.add(range_btn).clicked() {
             let opening = !self.ui_state.panel_popups.show_spectrum_range;
@@ -1778,7 +1778,7 @@ impl RustpixApp {
             } else {
                 Color32::TRANSPARENT
             })
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         if ui.add(help_button).on_hover_text("Spectrum help").clicked() {
             self.ui_state.panel_popups.show_spectrum_help =
@@ -1800,7 +1800,7 @@ impl RustpixApp {
                 .color(colors.text_dim),
         )
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, colors.border_light))
+        .stroke(Stroke::new(1.0_f32, colors.border_light))
         .corner_radius(CornerRadius::same(4));
         if ui
             .add_enabled(has_full_spectrum, png_btn)
@@ -1816,7 +1816,7 @@ impl RustpixApp {
                 .color(colors.text_dim),
         )
         .fill(Color32::TRANSPARENT)
-        .stroke(Stroke::new(1.0, colors.border_light))
+        .stroke(Stroke::new(1.0_f32, colors.border_light))
         .corner_radius(CornerRadius::same(4));
         if ui
             .add_enabled(has_visible_spectrum, csv_btn)
@@ -1844,7 +1844,7 @@ impl RustpixApp {
                             .color(colors.text_muted),
                     )
                     .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, colors.border_light))
+                    .stroke(Stroke::new(1.0_f32, colors.border_light))
                     .corner_radius(CornerRadius::same(4)),
                 )
                 .on_hover_text("Reset spectrum view (or double-click)")
@@ -1887,7 +1887,7 @@ impl RustpixApp {
         };
         let button = egui::Button::new(egui::RichText::new(label).size(10.0).color(text_color))
             .fill(fill)
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         ui.add(button).clicked()
     }
@@ -2287,7 +2287,7 @@ impl RustpixApp {
                 plot_ui.vline(
                     VLine::new(format!("Slice {}", inputs.current_tof_bin + 1), slice_x)
                         .color(accent::RED)
-                        .width(1.0)
+                        .width(1.0_f32)
                         .style(egui_plot::LineStyle::Dashed { length: 4.0 }),
                 );
             }
@@ -2391,7 +2391,7 @@ impl RustpixApp {
         };
         egui::Frame::new()
             .fill(no_data_bg)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
@@ -2743,7 +2743,7 @@ impl RustpixApp {
         let colors = ThemeColors::from_ui(ui);
         egui::Frame::new()
             .fill(colors.bg_panel)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
@@ -2832,7 +2832,7 @@ impl RustpixApp {
             } else {
                 Color32::TRANSPARENT
             })
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         let response = ui.add(button);
         let image = Self::zoom_icon_image(icon, tint);
@@ -2858,7 +2858,7 @@ impl RustpixApp {
         ui.painter().vline(
             rect.1.center().x,
             rect.1.y_range(),
-            Stroke::new(1.0, colors.border),
+            Stroke::new(1.0_f32, colors.border),
         );
     }
 
@@ -2877,7 +2877,7 @@ impl RustpixApp {
         let button = egui::Button::new("")
             .min_size(egui::vec2(28.0, 22.0))
             .fill(Color32::TRANSPARENT)
-            .stroke(Stroke::new(1.0, colors.border_light))
+            .stroke(Stroke::new(1.0_f32, colors.border_light))
             .corner_radius(CornerRadius::same(4));
         let response = ui.add(button);
         let image = Self::roi_icon_image(icon, colors.text_muted);

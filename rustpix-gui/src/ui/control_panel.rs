@@ -226,7 +226,7 @@ impl RustpixApp {
         // Container frame for the toggle group
         egui::Frame::new()
             .fill(colors.bg_dark)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::same(2))
             .show(ui, |ui| {
@@ -517,7 +517,7 @@ impl RustpixApp {
 
         egui::Frame::new()
             .fill(colors.bg_dark)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::same(2))
             .show(ui, |ui| {
@@ -703,7 +703,7 @@ impl RustpixApp {
                 ui.painter().rect_stroke(
                     rect,
                     CornerRadius::same(3),
-                    Stroke::new(1.0, colors.border_light),
+                    Stroke::new(1.0_f32, colors.border_light),
                     StrokeKind::Inside,
                 );
                 ui.painter().rect_filled(rect, CornerRadius::same(3), fill);
@@ -730,7 +730,7 @@ impl RustpixApp {
             ui.painter().hline(
                 header_rect.x_range(),
                 header_rect.bottom(),
-                Stroke::new(1.0, colors.border),
+                Stroke::new(1.0_f32, colors.border),
             );
 
             // Content
@@ -752,7 +752,7 @@ impl RustpixApp {
             ui.painter().hline(
                 last_rect.x_range(),
                 last_rect.bottom(),
-                Stroke::new(1.0, colors.border),
+                Stroke::new(1.0_f32, colors.border),
             );
         });
     }
@@ -870,7 +870,7 @@ impl RustpixApp {
                 .add(
                     egui::Button::new("⚙")
                         .fill(Color32::TRANSPARENT)
-                        .stroke(Stroke::new(1.0, colors.border_light))
+                        .stroke(Stroke::new(1.0_f32, colors.border_light))
                         .corner_radius(CornerRadius::same(4)),
                 )
                 .on_hover_text("Algorithm parameters")
@@ -886,7 +886,7 @@ impl RustpixApp {
         ui.add_space(8.0);
         egui::Frame::new()
             .fill(colors.bg_header)
-            .stroke(Stroke::new(1.0, colors.border))
+            .stroke(Stroke::new(1.0_f32, colors.border))
             .corner_radius(CornerRadius::same(4))
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
@@ -1093,7 +1093,7 @@ impl RustpixApp {
                         ui.add(
                             egui::Button::new("?")
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(Stroke::new(1.0, colors.border_light))
+                                .stroke(Stroke::new(1.0_f32, colors.border_light))
                                 .corner_radius(CornerRadius::same(4)),
                         )
                         .on_hover_text(
