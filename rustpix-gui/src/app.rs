@@ -150,6 +150,7 @@ struct MemoryTelemetry {
     pid: Option<Pid>,
     last_refresh: f64,
     rss_bytes: u64,
+    available_bytes: u64,
 }
 
 impl MemoryTelemetry {
@@ -161,6 +162,7 @@ impl MemoryTelemetry {
             pid,
             last_refresh: -1.0,
             rss_bytes: 0,
+            available_bytes: 0,
         }
     }
 
@@ -176,6 +178,8 @@ impl MemoryTelemetry {
                 self.rss_bytes = process.memory();
             }
         }
+        self.system.refresh_memory();
+        self.available_bytes = self.system.available_memory();
     }
 }
 
@@ -761,6 +765,15 @@ impl RustpixApp {
 
     pub(crate) fn memory_rss_bytes(&self) -> u64 {
         self.memory_telemetry.rss_bytes
+    }
+
+    /// Memory the OS reports as available, or `None` before the first refresh.
+    ///
+    /// Only ever used to warn, never to block: this figure is unreliable under
+    /// cgroup limits and on cluster nodes, and a false negative there would
+    /// stop legitimate work on machines that can in fact hold the result.
+    pub(crate) fn memory_available_bytes(&self) -> Option<u64> {
+        (self.memory_telemetry.available_bytes > 0).then_some(self.memory_telemetry.available_bytes)
     }
 
     pub(crate) fn memory_breakdown(&self) -> Vec<(String, u64)> {

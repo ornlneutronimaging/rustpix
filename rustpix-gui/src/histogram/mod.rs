@@ -8,13 +8,56 @@ use std::ops::Range;
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 
+/// Smallest TOF bin count the UI will offer.
+pub const MIN_TOF_BINS: usize = 10;
+
+/// Largest TOF bin count the UI will offer.
+///
+/// This is a rail against fat-fingered input. It is deliberately not the
+/// information limit and not a memory limit, because neither of those is a
+/// constant:
+///
+/// * Information. Bins finer than the detector's 25 ns TOF quantum hold no
+///   extra signal, so the useful ceiling is `tof_max` in 25 ns units — but
+///   that scales with the TDC frequency: ~666,667 at 60 Hz, and 40,000,000
+///   at the 1 Hz floor the GUI allows. This constant clears the 60 Hz case
+///   outright, so a VENUS measurement is never stopped short of the
+///   detector's own resolution.
+/// * Memory. The hyperstack is dense, so cost is linear in bin count — see
+///   [`hyperstack_bytes`]. A 514x514 VENUS detector costs ~2.1 MB per bin,
+///   and the hits and neutrons stacks are resident at the same time.
+///
+/// Memory is what actually binds in practice, and by how much depends on the
+/// detector and the host, so the UI reports the estimate next to the control
+/// instead of baking in a number that would be wrong on most machines.
+pub const MAX_TOF_BINS: usize = 1_000_000;
+
+/// Bytes the backing store of a hyperstack of these dimensions will need.
+///
+/// Saturates rather than overflowing: this feeds a UI estimate, and a
+/// clamped "very large" reads the same as an exact one at that scale.
+#[must_use]
+pub fn hyperstack_bytes(n_tof_bins: usize, width: usize, height: usize) -> u64 {
+    let elem = u64::try_from(std::mem::size_of::<u64>()).unwrap_or(u64::MAX);
+    u64::try_from(n_tof_bins)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(width).unwrap_or(u64::MAX))
+        .saturating_mul(u64::try_from(height).unwrap_or(u64::MAX))
+        .saturating_mul(elem)
+}
+
 /// A 3D histogram storing counts indexed by (TOF bin, y, x).
 ///
 /// Data is stored in row-major order: `data[tof * height * width + y * width + x]`
 ///
 /// # Memory Layout
 ///
-/// For a 200-bin × 512 × 512 hyperstack, memory usage is approximately 419 MB.
+/// Storage is dense, so it grows linearly with the bin count: a
+/// 200-bin × 512 × 512 hyperstack is 419.4 MB (400 MiB), and 10,000 bins on
+/// a 514 × 514 VENUS detector is 21.1 GB (19.7 GiB). Use
+/// [`hyperstack_bytes`] to size one before building it. Note the UI's
+/// `format_bytes` renders these in binary units, so the settings window
+/// shows the latter as "19.68 GB".
 #[derive(Debug, Clone)]
 pub struct Hyperstack3D {
     /// Flattened 3D data array.
@@ -315,6 +358,79 @@ impl Hyperstack3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// VENUS TOF span for a 60 Hz source, in 25 ns units.
+    const VENUS_TOF_MAX: u32 = 666_667;
+
+    #[test]
+    fn tof_bin_range_admits_ten_thousand_bins() {
+        // The instrument scientists asked for 10,000 bins; the old cap was 2,000.
+        // This is the same range expression the DragValues are built with, so it
+        // fails if either bound stops admitting the requested count.
+        assert!((MIN_TOF_BINS..=MAX_TOF_BINS).contains(&10_000));
+        // Real headroom above the request, not a cap moved just far enough.
+        assert!((MIN_TOF_BINS..=MAX_TOF_BINS).contains(&100_000));
+    }
+
+    #[test]
+    fn tof_bin_ceiling_covers_full_25ns_resolution_at_60hz() {
+        // A 60 Hz source spans VENUS_TOF_MAX ticks of 25 ns. Keeping the ceiling
+        // at or above that means the UI never stops a user short of the
+        // detector's own TOF resolution. (At lower TDC frequencies tof_max is
+        // larger still — the ceiling is a typo rail, not an information limit.)
+        assert!(MAX_TOF_BINS >= VENUS_TOF_MAX as usize);
+    }
+
+    #[test]
+    fn tof_binning_is_correct_at_ten_thousand_bins() {
+        // 1x1 detector keeps this cheap (80 KB) while still exercising the
+        // narrow-bin arithmetic that only shows up at high bin counts.
+        let bins = 10_000;
+        let mut hs = Hyperstack3D::new(bins, 1, 1, VENUS_TOF_MAX);
+        // 666_667 / 10_000 = 66.6667 units per bin — still well above the
+        // 1-unit (25 ns) hardware quantum, so no bin is unreachable.
+        assert!(hs.bin_width() > 1.0);
+
+        let mut batch = HitBatch::default();
+        // Bins 0 and 9_999 alone would not catch a wrong bin width: bin 0
+        // absorbs everything that lands too low, and the `.min(n_bins - 1)`
+        // clamp absorbs everything that lands too high. The middle probe is the
+        // one that pins the scale. Each value sits mid-bin, ~33 units from
+        // either edge, so the test keys on the bin width and not on rounding.
+        batch.push((0, 0, 33, 10, 0, 0)); // bin 0     [0, 66.67)
+        batch.push((0, 0, 333_300, 10, 0, 0)); // bin 4_999 [333_266.83, 333_333.50)
+        batch.push((0, 0, 666_633, 10, 0, 0)); // bin 9_999 [666_600.33, 666_667.00)
+        hs.accumulate_hits(&batch);
+
+        assert_eq!(hs.get(0, 0, 0), Some(1));
+        assert_eq!(hs.get(4_999, 0, 0), Some(1));
+        assert_eq!(hs.get(9_999, 0, 0), Some(1));
+
+        // Neighbours of the middle probe must be empty, or a bin width that is
+        // merely close would still pass.
+        assert_eq!(hs.get(4_998, 0, 0), Some(0));
+        assert_eq!(hs.get(5_000, 0, 0), Some(0));
+
+        let spectrum = hs.full_spectrum();
+        assert_eq!(spectrum.len(), bins);
+        assert_eq!(spectrum.iter().sum::<u64>(), 3);
+    }
+
+    #[test]
+    fn hyperstack_bytes_matches_documented_sizes() {
+        // The figures quoted in the Hyperstack3D docs.
+        assert_eq!(hyperstack_bytes(200, 512, 512), 419_430_400);
+        // 514x514 VENUS at the requested 10,000 bins.
+        assert_eq!(hyperstack_bytes(10_000, 514, 514), 21_135_680_000);
+    }
+
+    #[test]
+    fn hyperstack_bytes_saturates_instead_of_overflowing() {
+        assert_eq!(
+            hyperstack_bytes(usize::MAX, usize::MAX, usize::MAX),
+            u64::MAX
+        );
+    }
 
     #[test]
     fn test_new_hyperstack() {
