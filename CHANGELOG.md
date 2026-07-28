@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard; it also blocked bin counts that instruments legitimately need. The
   limit is now a rail against mistyped input — a 60 Hz source carries no
   information past ~666,667 bins, and memory binds well before that.
+- GUI: TOF bin drag sensitivity now scales with the current value, so the drag
+  gesture can still traverse the wider range. Typing an exact value is
+  unchanged.
 
 ### Added
 

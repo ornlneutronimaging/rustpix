@@ -1760,79 +1760,88 @@ x,y are local chip coordinates (pixels).",
         );
     }
 
+    /// Render the Hyperstack Settings window (TOF binning for hits + neutrons).
+    fn render_hyperstack_settings_window(&mut self, ctx: &egui::Context, colors: ThemeColors) {
+        let mut show_app_settings = self.ui_state.panels.show_app_settings;
+        egui::Window::new("Hyperstack Settings")
+            .open(&mut show_app_settings)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Adjust TOF binning for hits and neutrons.");
+                ui.add_space(8.0);
+
+                // Both stacks are built at the detector's dimensions, so one
+                // lookup sizes both estimates.
+                let dimensions = self.current_data_dimensions();
+                let available = self.memory_available_bytes();
+
+                egui::CollapsingHeader::new("Hits Hyperstack")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("TOF bins");
+                            let speed = tof_bin_drag_speed(self.hit_tof_bins);
+                            ui.add(
+                                egui::DragValue::new(&mut self.hit_tof_bins)
+                                    .range(MIN_TOF_BINS..=MAX_TOF_BINS)
+                                    .speed(speed),
+                            );
+                        });
+                        render_hyperstack_size_hint(
+                            ui,
+                            colors,
+                            self.hit_tof_bins,
+                            dimensions,
+                            available,
+                        );
+                        let can_rebuild = self.hit_batch.is_some();
+                        if ui
+                            .add_enabled(can_rebuild, egui::Button::new("Rebuild Hits"))
+                            .clicked()
+                        {
+                            self.rebuild_hit_hyperstack();
+                        }
+                    });
+
+                egui::CollapsingHeader::new("Neutrons Hyperstack")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("TOF bins");
+                            let speed = tof_bin_drag_speed(self.neutron_tof_bins);
+                            ui.add(
+                                egui::DragValue::new(&mut self.neutron_tof_bins)
+                                    .range(MIN_TOF_BINS..=MAX_TOF_BINS)
+                                    .speed(speed),
+                            );
+                        });
+                        render_hyperstack_size_hint(
+                            ui,
+                            colors,
+                            self.neutron_tof_bins,
+                            dimensions,
+                            available,
+                        );
+
+                        let can_rebuild = !self.neutrons.is_empty();
+                        if ui
+                            .add_enabled(can_rebuild, egui::Button::new("Rebuild Neutrons"))
+                            .clicked()
+                        {
+                            self.rebuild_neutron_hyperstack();
+                        }
+                    });
+            });
+        self.ui_state.panels.show_app_settings = show_app_settings;
+    }
+
     /// Render floating settings windows (app + spectrum).
     pub(crate) fn render_settings_windows(&mut self, ctx: &egui::Context) {
         let colors = ThemeColors::from_ctx(ctx);
 
         if self.ui_state.panels.show_app_settings {
-            let mut show_app_settings = self.ui_state.panels.show_app_settings;
-            egui::Window::new("Hyperstack Settings")
-                .open(&mut show_app_settings)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("Adjust TOF binning for hits and neutrons.");
-                    ui.add_space(8.0);
-
-                    // Both stacks are built at the detector's dimensions, so one
-                    // lookup sizes both estimates.
-                    let dimensions = self.current_data_dimensions();
-                    let available = self.memory_available_bytes();
-
-                    egui::CollapsingHeader::new("Hits Hyperstack")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("TOF bins");
-                                ui.add(
-                                    egui::DragValue::new(&mut self.hit_tof_bins)
-                                        .range(MIN_TOF_BINS..=MAX_TOF_BINS),
-                                );
-                            });
-                            render_hyperstack_size_hint(
-                                ui,
-                                colors,
-                                self.hit_tof_bins,
-                                dimensions,
-                                available,
-                            );
-                            let can_rebuild = self.hit_batch.is_some();
-                            if ui
-                                .add_enabled(can_rebuild, egui::Button::new("Rebuild Hits"))
-                                .clicked()
-                            {
-                                self.rebuild_hit_hyperstack();
-                            }
-                        });
-
-                    egui::CollapsingHeader::new("Neutrons Hyperstack")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("TOF bins");
-                                ui.add(
-                                    egui::DragValue::new(&mut self.neutron_tof_bins)
-                                        .range(MIN_TOF_BINS..=MAX_TOF_BINS),
-                                );
-                            });
-                            render_hyperstack_size_hint(
-                                ui,
-                                colors,
-                                self.neutron_tof_bins,
-                                dimensions,
-                                available,
-                            );
-
-                            let can_rebuild = !self.neutrons.is_empty();
-                            if ui
-                                .add_enabled(can_rebuild, egui::Button::new("Rebuild Neutrons"))
-                                .clicked()
-                            {
-                                self.rebuild_neutron_hyperstack();
-                            }
-                        });
-                });
-            self.ui_state.panels.show_app_settings = show_app_settings;
+            self.render_hyperstack_settings_window(ctx, colors);
         }
 
         if self.ui_state.panels.show_spectrum_settings {
@@ -2621,6 +2630,18 @@ x,y are local chip coordinates (pixels).",
             .tint(tint)
             .fit_to_exact_size(egui::vec2(16.0, 16.0))
     }
+}
+
+/// Drag sensitivity for a TOF bin count, in bins per pixel.
+///
+/// A fixed speed cannot span `MIN_TOF_BINS..=MAX_TOF_BINS`: at the default
+/// 1 bin/px the gesture would need ten thousand pixels to reach 10,000 bins.
+/// Scaling with the current value keeps near-single-bin precision around the
+/// 200-bin default and stays draggable at the top of the range. Typing an
+/// exact value into the widget is unaffected.
+fn tof_bin_drag_speed(bins: usize) -> f64 {
+    let bins = u32::try_from(bins).unwrap_or(u32::MAX);
+    (f64::from(bins) / 100.0).max(1.0)
 }
 
 /// Show what the selected bin count will cost in memory.
