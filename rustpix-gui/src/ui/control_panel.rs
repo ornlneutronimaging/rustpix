@@ -5,6 +5,7 @@ use rfd::FileDialog;
 
 use super::theme::{accent, form_label, primary_button, ThemeColors};
 use crate::app::{DetectorProfile, DetectorProfileKind, RustpixApp};
+use crate::histogram::{hyperstack_bytes, MAX_TOF_BINS, MIN_TOF_BINS};
 use crate::pipeline::AlgorithmType;
 use crate::state::{
     ExportFormat, Hdf5ExportOptions, SnsEventSource, SnsExportOptions, TiffBitDepth,
@@ -1761,6 +1762,8 @@ x,y are local chip coordinates (pixels).",
 
     /// Render floating settings windows (app + spectrum).
     pub(crate) fn render_settings_windows(&mut self, ctx: &egui::Context) {
+        let colors = ThemeColors::from_ctx(ctx);
+
         if self.ui_state.panels.show_app_settings {
             let mut show_app_settings = self.ui_state.panels.show_app_settings;
             egui::Window::new("Hyperstack Settings")
@@ -1771,15 +1774,28 @@ x,y are local chip coordinates (pixels).",
                     ui.label("Adjust TOF binning for hits and neutrons.");
                     ui.add_space(8.0);
 
+                    // Both stacks are built at the detector's dimensions, so one
+                    // lookup sizes both estimates.
+                    let dimensions = self.current_data_dimensions();
+                    let available = self.memory_available_bytes();
+
                     egui::CollapsingHeader::new("Hits Hyperstack")
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label("TOF bins");
                                 ui.add(
-                                    egui::DragValue::new(&mut self.hit_tof_bins).range(10..=2000),
+                                    egui::DragValue::new(&mut self.hit_tof_bins)
+                                        .range(MIN_TOF_BINS..=MAX_TOF_BINS),
                                 );
                             });
+                            render_hyperstack_size_hint(
+                                ui,
+                                colors,
+                                self.hit_tof_bins,
+                                dimensions,
+                                available,
+                            );
                             let can_rebuild = self.hit_batch.is_some();
                             if ui
                                 .add_enabled(can_rebuild, egui::Button::new("Rebuild Hits"))
@@ -1796,9 +1812,16 @@ x,y are local chip coordinates (pixels).",
                                 ui.label("TOF bins");
                                 ui.add(
                                     egui::DragValue::new(&mut self.neutron_tof_bins)
-                                        .range(10..=2000),
+                                        .range(MIN_TOF_BINS..=MAX_TOF_BINS),
                                 );
                             });
+                            render_hyperstack_size_hint(
+                                ui,
+                                colors,
+                                self.neutron_tof_bins,
+                                dimensions,
+                                available,
+                            );
 
                             let can_rebuild = !self.neutrons.is_empty();
                             if ui
@@ -2597,6 +2620,48 @@ x,y are local chip coordinates (pixels).",
         egui::Image::new(source)
             .tint(tint)
             .fit_to_exact_size(egui::vec2(16.0, 16.0))
+    }
+}
+
+/// Show what the selected bin count will cost in memory.
+///
+/// The bin count is deliberately not capped at a value that would fit any
+/// particular machine, so this is what tells the user whether their host can
+/// hold the result before they commit to a rebuild. `vec![0u64; n]` aborts the
+/// process rather than returning an error, so an over-large rebuild would
+/// otherwise make the app vanish with no message.
+///
+/// `available` only ever drives a warning. It is unreliable under cgroup
+/// limits and on cluster nodes, and blocking on a bad reading would stop
+/// legitimate work on a machine that can hold the result.
+fn render_hyperstack_size_hint(
+    ui: &mut egui::Ui,
+    colors: ThemeColors,
+    bins: usize,
+    dimensions: (usize, usize),
+    available: Option<u64>,
+) {
+    let (width, height) = dimensions;
+    let bytes = hyperstack_bytes(bins, width, height);
+    ui.label(
+        egui::RichText::new(format!(
+            "{width}×{height} px × {} bins ≈ {} in memory",
+            format_number(bins),
+            format_bytes(bytes)
+        ))
+        .size(10.0)
+        .color(colors.text_dim),
+    );
+
+    if let Some(free) = available.filter(|free| bytes > *free) {
+        ui.colored_label(
+            Color32::YELLOW,
+            egui::RichText::new(format!(
+                "⚠ Exceeds the {} free — rebuilding may end the process.",
+                format_bytes(free)
+            ))
+            .size(10.0),
+        );
     }
 }
 

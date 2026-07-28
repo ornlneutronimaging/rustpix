@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-07-28
+
+### Changed
+
+- GUI: Raised the TOF bin limit in Hyperstack Settings from 2,000 to 1,000,000
+  for both the hits and neutrons hyperstacks. The old cap stood in for a memory
+  guard; it also blocked bin counts that instruments legitimately need. The
+  limit is now a rail against mistyped input — a 60 Hz source carries no
+  information past ~666,667 bins, and memory binds well before that.
+
+### Added
+
+- GUI: Hyperstack Settings now estimates the memory each hyperstack will need
+  at the selected bin count, and warns when the estimate exceeds free system
+  memory. Hyperstack storage is dense, so cost is linear in bin count: roughly
+  2.1 MB per bin on a 514×514 VENUS detector, or ~21 GB at 10,000 bins. The
+  warning is advisory only and never blocks a rebuild, since free-memory
+  readings are unreliable under cgroup limits and on cluster nodes.
+
+### Notes
+
+- Exporting a TIFF *stack* above ~8,128 bins (514×514, 16-bit) exceeds the 4 GB
+  standard-TIFF limit. This is unchanged behaviour and already reported with a
+  clear error; use "TIFF Folder", or set the stack behaviour to "Auto BigTIFF
+  if needed" or "Always BigTIFF".
+- Rebuilding a hyperstack runs on the UI thread with no progress bar, so at high
+  bin counts the window will be unresponsive for the duration of the rebuild.
+
 ## [1.0.5] - 2026-02-05
 
 ### Added
