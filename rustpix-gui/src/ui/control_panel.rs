@@ -2675,8 +2675,16 @@ fn render_hyperstack_size_hint(
     );
 
     if let Some(free) = available.filter(|free| bytes > *free) {
+        // This warning is the only thing left guarding against the abort, so it
+        // has to be legible on both themes. Plain yellow washes out to ~1:1
+        // against the light theme's white panel.
+        let warning = if ui.visuals().dark_mode {
+            Color32::YELLOW
+        } else {
+            Color32::from_rgb(0x8a, 0x5a, 0x00)
+        };
         ui.colored_label(
-            Color32::YELLOW,
+            warning,
             egui::RichText::new(format!(
                 "⚠ Exceeds the {} free — rebuilding may end the process.",
                 format_bytes(free)

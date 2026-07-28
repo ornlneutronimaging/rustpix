@@ -24,17 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - GUI: Hyperstack Settings now estimates the memory each hyperstack will need
   at the selected bin count, and warns when the estimate exceeds free system
-  memory. Hyperstack storage is dense, so cost is linear in bin count: roughly
-  2.1 MB per bin on a 514×514 VENUS detector, or ~21 GB at 10,000 bins. The
-  warning is advisory only and never blocks a rebuild, since free-memory
-  readings are unreliable under cgroup limits and on cluster nodes.
+  memory. Hyperstack storage is dense, so cost is linear in bin count: about
+  2 MB per bin on a 514×514 VENUS detector, so 10,000 bins reads as
+  "19.68 GB" in the settings window. The warning is advisory only and never
+  blocks a rebuild, since free-memory readings are unreliable under cgroup
+  limits and on cluster nodes.
 
 ### Notes
 
+Existing behaviour that becomes reachable now that higher bin counts are
+allowed. None of it is changed by this release.
+
+- Exporting to HDF5 builds a second, transposed copy of the whole hyperstack
+  before writing, so an export needs roughly double the stack's memory and is
+  the slowest operation at high bin counts.
 - Exporting a TIFF *stack* above ~8,128 bins (514×514, 16-bit) exceeds the 4 GB
-  standard-TIFF limit. This is unchanged behaviour and already reported with a
-  clear error; use "TIFF Folder", or set the stack behaviour to "Auto BigTIFF
-  if needed" or "Always BigTIFF".
+  standard-TIFF limit. It is already reported with a clear error; use "TIFF
+  Folder", or set the stack behaviour to "Auto BigTIFF if needed" or "Always
+  BigTIFF".
 - Rebuilding a hyperstack runs on the UI thread with no progress bar, so at high
   bin counts the window will be unresponsive for the duration of the rebuild.
 
