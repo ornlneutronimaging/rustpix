@@ -25,7 +25,9 @@ jobs:
           working-directory: rustpix-gui
           target: x86_64
           manylinux: 2_28
-          args: --release --out dist
+          # dialog-portal: the manylinux container has no GTK3 dev libs, and a
+          # wheel linking libgtk-3 would fail manylinux compliance anyway.
+          args: --release --out dist --no-default-features --features dialog-portal
           before-script-linux: |
             # Install CMake for static HDF5 build
             yum install -y cmake3 || yum install -y cmake

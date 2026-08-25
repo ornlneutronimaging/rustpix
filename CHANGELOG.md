@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-25
+
+### Fixed
+
+- GUI wheel build: v1.2.0's switch to rfd's gtk3 backend broke the Linux
+  manylinux wheel (the build container has no GTK3 dev libs, and a wheel
+  linking libgtk-3 would fail manylinux compliance anyway), so no 1.2.0
+  `rustpix-gui` package reached PyPI. The backend is now selected by cargo
+  feature: `dialog-gtk3` (default — honors the file dialog's starting
+  directory, needs GTK3 at build time) or `dialog-portal` (no GTK link,
+  ignores the starting directory), and the wheel builds with
+  `dialog-portal`.
+
 ## [1.2.0] - 2026-08-25
 
 ### Added

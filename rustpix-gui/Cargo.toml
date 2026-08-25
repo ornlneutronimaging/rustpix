@@ -25,6 +25,15 @@ analysis, and data export to various formats.
 category = "public.app-category.developer-tools"
 copyright = "Copyright © 2024 Oak Ridge National Laboratory"
 
+[features]
+# File-dialog backend (Linux). The gtk3 backend honors set_directory(), so
+# "start browsing in the last used directory" works — use it wherever GTK3
+# dev libs are available (local/beamline builds). The portal backend ignores
+# set_directory() but links no GTK, which the manylinux PyPI wheel requires.
+default = ["dialog-gtk3"]
+dialog-gtk3 = ["rfd/gtk3"]
+dialog-portal = ["rfd/xdg-portal", "rfd/wayland"]
+
 [lints]
 workspace = true
 
@@ -41,9 +50,8 @@ eframe = "0.33"
 egui = "0.33"
 egui_plot = "0.34"
 egui_extras = { version = "0.33", features = ["svg"] }
-# gtk3 backend instead of the default xdg-portal one: the portal ignores
-# set_directory(), which "start browsing in the last used directory" needs.
-rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
+# Backend selected via this crate's dialog-* features (see [features]).
+rfd = { version = "0.17", default-features = false }
 image = "0.25"
 tiff = "0.10"
 hdf5.workspace = true
