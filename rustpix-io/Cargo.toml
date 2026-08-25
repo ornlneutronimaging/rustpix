@@ -33,3 +33,7 @@ tempfile.workspace = true
 default = []
 serde = ["dep:serde", "rustpix-core/serde"]
 hdf5 = ["dep:hdf5", "dep:ndarray"]
+
+[[example]]
+name = "sns_read_summary"
+required-features = ["hdf5"]

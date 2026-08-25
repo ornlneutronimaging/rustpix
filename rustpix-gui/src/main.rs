@@ -6,6 +6,7 @@ mod app;
 mod histogram;
 mod message;
 mod pipeline;
+mod recent;
 mod state;
 mod ui;
 mod util;

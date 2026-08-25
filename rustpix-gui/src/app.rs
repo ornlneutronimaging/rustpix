@@ -187,6 +187,8 @@ impl MemoryTelemetry {
 pub struct RustpixApp {
     /// Currently selected file path.
     pub(crate) selected_file: Option<PathBuf>,
+    /// Open-file tools state (recent files, path popup).
+    pub(crate) file_open: crate::ui::file_open::FileOpenState,
 
     /// Selected clustering algorithm.
     pub(crate) algo_type: AlgorithmType,
@@ -297,6 +299,7 @@ impl Default for RustpixApp {
         ui_state.cache.cache_hits_in_memory = true;
         Self {
             selected_file: None,
+            file_open: crate::ui::file_open::FileOpenState::default(),
             algo_type: AlgorithmType::Abs, // Default to ABS per design doc
             radius: 5.0,
             temporal_window_ns: 75.0,
@@ -355,6 +358,7 @@ impl RustpixApp {
     /// Load a file asynchronously.
     pub fn load_file(&mut self, path: PathBuf) {
         self.reset_load_state(path.as_path());
+        crate::recent::add(&mut self.file_open.recent, path.as_path());
 
         let tx = self.tx.clone();
         let detector_config = self.current_detector_config();
@@ -443,6 +447,13 @@ impl RustpixApp {
     /// Start clustering processing asynchronously.
     pub fn run_processing(&mut self) {
         if let Some(path) = self.selected_file.clone() {
+            // The clustering worker streams hits from a TPX3 file on disk;
+            // NeXus-loaded data has no such source (and no ToT).
+            if crate::pipeline::is_sns_nexus_path(&path) {
+                self.processing.status_text =
+                    "Clustering is not available for NeXus files yet (only TPX3).".to_string();
+                return;
+            }
             self.processing.is_processing = true;
             self.processing.progress = 0.0;
             self.processing.status_text.clear();
@@ -2980,9 +2991,11 @@ impl eframe::App for RustpixApp {
 
         self.handle_messages(ctx);
         self.memory_telemetry.refresh(ctx.input(|i| i.time));
+        self.handle_dropped_file(ctx);
 
         // Render panels in order: top, bottom, side, central
         self.render_top_panel(ctx);
+        self.show_path_popup(ctx);
         self.render_bottom_panel(ctx);
         self.render_side_panel(ctx);
         self.render_central_panel(ctx);

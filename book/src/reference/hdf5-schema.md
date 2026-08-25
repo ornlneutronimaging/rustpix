@@ -198,6 +198,16 @@ Range: 1,000,000 to 1,262,143
 
 Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps), whereas the SNS schema uses a 512x512 pixel grid. The SNS writer handles the 514x514→512x512 gap-pixel remapping automatically via `SnsBankConfig.gap_columns`/`gap_rows`, so callers should provide logical detector coordinates and must not pre-remap them.
 
+### Reading SNS Files
+
+`SnsEventReader` (Rust) and `read_sns_events` / `sns_file_info` (Python) read this schema back — including facility files produced by the ADARA translation service (e.g. `VENUS_<run>.nxs.h5`). Events can be read in slices for chunked processing of multi-billion-event files. On read:
+
+- Pixel IDs are decoded to x/y on the bank's 512x512 gap-removed grid (coordinates are returned as stored; gap pixels were dropped at write time and cannot be recovered).
+- TOF is converted to nanoseconds from the units recorded on `event_time_offset`.
+- Per-event pulse timestamps are reconstructed from `event_time_zero` plus its pulse-time origin attributes, yielding absolute Unix-epoch nanoseconds for facility files. ADARA's `offset_seconds` attribute counts from the EPICS epoch (1990-01-01); the reader prefers the unambiguous ISO 8601 `offset` attribute and falls back to the EPICS pair. rustpix-written files carry no origin, so their pulse times stay run-relative.
+
+Facility files record only pixel ID and TOF per event — ToT, chip IDs, and per-hit timestamps exist only in the raw `.tpx3` stream, so hits cannot be re-clustered from a NeXus file.
+
 ## Format Selection Guide
 
 rustpix supports two HDF5 export schemas. Choose based on your use case:

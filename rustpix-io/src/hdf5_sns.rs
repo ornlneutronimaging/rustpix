@@ -1,8 +1,13 @@
-//! ORNL SNS/HFIR `NXsnsevent` HDF5 export.
+//! ORNL SNS/HFIR `NXsnsevent` HDF5 export and import.
 //!
 //! Produces `NeXus` event files compatible with the ORNL SNS & HFIR data
 //! pipeline (Mantid, etc.). Data is stored as 1D pixel-ID vectors with
 //! bank-specific offsets, matching the `NXsnsevent` definition.
+//!
+//! [`SnsEventReader`] reads the same layout back — both rustpix-written files
+//! and facility files produced by the ADARA translation service (e.g.
+//! `VENUS_<run>.nxs.h5`), decoding pixel IDs to x/y coordinates and
+//! reconstructing per-event pulse timestamps.
 
 // Intentional truncation: u64→usize (safe on 64-bit), f64→f32 (SNS format uses f32 TOF),
 // f64→u32 (pixel coords clamped to non-negative), u64→f64 (sub-ns precision loss is fine).
@@ -18,8 +23,9 @@ use crate::hdf5::{
 };
 use crate::reader::EventBatch;
 use crate::{Error, Result};
-use hdf5::types::VarLenUnicode;
+use hdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
+use ndarray::s;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -125,14 +131,7 @@ impl SnsWriteOptions {
     #[must_use]
     pub fn venus_defaults(run: SnsRunMetadata) -> Self {
         Self {
-            banks: vec![SnsBankConfig {
-                name: "bank100".to_string(),
-                pixel_id_offset: 1_000_000,
-                width: 512,
-                height: 512,
-                gap_columns: vec![256, 257],
-                gap_rows: vec![256, 257],
-            }],
+            banks: vec![venus_bank100_config()],
             run,
             instrument: SnsInstrumentConfig {
                 name: "VENUS".to_string(),
@@ -144,6 +143,20 @@ impl SnsWriteOptions {
             compression: Some(1),
             shuffle: true,
         }
+    }
+}
+
+/// The VENUS bank100 configuration: 512×512 gap-removed grid with
+/// pixel-ID offset 1\_000\_000 (chip gaps at source columns/rows 256–257).
+#[must_use]
+pub fn venus_bank100_config() -> SnsBankConfig {
+    SnsBankConfig {
+        name: "bank100".to_string(),
+        pixel_id_offset: 1_000_000,
+        width: 512,
+        height: 512,
+        gap_columns: vec![256, 257],
+        gap_rows: vec![256, 257],
     }
 }
 
@@ -937,6 +950,396 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
 
     let utc_secs = days * 86400 + hour * 3600 + min * 60 + sec - tz_offset_s;
     u64::try_from(utc_secs).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+/// Summary of one event bank discovered in an SNS `NeXus` file.
+#[derive(Clone, Debug)]
+pub struct SnsBankInfo {
+    /// Bank name without the `_events` suffix (e.g., `"bank100"`).
+    pub name: String,
+    /// Number of events stored for this bank.
+    pub event_count: u64,
+    /// Number of pulses stored for this bank.
+    pub pulse_count: u64,
+}
+
+/// Decoded events read from one bank of an SNS `NeXus` file.
+#[derive(Clone, Debug, Default)]
+pub struct SnsBankEvents {
+    /// Bank name (e.g., `"bank100"`).
+    pub bank: String,
+    /// Index within the bank of the first event in this slice.
+    pub start: u64,
+    /// Total number of events stored in the bank (not the slice length).
+    pub total_events: u64,
+    /// Raw pixel IDs as stored in the file.
+    pub event_id: Vec<u32>,
+    /// X coordinates decoded on the bank's (gap-removed) grid.
+    pub x: Vec<u16>,
+    /// Y coordinates decoded on the bank's (gap-removed) grid.
+    pub y: Vec<u16>,
+    /// Time-of-flight in nanoseconds.
+    pub tof_ns: Vec<u64>,
+    /// Per-event pulse timestamp in nanoseconds.  Absolute (Unix epoch) when
+    /// the file records a pulse-time origin (ADARA `offset` /
+    /// `offset_seconds` attributes on `event_time_zero`); otherwise relative
+    /// to the run start.
+    pub pulse_time_ns: Vec<u64>,
+}
+
+impl SnsBankEvents {
+    /// Number of events in this slice.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.event_id.len()
+    }
+
+    /// Returns true if the slice contains no events.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.event_id.is_empty()
+    }
+}
+
+/// Run-level metadata read from an SNS `NeXus` file.
+///
+/// Every field is best-effort — facility files vary in which datasets they
+/// record and how strings are encoded, so missing entries become `None`.
+#[derive(Clone, Debug, Default)]
+pub struct SnsFileMetadata {
+    /// Run number (stored as a string dataset in ADARA files).
+    pub run_number: Option<String>,
+    /// IPTS experiment identifier (e.g., `"IPTS-35004"`).
+    pub experiment_identifier: Option<String>,
+    /// ISO 8601 run start time.
+    pub start_time: Option<String>,
+    /// ISO 8601 run end time.
+    pub end_time: Option<String>,
+    /// Run title.
+    pub title: Option<String>,
+    /// Run duration in seconds.
+    pub duration_s: Option<f64>,
+    /// Total integrated proton charge in picoCoulombs.
+    pub proton_charge_pc: Option<f64>,
+}
+
+/// Reader for SNS `NXsnsevent` `NeXus` event files.
+///
+/// Opens both rustpix-written exports and facility files produced by the
+/// ADARA translation service (`*.nxs.h5`).  Event banks are discovered from
+/// `entry/<bank>_events` groups; events are read in slices so multi-billion
+/// event files can be processed in chunks:
+///
+/// ```no_run
+/// use rustpix_io::hdf5_sns::{venus_bank100_config, SnsEventReader};
+///
+/// let reader = SnsEventReader::open("VENUS_15159.nxs.h5")?;
+/// let config = venus_bank100_config();
+/// let events = reader.read_events(&config, 0, Some(1_000_000))?;
+/// println!("{} events, first pixel ({}, {})", events.len(), events.x[0], events.y[0]);
+/// # Ok::<(), rustpix_io::Error>(())
+/// ```
+pub struct SnsEventReader {
+    /// Keep the file handle alive for the lifetime of `entry`.
+    _file: File,
+    entry: Group,
+    banks: Vec<SnsBankInfo>,
+}
+
+impl SnsEventReader {
+    /// Open an SNS `NeXus` file and discover its event banks.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be opened or has no `entry` group.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = File::open(path)?;
+        let entry = file.group("entry")?;
+        let mut banks = Vec::new();
+        for name in entry.member_names()? {
+            let Some(bank) = name.strip_suffix("_events") else {
+                continue;
+            };
+            let Ok(group) = entry.group(&name) else {
+                continue;
+            };
+            let (Ok(id_ds), Ok(tz_ds)) =
+                (group.dataset("event_id"), group.dataset("event_time_zero"))
+            else {
+                continue;
+            };
+            banks.push(SnsBankInfo {
+                name: bank.to_string(),
+                event_count: id_ds.shape().first().copied().unwrap_or(0) as u64,
+                pulse_count: tz_ds.shape().first().copied().unwrap_or(0) as u64,
+            });
+        }
+        Ok(Self {
+            _file: file,
+            entry,
+            banks,
+        })
+    }
+
+    /// Event banks discovered in the file (including empty ones).
+    #[must_use]
+    pub fn banks(&self) -> &[SnsBankInfo] {
+        &self.banks
+    }
+
+    /// Run-level metadata (best-effort; missing datasets become `None`).
+    #[must_use]
+    pub fn metadata(&self) -> SnsFileMetadata {
+        SnsFileMetadata {
+            run_number: read_string_dataset(&self.entry, "run_number"),
+            experiment_identifier: read_string_dataset(&self.entry, "experiment_identifier"),
+            start_time: read_string_dataset(&self.entry, "start_time"),
+            end_time: read_string_dataset(&self.entry, "end_time"),
+            title: read_string_dataset(&self.entry, "title"),
+            duration_s: read_f64_dataset(&self.entry, "duration"),
+            proton_charge_pc: read_f64_dataset(&self.entry, "proton_charge"),
+        }
+    }
+
+    /// Read a slice of events from one bank.
+    ///
+    /// `config` supplies the bank name, pixel-ID offset, and grid size used to
+    /// decode pixel IDs back to x/y (gap columns/rows are not used on read —
+    /// coordinates are returned on the gap-removed grid as stored).  `start`
+    /// is the index of the first event to read; `count` limits the number of
+    /// events (`None` reads to the end of the bank).  Both are clamped to the
+    /// bank size, so chunked loops can simply iterate until the returned
+    /// slice is empty.
+    ///
+    /// # Errors
+    /// Returns an error if HDF5 I/O fails, if TOF units are unsupported, or
+    /// if an event's pixel ID falls outside the configured bank range.
+    pub fn read_events(
+        &self,
+        config: &SnsBankConfig,
+        start: u64,
+        count: Option<u64>,
+    ) -> Result<SnsBankEvents> {
+        let group = self.entry.group(&format!("{}_events", config.name))?;
+        let id_ds = group.dataset("event_id")?;
+        let total = id_ds.shape().first().copied().unwrap_or(0) as u64;
+        let start = start.min(total);
+        let count = count.unwrap_or(u64::MAX).min(total - start);
+        let end = start + count;
+
+        let mut events = SnsBankEvents {
+            bank: config.name.clone(),
+            start,
+            total_events: total,
+            ..SnsBankEvents::default()
+        };
+        if count == 0 {
+            return Ok(events);
+        }
+        let (start_us, end_us) = (start as usize, end as usize);
+
+        events.event_id = id_ds
+            .read_slice_1d::<u32, _>(s![start_us..end_us])?
+            .to_vec();
+
+        // Decode pixel IDs to x/y on the bank grid.
+        let area = config.width * config.height;
+        events.x.reserve(events.event_id.len());
+        events.y.reserve(events.event_id.len());
+        for &id in &events.event_id {
+            let rel = id.checked_sub(config.pixel_id_offset).filter(|&r| r < area);
+            let Some(rel) = rel else {
+                return Err(Error::InvalidFormat(format!(
+                    "pixel ID {id} outside bank {} range [{}, {})",
+                    config.name,
+                    config.pixel_id_offset,
+                    config.pixel_id_offset + area,
+                )));
+            };
+            events.x.push((rel % config.width) as u16);
+            events.y.push((rel / config.width) as u16);
+        }
+
+        // TOF, converted to nanoseconds from the units recorded in the file.
+        let tof_ds = group.dataset("event_time_offset")?;
+        let tof_scale_ns = units_scale_ns(&tof_ds, "microsecond")?;
+        events.tof_ns = tof_ds
+            .read_slice_1d::<f32, _>(s![start_us..end_us])?
+            .iter()
+            .map(|&v| (f64::from(v) * tof_scale_ns).max(0.0).round() as u64)
+            .collect();
+
+        // Pulse times: the per-pulse arrays are small (one entry per pulse),
+        // so read them fully and expand to one timestamp per event.
+        let tz_ds = group.dataset("event_time_zero")?;
+        let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
+        let base_ns = pulse_offset_ns(&tz_ds);
+        let pulse_ns: Vec<u64> = tz_ds
+            .read_raw::<f64>()?
+            .iter()
+            .map(|&v| base_ns + (v * pulse_scale_ns).max(0.0).round() as u64)
+            .collect();
+        let event_index: Vec<u64> = group.dataset("event_index")?.read_raw()?;
+        if pulse_ns.is_empty() || event_index.len() != pulse_ns.len() {
+            return Err(Error::InvalidFormat(format!(
+                "bank {}: event_index has {} entries but event_time_zero has {}",
+                config.name,
+                event_index.len(),
+                pulse_ns.len(),
+            )));
+        }
+
+        events.pulse_time_ns.reserve(events.event_id.len());
+        // Index of the pulse the first event of the slice belongs to:
+        // the last pulse whose first-event index is <= start.
+        let mut p = event_index
+            .partition_point(|&v| v <= start)
+            .saturating_sub(1);
+        for i in start..end {
+            while p + 1 < event_index.len() && event_index[p + 1] <= i {
+                p += 1;
+            }
+            events.pulse_time_ns.push(pulse_ns[p]);
+        }
+
+        Ok(events)
+    }
+}
+
+/// Read events from `bank100` of a VENUS SNS `NeXus` file (one-shot).
+///
+/// Uses the standard VENUS geometry (512×512 gap-removed grid, pixel-ID
+/// offset 1\_000\_000).  `start`/`count` select a slice; pass `count: None`
+/// to read the whole bank.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened or read.
+pub fn read_sns_events_venus<P: AsRef<Path>>(
+    path: P,
+    start: u64,
+    count: Option<u64>,
+) -> Result<SnsBankEvents> {
+    SnsEventReader::open(path)?.read_events(&venus_bank100_config(), start, count)
+}
+
+/// Nanoseconds-per-unit scale factor from a dataset's `units` attribute.
+fn units_scale_ns(dataset: &Dataset, default_units: &str) -> Result<f64> {
+    let units = read_string_attr(dataset, "units").unwrap_or_else(|| default_units.to_string());
+    match units.trim() {
+        "nanosecond" | "nanoseconds" | "ns" => Ok(1.0),
+        "microsecond" | "microseconds" | "us" => Ok(1_000.0),
+        "millisecond" | "milliseconds" | "ms" => Ok(1_000_000.0),
+        "second" | "seconds" | "s" => Ok(1_000_000_000.0),
+        other => Err(Error::InvalidFormat(format!(
+            "unsupported time units {other:?} on dataset {}",
+            dataset.name(),
+        ))),
+    }
+}
+
+/// Seconds between the Unix epoch (1970-01-01) and the EPICS epoch
+/// (1990-01-01) that ADARA's `offset_seconds` attribute counts from.
+const EPICS_EPOCH_UNIX_S: u64 = 631_152_000;
+
+/// Absolute Unix-epoch offset of `event_time_zero` in nanoseconds.
+///
+/// ADARA records the pulse-time origin twice: an ISO 8601 `offset` string
+/// attribute and an EPICS-epoch `offset_seconds`/`offset_nanoseconds` pair.
+/// The ISO string is preferred (its epoch is unambiguous); the EPICS pair is
+/// the fallback.  Returns 0 when neither is present (e.g. rustpix-written
+/// files, whose pulse times are run-relative).
+fn pulse_offset_ns(dataset: &Dataset) -> u64 {
+    let attr_u32 = |name: &str| -> Option<u32> {
+        dataset
+            .attr(name)
+            .ok()
+            .and_then(|a| a.read_scalar::<u32>().ok())
+    };
+    let frac_attr = attr_u32("offset_nanoseconds");
+    if let Some(iso) = read_string_attr(dataset, "offset") {
+        if let Some((secs, frac_iso)) = iso8601_to_epoch_secs_frac(&iso) {
+            return secs * 1_000_000_000 + u64::from(frac_attr.unwrap_or(frac_iso));
+        }
+    }
+    match attr_u32("offset_seconds") {
+        Some(secs) if secs != 0 => {
+            (u64::from(secs) + EPICS_EPOCH_UNIX_S) * 1_000_000_000
+                + u64::from(frac_attr.unwrap_or(0))
+        }
+        _ => 0,
+    }
+}
+
+/// Parse an ISO 8601 timestamp that may carry fractional seconds
+/// (e.g. `"2025-12-17T13:09:57.301235667-05:00"`), which
+/// [`iso8601_to_epoch_secs`] rejects.  Returns Unix seconds and the
+/// fractional part in nanoseconds.
+fn iso8601_to_epoch_secs_frac(s: &str) -> Option<(u64, u32)> {
+    if s.len() < 19 || s.as_bytes().get(19) != Some(&b'.') {
+        return iso8601_to_epoch_secs(s).map(|secs| (secs, 0));
+    }
+    let frac_end = s[20..]
+        .find(|c: char| !c.is_ascii_digit())
+        .map_or(s.len(), |i| 20 + i);
+    let digits = &s[20..frac_end];
+    if digits.is_empty() {
+        return None;
+    }
+    // Scale the fraction to nanoseconds (pad or truncate to 9 digits).
+    let mut frac_ns: u32 = 0;
+    for i in 0..9 {
+        let d = digits.as_bytes().get(i).map_or(0, |b| u32::from(b - b'0'));
+        frac_ns = frac_ns * 10 + d;
+    }
+    let without_frac = format!("{}{}", &s[..19], &s[frac_end..]);
+    iso8601_to_epoch_secs(&without_frac).map(|secs| (secs, frac_ns))
+}
+
+/// Read a string attribute, tolerating the encodings found in the wild
+/// (variable/fixed length, ASCII/UTF-8, scalar or 1-element array).
+fn read_string_attr(dataset: &Dataset, name: &str) -> Option<String> {
+    let attr = dataset.attr(name).ok()?;
+    if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {
+        return Some(v.to_string());
+    }
+    if let Ok(v) = attr.read_scalar::<VarLenAscii>() {
+        return Some(v.to_string());
+    }
+    if let Ok(v) = attr.read_scalar::<FixedAscii<256>>() {
+        return Some(v.as_str().to_string());
+    }
+    if let Ok(v) = attr.read_scalar::<FixedUnicode<256>>() {
+        return Some(v.as_str().to_string());
+    }
+    None
+}
+
+/// Read a string dataset (scalar or 1-element), tolerating the encodings
+/// found in the wild.  Returns `None` when missing or unreadable.
+fn read_string_dataset(group: &Group, name: &str) -> Option<String> {
+    let dataset = group.dataset(name).ok()?;
+    if let Ok(v) = dataset.read_raw::<VarLenUnicode>() {
+        return v.first().map(ToString::to_string);
+    }
+    if let Ok(v) = dataset.read_raw::<VarLenAscii>() {
+        return v.first().map(ToString::to_string);
+    }
+    if let Ok(v) = dataset.read_raw::<FixedAscii<256>>() {
+        return v.first().map(|s| s.as_str().to_string());
+    }
+    if let Ok(v) = dataset.read_raw::<FixedUnicode<256>>() {
+        return v.first().map(|s| s.as_str().to_string());
+    }
+    None
+}
+
+/// Read a float dataset (scalar or 1-element).  Returns `None` when missing.
+fn read_f64_dataset(group: &Group, name: &str) -> Option<f64> {
+    let dataset = group.dataset(name).ok()?;
+    dataset.read_raw::<f64>().ok()?.first().copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,5 +2526,140 @@ mod tests {
             err.to_string().contains("finalization"),
             "Expected finalization error, got: {err}"
         );
+    }
+
+    // --- Reading ---
+
+    /// Write a two-pulse test file: pulse 1 (tdc 1000) with hits at
+    /// (5, 10) tof 40 ticks, (300, 20) tof 80 ticks, and a dropped gap hit
+    /// at x=256; pulse 2 (tdc 2000) with one hit at (513, 513) tof 200 ticks.
+    fn write_roundtrip_file(path: &Path) {
+        let mut sink = SnsEventSink::create(path, make_test_options()).unwrap();
+        sink.write_hits(
+            0,
+            &make_hit_batch(1000, &[5, 300, 256], &[10, 20, 30], &[40, 80, 120]),
+        )
+        .unwrap();
+        sink.write_hits(0, &make_hit_batch(2000, &[513], &[513], &[200]))
+            .unwrap();
+        sink.finalize().unwrap();
+    }
+
+    #[test]
+    fn test_read_events_roundtrip() {
+        let file = NamedTempFile::new().unwrap();
+        write_roundtrip_file(file.path());
+
+        let reader = SnsEventReader::open(file.path()).unwrap();
+        let bank100 = reader
+            .banks()
+            .iter()
+            .find(|b| b.name == "bank100")
+            .expect("bank100 discovered");
+        assert_eq!(bank100.event_count, 3);
+        assert_eq!(bank100.pulse_count, 2);
+
+        let events = reader
+            .read_events(&venus_bank100_config(), 0, None)
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.start, 0);
+        assert_eq!(events.total_events, 3);
+        // Gap remap on write: source x=300 -> 298, source (513, 513) -> (511, 511).
+        assert_eq!(events.x, vec![5, 298, 511]);
+        assert_eq!(events.y, vec![10, 20, 511]);
+        assert_eq!(events.event_id[0], 1_000_000 + 10 * 512 + 5);
+        // TOF ticks are 25 ns: 40 -> 1000 ns, 80 -> 2000 ns, 200 -> 5000 ns.
+        assert_eq!(events.tof_ns, vec![1000, 2000, 5000]);
+        // Pulse times are relative to the first pulse: tdc 1000/2000 ticks
+        // -> 0 ns and 25000 ns.  No epoch offset attrs in rustpix files.
+        assert_eq!(events.pulse_time_ns, vec![0, 0, 25_000]);
+    }
+
+    #[test]
+    fn test_read_events_slicing() {
+        let file = NamedTempFile::new().unwrap();
+        write_roundtrip_file(file.path());
+        let reader = SnsEventReader::open(file.path()).unwrap();
+        let config = venus_bank100_config();
+
+        let middle = reader.read_events(&config, 1, Some(1)).unwrap();
+        assert_eq!(middle.len(), 1);
+        assert_eq!(middle.start, 1);
+        assert_eq!((middle.x[0], middle.y[0]), (298, 20));
+        assert_eq!(middle.pulse_time_ns, vec![0]);
+
+        // Slice starting inside the second pulse gets that pulse's timestamp.
+        let tail = reader.read_events(&config, 2, None).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail.pulse_time_ns, vec![25_000]);
+
+        // Out-of-range start and oversized count are clamped.
+        assert!(reader.read_events(&config, 10, None).unwrap().is_empty());
+        assert_eq!(reader.read_events(&config, 0, Some(100)).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_read_events_wrong_offset_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        write_roundtrip_file(file.path());
+        let reader = SnsEventReader::open(file.path()).unwrap();
+
+        let mut config = venus_bank100_config();
+        config.pixel_id_offset = 2_000_000;
+        let err = reader.read_events(&config, 0, None).unwrap_err();
+        assert!(
+            err.to_string().contains("outside bank"),
+            "Expected pixel-ID range error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_reader_metadata() {
+        let file = NamedTempFile::new().unwrap();
+        write_roundtrip_file(file.path());
+        let reader = SnsEventReader::open(file.path()).unwrap();
+
+        let meta = reader.metadata();
+        assert_eq!(meta.run_number.as_deref(), Some("99999"));
+        assert_eq!(meta.experiment_identifier.as_deref(), Some("IPTS-00001"));
+        assert_eq!(meta.title.as_deref(), Some("test run"));
+        assert_eq!(meta.proton_charge_pc, Some(100.0));
+    }
+
+    #[test]
+    fn test_iso8601_frac_parsing() {
+        // ADARA-style offset string with nanosecond fraction and timezone.
+        let (secs, frac) =
+            iso8601_to_epoch_secs_frac("2025-12-17T13:09:57.301235667-05:00").unwrap();
+        assert_eq!(secs, 1_765_994_997);
+        assert_eq!(frac, 301_235_667);
+        // EPICS-epoch cross-check: ADARA wrote offset_seconds 1134842997
+        // for this same instant.
+        assert_eq!(secs, 1_134_842_997 + EPICS_EPOCH_UNIX_S);
+
+        // Short fractions are padded to nanoseconds; no fraction is fine.
+        assert_eq!(
+            iso8601_to_epoch_secs_frac("2025-01-01T00:00:00.5Z")
+                .unwrap()
+                .1,
+            500_000_000
+        );
+        assert_eq!(
+            iso8601_to_epoch_secs_frac("2025-01-01T00:00:00Z")
+                .unwrap()
+                .1,
+            0
+        );
+    }
+
+    #[test]
+    fn test_read_sns_events_venus_convenience() {
+        let file = NamedTempFile::new().unwrap();
+        write_roundtrip_file(file.path());
+
+        let events = read_sns_events_venus(file.path(), 0, None).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.bank, "bank100");
     }
 }

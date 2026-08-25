@@ -78,10 +78,16 @@ impl RustpixApp {
         if Self::file_toolbar_button(ui, colors, FileToolbarIcon::Open, can_load, "Open file")
             .clicked()
         {
-            if let Some(path) = FileDialog::new().add_filter("TPX3", &["tpx3"]).pick_file() {
-                self.load_file(path);
-            }
+            self.open_dialog(None);
         }
+
+        if Self::text_toolbar_button(ui, can_load, "⌨", "Type or paste a file / directory path")
+            .clicked()
+        {
+            self.show_path_popup_request();
+        }
+
+        self.render_recent_menu(ui, can_load);
 
         if Self::file_toolbar_button(
             ui,
@@ -211,6 +217,23 @@ impl RustpixApp {
         let image = Self::file_icon_image(icon, colors.text_primary)
             .fit_to_exact_size(egui::vec2(16.0, 16.0));
         let btn = egui::Button::image(image)
+            .frame(true)
+            .corner_radius(CornerRadius::same(4));
+        let response = ui
+            .add_enabled_ui(enabled, |ui| ui.add_sized(egui::vec2(30.0, 28.0), btn))
+            .inner;
+        response.on_hover_text(tooltip)
+    }
+
+    /// Toolbar button with a text/emoji glyph instead of an SVG icon, sized
+    /// to match [`Self::file_toolbar_button`].
+    fn text_toolbar_button(
+        ui: &mut egui::Ui,
+        enabled: bool,
+        glyph: &str,
+        tooltip: &str,
+    ) -> egui::Response {
+        let btn = egui::Button::new(egui::RichText::new(glyph).size(14.0))
             .frame(true)
             .corner_radius(CornerRadius::same(4));
         let response = ui
@@ -1602,18 +1625,26 @@ x,y are local chip coordinates (pixels).",
     fn render_run_clustering_button(&mut self, ui: &mut egui::Ui) {
         ui.add_space(12.0);
 
+        let is_nexus = self
+            .selected_file
+            .as_deref()
+            .is_some_and(crate::pipeline::is_sns_nexus_path);
         let can_cluster = !self.processing.is_loading
             && !self.processing.is_processing
             && self.selected_file.is_some()
-            && self.statistics.hit_count > 0;
+            && self.statistics.hit_count > 0
+            && !is_nexus;
 
-        if ui
-            .add_enabled(
-                can_cluster,
-                primary_button("Run Clustering").min_size(egui::vec2(ui.available_width(), 0.0)),
-            )
-            .clicked()
-        {
+        let mut resp = ui.add_enabled(
+            can_cluster,
+            primary_button("Run Clustering").min_size(egui::vec2(ui.available_width(), 0.0)),
+        );
+        if is_nexus {
+            resp = resp.on_disabled_hover_text(
+                "Clustering is not available for NeXus files yet (only TPX3).",
+            );
+        }
+        if resp.clicked() {
             self.processing.reset_cancel();
             self.run_processing();
         }

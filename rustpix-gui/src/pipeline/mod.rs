@@ -4,7 +4,7 @@ mod clustering;
 mod loader;
 
 pub use clustering::{run_clustering_worker, ClusteringWorkerConfig};
-pub use loader::load_file_worker;
+pub use loader::{is_sns_nexus_path, load_file_worker};
 
 /// Algorithm type selection for clustering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

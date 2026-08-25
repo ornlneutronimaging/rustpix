@@ -14,7 +14,9 @@ use rustpix_core::extraction::ExtractionConfig;
 use rustpix_core::neutron::NeutronBatch;
 use rustpix_core::soa::HitBatch;
 use rustpix_io::hdf5::{Hdf5NeutronSink, NeutronEventBatch, NeutronWriteOptions};
-use rustpix_io::hdf5_sns::{SnsEventSink, SnsRunMetadata, SnsWriteOptions};
+use rustpix_io::hdf5_sns::{
+    SnsBankConfig, SnsEventReader, SnsEventSink, SnsRunMetadata, SnsWriteOptions,
+};
 use rustpix_io::{
     out_of_core_neutron_stream, OutOfCoreConfig, TimeOrderedEventStream, TimeOrderedHitStream,
     Tpx3FileReader,
@@ -804,6 +806,104 @@ fn stream_tpx3_hits(
     })
 }
 
+#[pyfunction]
+#[pyo3(signature = (path, bank="bank100", start=0, count=None, pixel_id_offset=None, width=512, height=512))]
+/// Read decoded events from a bank of an SNS NeXus file (`*.nxs.h5`).
+///
+/// Works on both facility files written by ADARA (e.g. VENUS_15159.nxs.h5)
+/// and files exported by rustpix.  `start`/`count` select an event slice
+/// (clamped to the bank size) so multi-billion-event files can be read in
+/// chunks; count=None reads to the end of the bank.
+///
+/// `pixel_id_offset`, `width`, and `height` describe the bank's pixel-ID
+/// layout.  The defaults match VENUS bank100 (offset 1_000_000, 512x512
+/// gap-removed grid); other banks need an explicit pixel_id_offset.
+///
+/// Returns a dict with numpy arrays "event_id" (u32), "x"/"y" (u16),
+/// "tof_ns" (u64), "pulse_time_ns" (u64, absolute Unix-epoch ns for
+/// facility files), plus scalars "bank", "start", and "total_events".
+#[allow(clippy::too_many_arguments)] // keyword arguments on the Python side
+fn read_sns_events(
+    py: Python<'_>,
+    path: &str,
+    bank: &str,
+    start: u64,
+    count: Option<u64>,
+    pixel_id_offset: Option<u32>,
+    width: u32,
+    height: u32,
+) -> PyResult<PyObject> {
+    let pixel_id_offset = match pixel_id_offset {
+        Some(offset) => offset,
+        None if bank == "bank100" => 1_000_000,
+        None => {
+            return Err(PyValueError::new_err(format!(
+                "pixel_id_offset is required for bank {bank:?} (only bank100 has a default of 1_000_000)"
+            )))
+        }
+    };
+    let config = SnsBankConfig {
+        name: bank.to_string(),
+        pixel_id_offset,
+        width,
+        height,
+        gap_columns: Vec::new(),
+        gap_rows: Vec::new(),
+    };
+
+    let reader =
+        SnsEventReader::open(path).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    let events = reader
+        .read_events(&config, start, count)
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("bank", events.bank)?;
+    dict.set_item("start", events.start)?;
+    dict.set_item("total_events", events.total_events)?;
+    dict.set_item("event_id", PyArray1::from_vec(py, events.event_id))?;
+    dict.set_item("x", PyArray1::from_vec(py, events.x))?;
+    dict.set_item("y", PyArray1::from_vec(py, events.y))?;
+    dict.set_item("tof_ns", PyArray1::from_vec(py, events.tof_ns))?;
+    dict.set_item(
+        "pulse_time_ns",
+        PyArray1::from_vec(py, events.pulse_time_ns),
+    )?;
+    Ok(dict.into_any().unbind())
+}
+
+#[pyfunction]
+/// Summarize an SNS NeXus file: its event banks and run metadata.
+///
+/// Returns a dict with "banks" (dict of bank name -> {"events", "pulses"})
+/// and best-effort metadata entries ("run_number", "experiment_identifier",
+/// "start_time", "end_time", "title", "duration_s", "proton_charge_pc";
+/// None when the file does not record them).
+fn sns_file_info(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let reader =
+        SnsEventReader::open(path).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+    let banks = PyDict::new(py);
+    for bank in reader.banks() {
+        let entry = PyDict::new(py);
+        entry.set_item("events", bank.event_count)?;
+        entry.set_item("pulses", bank.pulse_count)?;
+        banks.set_item(&bank.name, entry)?;
+    }
+
+    let meta = reader.metadata();
+    let dict = PyDict::new(py);
+    dict.set_item("banks", banks)?;
+    dict.set_item("run_number", meta.run_number)?;
+    dict.set_item("experiment_identifier", meta.experiment_identifier)?;
+    dict.set_item("start_time", meta.start_time)?;
+    dict.set_item("end_time", meta.end_time)?;
+    dict.set_item("title", meta.title)?;
+    dict.set_item("duration_s", meta.duration_s)?;
+    dict.set_item("proton_charge_pc", meta.proton_charge_pc)?;
+    Ok(dict.into_any().unbind())
+}
+
 #[pymodule]
 fn rustpix(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDetectorConfig>()?;
@@ -815,6 +915,8 @@ fn rustpix(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNeutronBatchStream>()?;
 
     m.add_function(wrap_pyfunction!(read_tpx3_hits, m)?)?;
+    m.add_function(wrap_pyfunction!(read_sns_events, m)?)?;
+    m.add_function(wrap_pyfunction!(sns_file_info, m)?)?;
     m.add_function(wrap_pyfunction!(process_tpx3_neutrons, m)?)?;
     m.add_function(wrap_pyfunction!(cluster_hits, m)?)?;
     m.add_function(wrap_pyfunction!(stream_tpx3_neutrons, m)?)?;

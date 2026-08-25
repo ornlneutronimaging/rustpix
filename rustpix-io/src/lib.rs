@@ -24,7 +24,8 @@ pub use hdf5::{
 };
 #[cfg(feature = "hdf5")]
 pub use hdf5_sns::{
-    write_hits_sns, write_neutrons_sns, DasLogEntry, SnsBankConfig, SnsEventSink,
+    read_sns_events_venus, venus_bank100_config, write_hits_sns, write_neutrons_sns, DasLogEntry,
+    SnsBankConfig, SnsBankEvents, SnsBankInfo, SnsEventReader, SnsEventSink, SnsFileMetadata,
     SnsInstrumentConfig, SnsRunMetadata, SnsWriteOptions,
 };
 pub use out_of_core::{pulse_batches, OutOfCoreConfig, PulseBatchGroup, PulseBatcher, PulseSlice};

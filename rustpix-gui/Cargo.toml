@@ -41,7 +41,9 @@ eframe = "0.33"
 egui = "0.33"
 egui_plot = "0.34"
 egui_extras = { version = "0.33", features = ["svg"] }
-rfd = "0.15"
+# gtk3 backend instead of the default xdg-portal one: the portal ignores
+# set_directory(), which "start browsing in the last used directory" needs.
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
 image = "0.25"
 tiff = "0.10"
 hdf5.workspace = true
@@ -51,3 +53,6 @@ sysinfo.workspace = true
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
+
+[dev-dependencies]
+tempfile.workspace = true

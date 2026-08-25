@@ -2,11 +2,13 @@
 //!
 //! Contains the UI rendering logic split into separate modules:
 //! - `control_panel`: Left sidebar, top bar, and bottom status bar
+//! - `file_open`: Open-file conveniences (start dir, path popup, recents)
 //! - `main_view`: Central panel with histogram image, slicer, and spectrum
 //! - `statistics`: Statistics display panel
 //! - `theme`: Application theme and styling
 
 mod control_panel;
+pub(crate) mod file_open;
 mod main_view;
 mod statistics;
 pub mod theme;

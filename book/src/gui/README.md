@@ -23,7 +23,7 @@ cargo run --release -p rustpix-gui
 
 ## Features
 
-- **Interactive file loading**: Open TPX3 files via file dialog or drag-and-drop
+- **Interactive file loading**: Open TPX3 or SNS NeXus (`.nxs.h5`) files via file dialog or drag-and-drop
 - **Real-time visualization**: View hits and neutron events on 2D detector maps
 - **Algorithm selection**: Choose between ABS, DBSCAN, and Grid clustering
 - **Parameter tuning**: Adjust clustering parameters with immediate visual feedback
@@ -53,9 +53,14 @@ pixi run gui-debug
 
 ### 1. Load Data
 
-1. Click **File > Open** or drag a `.tpx3` file onto the window
+1. Click **File > Open** or drag a `.tpx3` or NeXus (`.h5`/`.nxs.h5`) file onto the window
 2. Wait for the file to load (progress shown in status bar)
 3. Raw hits appear in the visualization panel
+
+NeXus loading reads VENUS `bank100` events (from rustpix's own NXsnsevent
+exports — facility ADARA files have empty event banks, since VENUS Timepix
+data is recorded in `.tpx3` files). NeXus events carry no time-over-threshold,
+and clustering is only available for TPX3 files.
 
 ### 2. Configure Processing
 

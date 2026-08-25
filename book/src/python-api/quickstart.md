@@ -187,6 +187,49 @@ The format is auto-detected from the file extension:
 - `.h5`, `.hdf5`, `.nxs` → Generic NeXus HDF5
 - `.nxs.h5` → ORNL SNS NXsnsevent HDF5
 
+## Reading SNS NeXus Files
+
+Read decoded events back from SNS NeXus files — both facility files
+produced by the ADARA translation service (e.g. `VENUS_15159.nxs.h5`)
+and rustpix's own NXsnsevent exports:
+
+```python
+import rustpix
+
+# Summarize banks and run metadata
+info = rustpix.sns_file_info("/SNS/VENUS/IPTS-35004/nexus/VENUS_15159.nxs.h5")
+print(info["banks"])       # {'bank100': {'events': 1545255312, 'pulses': 3675}, ...}
+print(info["run_number"], info["start_time"])
+
+# Read a slice of events (defaults: bank100, VENUS 512x512 geometry)
+events = rustpix.read_sns_events(
+    "/SNS/VENUS/IPTS-35004/nexus/VENUS_15159.nxs.h5",
+    start=0,
+    count=10_000_000,
+)
+events["x"], events["y"]      # uint16 pixel coordinates (gap-removed grid)
+events["tof_ns"]              # uint64 time-of-flight in nanoseconds
+events["pulse_time_ns"]       # uint64 absolute pulse time (Unix epoch ns)
+```
+
+`count=None` reads the whole bank. For multi-billion-event files, loop in
+chunks — `start`/`count` are clamped to the bank size, so iterate until the
+returned arrays are empty:
+
+```python
+start = 0
+while True:
+    events = rustpix.read_sns_events(path, start=start, count=100_000_000)
+    if len(events["x"]) == 0:
+        break
+    ...  # process chunk
+    start += len(events["x"])
+```
+
+Note: facility files store only pixel ID and TOF per event — ToT, chip IDs,
+and per-hit timestamps from the raw `.tpx3` stream are not recorded, so
+re-clustering is not possible from a NeXus file alone.
+
 ## Out-of-Core Processing
 
 For files larger than RAM:

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-25
+
+### Added
+
+- GUI: the same file-open tools as `rust_nexus_viewer` — the Open dialog now
+  starts in the current (or most recently opened) file's directory, a ⌨
+  toolbar button opens a type/paste-a-path modal (a file path loads
+  directly, a directory path starts the browser there, `~/` expands), a 🕘
+  menu reopens one of the last 5 files (persisted in
+  `~/.config/venus_rust_tools/rustpix_recent`, deduplicated across /SNS
+  vs /gpfs mounts), and a `.tpx3` file can be dropped onto the window to
+  load it. Requires switching `rfd` to the gtk3 backend, since the default
+  xdg-portal one ignores the requested starting directory.
+
+- GUI: SNS NeXus event files (`.nxs.h5`, `.h5`, `.hdf5`, `.nxs`) can now be
+  loaded like TPX3 files — via the Open dialog, the path popup, the recent
+  menu, or drag-and-drop. VENUS `bank100` events are read in 2M-event
+  slices, decoded on the gap-removed 512×512 grid, converted to 25 ns TOF
+  ticks, and grouped per pulse (sorted by TOF within each pulse), so
+  rebinning, ROI spectra, and export all work as after a TPX3 load. NeXus
+  events carry no ToT (stored as 0), and clustering stays TPX3-only (the
+  button explains why). Loading a facility ADARA file, whose event banks
+  are empty (VENUS Timepix data is recorded in `.tpx3` files), reports a
+  clear error pointing at the run's `.tpx3` file.
+- IO: `sns_read_summary` example prints a NeXus file's banks, run
+  metadata, and event statistics from a full sliced read of `bank100`
+  (`cargo run -p rustpix-io --features hdf5 --example sns_read_summary -- <file>`).
+
+- IO: `SnsEventReader` reads SNS NeXus event files (`*.nxs.h5`) — both
+  facility files written by the ADARA translation service and rustpix's own
+  `NXsnsevent` exports. Banks are discovered from `entry/<bank>_events`
+  groups; events can be read in slices so multi-billion-event files fit in
+  memory a chunk at a time. Pixel IDs are decoded back to x/y with the bank
+  configuration, TOF is converted to nanoseconds from the recorded units,
+  and per-event pulse timestamps are reconstructed as absolute Unix-epoch
+  nanoseconds (ADARA's `offset_seconds` counts from the EPICS 1990-01-01
+  epoch; the ISO `offset` attribute is preferred when present). Also
+  exposes best-effort run metadata (`run_number`, `start_time`, proton
+  charge, …). One-shot helper: `read_sns_events_venus`.
+- Python: `read_sns_events(path, bank="bank100", start=0, count=None, ...)`
+  returns event slices as NumPy arrays (`event_id`, `x`, `y`, `tof_ns`,
+  `pulse_time_ns`), and `sns_file_info(path)` summarizes a file's banks and
+  run metadata. Defaults match VENUS bank100 (pixel-ID offset 1,000,000 on
+  a 512×512 gap-removed grid); other banks take an explicit
+  `pixel_id_offset`.
+
 ## [1.1.3] - 2026-07-28
 
 ### Changed
