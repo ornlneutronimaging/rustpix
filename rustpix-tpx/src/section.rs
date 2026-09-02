@@ -166,10 +166,11 @@ pub fn scan_section_tdc(data: &[u8], section: &Tpx3Section) -> Option<u32> {
     let section_data = &data[section.start_offset..section.end_offset];
     let mut final_tdc = section.initial_tdc;
 
-    for chunk in section_data.chunks_exact(PACKET_SIZE) {
-        let mut bytes = [0u8; PACKET_SIZE];
-        bytes.copy_from_slice(chunk);
-        let raw = u64::from_le_bytes(bytes);
+    // `as_chunks` yields `&[u8; PACKET_SIZE]` directly, so the packet needs no
+    // intermediate buffer. The remainder is a partial trailing packet and is
+    // discarded, exactly as `chunks_exact` did.
+    for packet in section_data.as_chunks::<PACKET_SIZE>().0 {
+        let raw = u64::from_le_bytes(*packet);
         if ((raw >> 56) & 0xFF) == 0x6F {
             final_tdc = Some(((raw >> 12) & 0x3FFF_FFFF) as u32);
         }
