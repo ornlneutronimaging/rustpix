@@ -240,14 +240,14 @@ impl Tpx3FileReader {
 
     /// Returns an iterator over raw packets.
     ///
-    /// # Panics
-    /// Panics if a chunk is not exactly 8 bytes. This should be unreachable because
-    /// `chunks_exact(8)` guarantees each chunk length.
+    /// A trailing run of fewer than 8 bytes is not a packet and is skipped.
     pub fn iter_packets(&self) -> impl Iterator<Item = Tpx3Packet> + '_ {
-        self.reader.as_bytes().chunks_exact(8).map(|chunk| {
-            let bytes: [u8; 8] = chunk.try_into().unwrap();
-            Tpx3Packet::new(u64::from_le_bytes(bytes))
-        })
+        self.reader
+            .as_bytes()
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|packet| Tpx3Packet::new(u64::from_le_bytes(*packet)))
     }
 }
 

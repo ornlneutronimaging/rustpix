@@ -860,12 +860,12 @@ impl Roi {
         }
 
         if right - left < min_size {
-            let mid = (right + left) * 0.5;
+            let mid = f64::midpoint(right, left);
             left = mid - min_size * 0.5;
             right = mid + min_size * 0.5;
         }
         if top - bottom < min_size {
-            let mid = (top + bottom) * 0.5;
+            let mid = f64::midpoint(top, bottom);
             bottom = mid - min_size * 0.5;
             top = mid + min_size * 0.5;
         }
@@ -943,8 +943,8 @@ impl Roi {
                 let max_x = x1.max(*x2);
                 let min_y = y1.min(*y2);
                 let max_y = y1.max(*y2);
-                let center_x = (min_x + max_x) * 0.5;
-                let center_y = (min_y + max_y) * 0.5;
+                let center_x = f64::midpoint(min_x, max_x);
+                let center_y = f64::midpoint(min_y, max_y);
                 vec![
                     [min_x, min_y],
                     [center_x, min_y],

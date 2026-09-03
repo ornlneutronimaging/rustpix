@@ -447,8 +447,8 @@ fn build_debug_info(mmap: &memmap2::Mmap, sections: &[Tpx3Section], tdc_correcti
             let _ = writeln!(debug_str, "Sec TDC Ref: {tdc}");
             let sdata = &mmap[sec.start_offset..sec.end_offset];
             let mut found = false;
-            for ch in sdata.chunks_exact(8) {
-                let raw = u64::from_le_bytes(ch.try_into().unwrap());
+            for packet_bytes in sdata.as_chunks::<8>().0 {
+                let raw = u64::from_le_bytes(*packet_bytes);
                 let packet = rustpix_tpx::Tpx3Packet::new(raw);
                 if packet.is_hit() {
                     let raw_ts = packet.timestamp_coarse();

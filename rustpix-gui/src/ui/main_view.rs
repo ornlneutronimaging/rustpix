@@ -1075,7 +1075,7 @@ impl RustpixApp {
                         let bounds = plot_ui.plot_bounds();
                         let min = bounds.min();
                         let max = bounds.max();
-                        PlotPoint::new((min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5)
+                        PlotPoint::new(f64::midpoint(min[0], max[0]), f64::midpoint(min[1], max[1]))
                     });
                     let factor = if interaction.zoom_mode == ZoomMode::In {
                         1.25
@@ -2221,7 +2221,7 @@ impl RustpixApp {
                         let bounds = plot_ui.plot_bounds();
                         let min = bounds.min();
                         let max = bounds.max();
-                        PlotPoint::new((min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5)
+                        PlotPoint::new(f64::midpoint(min[0], max[0]), f64::midpoint(min[1], max[1]))
                     });
                     let factor = if zoom_mode == ZoomMode::In { 1.25 } else { 0.8 };
                     plot_ui.zoom_bounds(Vec2::splat(zoom_factor_to_f32(factor)), center);
