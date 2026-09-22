@@ -33,10 +33,6 @@ impl PacketScanner {
     /// A tuple `(sections, consumed_bytes)`.
     /// `consumed_bytes` indicates how many bytes can be safely advanced.
     /// Bytes after `consumed_bytes` belong to an incomplete section (unless `is_eof`).
-    ///
-    /// # Panics
-    /// Panics if a chunk is not exactly 8 bytes. This should be unreachable because
-    /// `chunks_exact(8)` guarantees each chunk length.
     #[must_use]
     pub fn scan_sections(data: &[u8], is_eof: bool) -> (Vec<Section>, usize) {
         let mut sections = Vec::new();
@@ -48,9 +44,9 @@ impl PacketScanner {
         let mut consumed_bytes = 0;
 
         // Iterate over data in 8-byte chunks
-        for (offset, chunk) in data.chunks_exact(8).enumerate() {
+        for (offset, packet_bytes) in data.as_chunks::<8>().0.iter().enumerate() {
             let offset_bytes = offset * 8;
-            let packet = u64::from_le_bytes(chunk.try_into().unwrap());
+            let packet = u64::from_le_bytes(*packet_bytes);
 
             // Check if this is a TPX3 header: magic "TPX3" (0x33585054) in lower 32 bits
             if (packet & 0xFFFF_FFFF) == 0x3358_5054 {
