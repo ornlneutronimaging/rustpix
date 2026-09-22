@@ -113,6 +113,11 @@ pub struct UiState {
     pub roi_rename_id: Option<usize>,
     /// Editable name buffer for ROI renaming.
     pub roi_rename_text: String,
+    /// Height of the spectrum section (plot + toolbar + legend), adjusted by
+    /// dragging the splitter above it and persisted across restarts.
+    /// 0.0 (the derived default) means "not initialized yet" — the app sets
+    /// the real value from `layout_prefs` at startup.
+    pub spectrum_height: f32,
 }
 
 #[derive(Clone, Copy, Default)]

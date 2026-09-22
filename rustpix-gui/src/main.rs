@@ -4,6 +4,7 @@
 
 mod app;
 mod histogram;
+mod layout_prefs;
 mod message;
 mod pipeline;
 mod recent;

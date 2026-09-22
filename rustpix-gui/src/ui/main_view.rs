@@ -24,6 +24,9 @@ use crate::viewer::{Roi, RoiSelectionMode};
 /// Unique ID for the main histogram plot (used for state persistence).
 const HISTOGRAM_PLOT_ID: &str = "histogram_plot";
 
+/// Height of the drag handle between the image view and the spectrum plot.
+const SPLITTER_HEIGHT: f32 = 9.0;
+
 #[derive(Clone, Copy)]
 enum RoiToolbarIcon {
     Rectangle,
@@ -372,6 +375,9 @@ impl RustpixApp {
                 self.render_histogram_section(ctx, ui, colors, inputs, state, layout.image_height);
                 self.render_roi_help_panel(ctx);
                 self.render_slicer_section(ui, inputs, state);
+                if inputs.visibility.show_spectrum {
+                    self.render_spectrum_splitter(ui);
+                }
                 self.render_spectrum_section(ctx, ui, inputs, state);
             });
     }
@@ -388,7 +394,7 @@ impl RustpixApp {
     }
 
     fn central_panel_layout(
-        &self,
+        &mut self,
         ui: &egui::Ui,
         inputs: &CentralPanelInputs,
     ) -> CentralPanelLayout {
@@ -399,25 +405,66 @@ impl RustpixApp {
             0.0
         };
         let spectrum_height = if inputs.visibility.show_spectrum {
-            if self.spectrum_has_legend() {
-                260.0
-            } else {
-                220.0
-            }
+            // Leave the image at least its minimum height (200, enforced in
+            // render_histogram_section) even on short windows. Clamp the
+            // stored value too, so an over-drag has no dead travel.
+            let max = (available_height - slicer_height - SPLITTER_HEIGHT - 8.0 - 200.0).clamp(
+                crate::layout_prefs::MIN_SPECTRUM_HEIGHT,
+                crate::layout_prefs::MAX_SPECTRUM_HEIGHT,
+            );
+            self.ui_state.spectrum_height = self
+                .ui_state
+                .spectrum_height
+                .clamp(crate::layout_prefs::MIN_SPECTRUM_HEIGHT, max);
+            self.ui_state.spectrum_height
         } else {
             0.0
         };
-        let image_height = available_height - slicer_height - spectrum_height - 8.0;
+        let splitter_height = if inputs.visibility.show_spectrum {
+            SPLITTER_HEIGHT
+        } else {
+            0.0
+        };
+        let image_height =
+            available_height - slicer_height - spectrum_height - splitter_height - 8.0;
         CentralPanelLayout { image_height }
     }
 
-    fn spectrum_has_legend(&self) -> bool {
-        self.ui_state.spectrum.full_fov_visible
-            || self
-                .roi_state
-                .rois
-                .iter()
-                .any(|roi| roi.visibility.spectrum_visible)
+    /// Drag handle between the image view and the spectrum plot: dragging it
+    /// trades image height against spectrum height, persisted on release.
+    fn render_spectrum_splitter(&mut self, ui: &mut egui::Ui) {
+        let colors = ThemeColors::from_ui(ui);
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), SPLITTER_HEIGHT),
+            egui::Sense::drag(),
+        );
+        let active = resp.hovered() || resp.dragged();
+        if active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if resp.dragged() {
+            // The handle sits above the spectrum: dragging down shrinks it.
+            self.ui_state.spectrum_height -= resp.drag_delta().y;
+        }
+        if resp.drag_stopped() {
+            self.ui_state.spectrum_height = self.ui_state.spectrum_height.clamp(
+                crate::layout_prefs::MIN_SPECTRUM_HEIGHT,
+                crate::layout_prefs::MAX_SPECTRUM_HEIGHT,
+            );
+            crate::layout_prefs::save_spectrum_height(self.ui_state.spectrum_height);
+        }
+        let color = if active {
+            colors.border_light
+        } else {
+            colors.border
+        };
+        let y = rect.center().y;
+        let half = (rect.width() * 0.5).min(24.0);
+        ui.painter().hline(
+            egui::Rangef::new(rect.center().x - half, rect.center().x + half),
+            y,
+            Stroke::new(2.0_f32, color),
+        );
     }
 
     fn render_histogram_section(
@@ -2152,8 +2199,16 @@ impl RustpixApp {
         let zoom_active = zoom_mode != ZoomMode::None;
         let mut zoom_start = self.ui_state.spectrum_zoom_start;
 
+        // Fill the section the splitter granted, keeping room for the legend
+        // row below the plot when one will be drawn.
+        let legend_reserve = if data.legend_items.is_empty() {
+            0.0
+        } else {
+            44.0
+        };
+        let plot_height = (ui.available_height() - legend_reserve).max(80.0);
         let mut spectrum_plot = Plot::new("spectrum")
-            .height(140.0)
+            .height(plot_height)
             .x_axis_label(&data.x_label)
             .y_axis_label(&data.y_label)
             .include_x(data.x_min)

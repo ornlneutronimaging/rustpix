@@ -297,6 +297,7 @@ impl Default for RustpixApp {
         ui_state.pixel_health.show_hot_pixels = true;
         ui_state.pixel_health.exclude_masked_pixels = true;
         ui_state.cache.cache_hits_in_memory = true;
+        ui_state.spectrum_height = crate::layout_prefs::load_spectrum_height();
         Self {
             selected_file: None,
             file_open: crate::ui::file_open::FileOpenState::default(),
@@ -382,6 +383,7 @@ impl RustpixApp {
         self.selected_file = Some(path.to_path_buf());
         self.processing.is_loading = true;
         self.processing.progress = 0.0;
+        self.processing.eta.reset();
         self.processing.reset_cancel();
         self.processing.status_text.clear();
         self.processing.status_text.push_str("Loading file...");
@@ -456,6 +458,7 @@ impl RustpixApp {
             }
             self.processing.is_processing = true;
             self.processing.progress = 0.0;
+            self.processing.eta.reset();
             self.processing.status_text.clear();
             self.processing.status_text.push_str("Clustering...");
             self.processing_super_resolution_factor = self.super_resolution_factor;
@@ -1553,6 +1556,9 @@ impl RustpixApp {
         if self.processing.is_loading {
             self.processing.progress = progress;
             self.processing.status_text = status;
+            self.processing
+                .eta
+                .update(std::time::Instant::now(), progress);
         }
     }
 
@@ -1560,6 +1566,9 @@ impl RustpixApp {
         if self.processing.is_processing {
             self.processing.progress = progress;
             self.processing.status_text = status;
+            self.processing
+                .eta
+                .update(std::time::Instant::now(), progress);
         }
     }
 

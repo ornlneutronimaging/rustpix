@@ -788,10 +788,15 @@ impl RustpixApp {
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::ProgressBar::new(self.processing.progress)
-                            .text(&self.processing.status_text),
-                    );
+                    let text = match self.processing.eta.remaining(std::time::Instant::now()) {
+                        Some(left) => format!(
+                            "{} — {}",
+                            self.processing.status_text,
+                            crate::state::format_eta(left)
+                        ),
+                        None => self.processing.status_text.clone(),
+                    };
+                    ui.add(egui::ProgressBar::new(self.processing.progress).text(text));
                     if ui.button("Cancel").clicked() {
                         self.cancel_operation();
                     }

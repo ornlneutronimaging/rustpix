@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- GUI: the image view and spectrum plot can be resized against each other —
+  a drag handle now sits between them, the spectrum plot fills whatever
+  height it is given (it was fixed at 140 px), and the chosen split is
+  persisted across restarts in `~/.config/venus_rust_tools/rustpix_layout`.
+  The image keeps at least 200 px and the spectrum at least 120 px, so
+  neither can be dragged away entirely.
+
+- GUI: the load progress bar now shows a time-remaining estimate
+  ("Processed 12,000,000 hits... — ~45s left") while reading TPX3 and SNS
+  NeXus files, and during clustering. The rate is measured over a 10-second
+  sliding window of progress samples, so the estimate tracks the current
+  phase of a load instead of averaging over everything since the start, and
+  it counts down between progress messages. The estimate appears once about
+  a second of history exists, disappears while progress is stalled, and is
+  deliberately rounded (10-second granularity above one minute).
+
 ## [1.2.1] - 2026-08-25
 
 ### Fixed
