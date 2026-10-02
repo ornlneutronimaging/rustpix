@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-02
+
 ### Added
 
 - GUI: the image view and spectrum plot can be resized against each other —
@@ -24,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it counts down between progress messages. The estimate appears once about
   a second of history exists, disappears while progress is stalled, and is
   deliberately rounded (10-second granularity above one minute).
+
+- GUI: the export dialogs (TIFF, HDF5, SNS HDF5, spectrum CSV and PNG) now
+  start in the experiment's `IPTS-####/shared` folder, taken from the loaded
+  file's path. When the file is not inside an experiment folder, or the
+  folder has no `shared/`, they start in the last used directory.
+
+### Fixed
+
+- GUI: the TIFF export base name now follows the loaded file. Previously,
+  after a second file was loaded, the export dialog still proposed the
+  first file's name.
+
+### Changed
+
+- Homebrew: the cask template uses `postflight_steps` instead of the
+  deprecated `postflight` stanza, matching the tap.
 
 ## [1.2.1] - 2026-08-25
 
