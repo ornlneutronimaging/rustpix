@@ -1681,7 +1681,7 @@ mod tests {
             .unwrap()
             .read_raw()
             .unwrap();
-        assert!(ids.is_empty());
+        assert_eq!(ids, Vec::<u32>::new());
     }
 
     // --- Neutron roundtrip ---
