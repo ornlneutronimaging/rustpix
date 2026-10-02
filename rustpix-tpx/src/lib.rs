@@ -753,7 +753,7 @@ mod tests {
             .get("chip_transformations")
             .and_then(|v| v.as_array())
             .expect("chip_transformations array");
-        assert!(transforms.is_empty());
+        assert_eq!(*transforms, Vec::<Value>::new());
 
         let decoded = DetectorConfig::from_json(&json).expect("decode");
         assert_eq!(decoded.chip_size_x, 256);

@@ -2091,7 +2091,7 @@ x,y are local chip coordinates (pixels).",
                     match self.ui_state.export.format {
                         ExportFormat::Hdf5 => {
                             if let Some(path) =
-                                FileDialog::new().set_file_name("rustpix.h5").save_file()
+                                self.export_dialog().set_file_name("rustpix.h5").save_file()
                             {
                                 self.start_export_hdf5(path);
                                 should_close = true;
@@ -2103,15 +2103,17 @@ x,y are local chip coordinates (pixels).",
                             } else {
                                 format!("VENUS_{}.nxs.h5", self.ui_state.export.sns.run_number)
                             };
-                            if let Some(path) =
-                                FileDialog::new().set_file_name(&default_name).save_file()
+                            if let Some(path) = self
+                                .export_dialog()
+                                .set_file_name(&default_name)
+                                .save_file()
                             {
                                 self.start_export_sns_hdf5(path);
                                 should_close = true;
                             }
                         }
                         ExportFormat::TiffFolder | ExportFormat::TiffStack => {
-                            if let Some(parent) = FileDialog::new().pick_folder() {
+                            if let Some(parent) = self.export_dialog().pick_folder() {
                                 let base_name =
                                     sanitize_export_base_name(&self.ui_state.export.tiff.base_name);
                                 if !base_name.is_empty() {

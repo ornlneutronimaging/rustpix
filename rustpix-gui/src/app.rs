@@ -380,6 +380,11 @@ impl RustpixApp {
 
     /// Reset application state for a new file load.
     fn reset_load_state(&mut self, path: &Path) {
+        // The TIFF base name defaults to the file stem; drop the one derived
+        // from the previous file so the export dialog picks up the new stem.
+        if self.selected_file.as_deref() != Some(path) {
+            self.ui_state.export.tiff.base_name.clear();
+        }
         self.selected_file = Some(path.to_path_buf());
         self.processing.is_loading = true;
         self.processing.progress = 0.0;

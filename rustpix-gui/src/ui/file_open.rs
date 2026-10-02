@@ -32,6 +32,19 @@ impl Default for FileOpenState {
     }
 }
 
+/// `…/IPTS-####/shared` for a path inside an experiment folder (the IPTS
+/// number is taken from the innermost `IPTS-<digits>` path component).
+fn ipts_shared_dir(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|dir| {
+            dir.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("IPTS-"))
+                .is_some_and(|num| !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map(|dir| dir.join("shared"))
+}
+
 impl RustpixApp {
     /// Directory to start browsing in: the current file's, else the most
     /// recently opened one's.
@@ -40,6 +53,26 @@ impl RustpixApp {
             .as_deref()
             .or_else(|| self.file_open.recent.first().map(PathBuf::as_path))
             .and_then(Path::parent)
+    }
+
+    /// Directory to start export dialogs in: the `shared/` folder of the
+    /// loaded file's experiment (`…/IPTS-####/shared`), else the last used
+    /// directory.
+    pub(crate) fn export_start_dir(&self) -> Option<PathBuf> {
+        self.selected_file
+            .as_deref()
+            .and_then(ipts_shared_dir)
+            .filter(|dir| dir.is_dir())
+            .or_else(|| self.last_used_dir().map(Path::to_path_buf))
+    }
+
+    /// Save/pick-folder dialog starting in [`Self::export_start_dir`].
+    pub(crate) fn export_dialog(&self) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new();
+        match self.export_start_dir() {
+            Some(dir) => dialog.set_directory(dir),
+            None => dialog,
+        }
     }
 
     /// Browse for a TPX3 or SNS `NeXus` file, starting in `start` (or the
@@ -198,5 +231,25 @@ impl RustpixApp {
                 path.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipts_shared_dir_from_experiment_path() {
+        let path = Path::new("/SNS/VENUS/IPTS-36967/images/tpx3/Run_1234/file.tpx3");
+        assert_eq!(
+            ipts_shared_dir(path),
+            Some(PathBuf::from("/SNS/VENUS/IPTS-36967/shared"))
+        );
+    }
+
+    #[test]
+    fn ipts_shared_dir_none_outside_experiment() {
+        assert_eq!(ipts_shared_dir(Path::new("/tmp/IPTS-abc/file.tpx3")), None);
+        assert_eq!(ipts_shared_dir(Path::new("/home/user/file.tpx3")), None);
     }
 }

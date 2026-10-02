@@ -2478,6 +2478,7 @@ impl RustpixApp {
                 tof_offset_ns: data.tof_offset_ns,
             };
             if let Err(err) = Self::export_spectrum_csv(
+                self.export_dialog(),
                 full,
                 &self.roi_state.rois,
                 self.roi_spectra_map(),
@@ -2495,9 +2496,13 @@ impl RustpixApp {
                 log_x: data.log_x,
                 log_y: data.log_y,
             };
-            if let Err(err) =
-                Self::export_spectrum_png(&data.lines, data.export_bounds, colors, &export_config)
-            {
+            if let Err(err) = Self::export_spectrum_png(
+                self.export_dialog(),
+                &data.lines,
+                data.export_bounds,
+                colors,
+                &export_config,
+            ) {
                 log::error!("Failed to export spectrum PNG: {err}");
             }
         }
@@ -2973,6 +2978,7 @@ impl RustpixApp {
     }
 
     fn export_spectrum_csv(
+        dialog: FileDialog,
         full: Option<&[u64]>,
         rois: &[Roi],
         roi_spectra: &HashMap<usize, RoiSpectrumEntry>,
@@ -2980,7 +2986,7 @@ impl RustpixApp {
         bin_width_ms: f64,
         axis_config: SpectrumAxisConfig,
     ) -> anyhow::Result<()> {
-        let Some(path) = FileDialog::new().set_file_name("spectrum.csv").save_file() else {
+        let Some(path) = dialog.set_file_name("spectrum.csv").save_file() else {
             return Ok(());
         };
 
@@ -3089,12 +3095,13 @@ impl RustpixApp {
     }
 
     fn export_spectrum_png(
+        dialog: FileDialog,
         lines: &[(String, Color32, Vec<[f64; 2]>)],
         bounds: PlotBounds,
         colors: ThemeColors,
         export: &SpectrumExportConfig,
     ) -> anyhow::Result<()> {
-        let Some(path) = FileDialog::new().set_file_name("spectrum.png").save_file() else {
+        let Some(path) = dialog.set_file_name("spectrum.png").save_file() else {
             return Ok(());
         };
         let (mut img, geometry) = Self::spectrum_export_canvas(bounds, colors);
