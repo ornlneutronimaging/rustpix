@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- DBSCAN: `min_points` counts the hit itself. At the default of 2 an isolated
+  pair forms a cluster; a setting of N behaves like N - 1 did in 1.3.0.
+  `min_points = 1` keeps isolated hits. (#136)
 - Threaded out-of-core pipeline (`parallelism > 1` or `async_io`): a pulse
   split to fit the memory budget yields one batch, as in the single-threaded
   pipeline. (#138)

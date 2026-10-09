@@ -24,7 +24,7 @@ pub enum ClusteringAlgorithm {
 pub struct AlgorithmParams {
     /// ABS scan interval (hits between aging scans).
     pub abs_scan_interval: usize,
-    /// DBSCAN minimum points for a seed cluster.
+    /// DBSCAN minimum hits, including the hit itself, to seed a cluster.
     pub dbscan_min_points: usize,
     /// Grid cell size (pixels).
     pub grid_cell_size: usize,

@@ -11,7 +11,7 @@ pub struct DbscanConfig {
     pub epsilon: f64,
     /// Temporal correlation window (nanoseconds).
     pub temporal_window_ns: f64,
-    /// Minimum number of points to seed a cluster.
+    /// Minimum hits in a neighbourhood, counting the hit itself, to seed a cluster.
     pub min_points: usize,
     /// Minimum cluster size to keep after pruning.
     pub min_cluster_size: u16,
@@ -72,6 +72,10 @@ impl DbscanClustering {
         DbscanState::default()
     }
 
+    fn is_core(&self, neighbor_count: usize) -> bool {
+        neighbor_count + 1 >= self.config.min_points
+    }
+
     /// Cluster hits using DBSCAN.
     ///
     /// # Errors
@@ -119,9 +123,7 @@ impl DbscanClustering {
 
             Self::region_query_into(&ctx, i, batch, neighbors_buffer);
 
-            if neighbors_buffer.len() < self.config.min_points {
-                noise_slice[i] = true;
-            } else {
+            if self.is_core(neighbors_buffer.len()) {
                 batch.cluster_id[i] = current_cluster_id;
                 seeds_buffer.clear();
                 seeds_buffer.extend_from_slice(neighbors_buffer);
@@ -138,6 +140,8 @@ impl DbscanClustering {
                     neighbors_buffer,
                 );
                 current_cluster_id += 1;
+            } else {
+                noise_slice[i] = true;
             }
         }
 
@@ -325,7 +329,7 @@ impl DbscanClustering {
                 batch.cluster_id[current_p] = cluster_id;
 
                 Self::region_query_into(ctx, current_p, batch, neighbors);
-                if neighbors.len() >= self.config.min_points {
+                if self.is_core(neighbors.len()) {
                     seeds.extend_from_slice(neighbors);
                 }
             } else if batch.cluster_id[current_p] == -1 {

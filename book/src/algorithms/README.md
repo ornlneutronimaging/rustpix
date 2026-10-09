@@ -52,7 +52,7 @@ Density-Based Spatial Clustering of Applications with Noise. Groups points based
 
 1. Build spatial index of all hits
 2. For each unvisited hit, find neighbors within epsilon
-3. If enough neighbors (min_points), start a cluster
+3. If the neighborhood holds at least `min_points` hits (counting the hit itself), start a cluster
 4. Recursively expand cluster with density-reachable points
 5. Points not in any cluster are marked as noise
 
@@ -62,7 +62,7 @@ Density-Based Spatial Clustering of Applications with Noise. Groups points based
 |-----------|-------------|---------------|
 | `radius` | Epsilon (spatial search radius) | 5.0 |
 | `temporal_window_ns` | Temporal epsilon | 75.0 ns |
-| `dbscan_min_points` | Minimum neighbors for core point | 2 |
+| `dbscan_min_points` | Minimum hits within the neighborhood, including the hit itself, for a core point (1 keeps isolated hits) | 2 |
 
 ### When to Use
 
