@@ -1403,7 +1403,7 @@ struct HistogramChunkKey {
 
 /// Streaming writer for histogram/hyperspectra counts in `NXdata`.
 ///
-/// Call `flush()` before dropping to ensure buffered chunks are written.
+/// Flushes on drop; call `flush()` to handle write errors.
 pub struct Hdf5HistogramSink {
     _file: File,
     counts: Dataset,
@@ -1614,6 +1614,12 @@ impl Hdf5HistogramSink {
         let start = [start0, start1, start2, start3];
         let lengths = [len0, len1, len2, len3];
         (start, lengths)
+    }
+}
+
+impl Drop for Hdf5HistogramSink {
+    fn drop(&mut self) {
+        let _ = self.flush_all();
     }
 }
 
@@ -3033,5 +3039,48 @@ mod tests {
         let loaded = read_histogram_hdf5(file.path()).unwrap();
         let idx = |r, y, x, t| (((r * shape.y + y) * shape.x + x) * shape.time_of_flight) + t;
         assert_eq!(loaded.counts[idx(0, 0, 0, 0)], 5);
+    }
+
+    #[test]
+    fn test_hdf5_histogram_sink_flushes_on_drop() {
+        let shape = HistogramShape {
+            rot_angle: 1,
+            y: 2,
+            x: 2,
+            time_of_flight: 3,
+        };
+        let axes = HistogramAxisData {
+            rot_angle: vec![0.0],
+            y: vec![0.0, 1.0],
+            x: vec![0.0, 1.0],
+            time_of_flight_ns: vec![10.0, 20.0, 30.0],
+        };
+        let options = HistogramWriteOptions {
+            chunk_counts: Some([1, 1, 2, 2]),
+            compression: None,
+            shuffle: false,
+            flight_path_m: None,
+            tof_offset_ns: None,
+            energy_axis_kind: Some("tof".to_string()),
+        };
+        let memory = OutOfCoreConfig::default().with_memory_budget_bytes(1_000_000);
+
+        let file = NamedTempFile::new().unwrap();
+        let mut sink =
+            Hdf5HistogramSink::create(file.path(), shape, &axes, &options, &memory).unwrap();
+        sink.add_bins([HistogramBin {
+            rot_angle: 0,
+            y: 1,
+            x: 1,
+            time_of_flight: 2,
+            count: 7,
+        }])
+        .unwrap();
+        drop(sink);
+
+        let loaded = read_histogram_hdf5(file.path()).unwrap();
+        let idx = |r, y, x, t| (((r * shape.y + y) * shape.x + x) * shape.time_of_flight) + t;
+        assert_eq!(loaded.counts[idx(0, 1, 1, 2)], 7);
+        assert_eq!(loaded.counts.iter().sum::<u64>(), 7);
     }
 }

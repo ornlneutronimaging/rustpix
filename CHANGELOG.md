@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `Hdf5HistogramSink` writes its buffered counts when dropped without
+  `flush()`. (#139)
+
 ### Changed
 
 - `rustpix-tpx`: removed the unused `parser` and `error` source files and the
