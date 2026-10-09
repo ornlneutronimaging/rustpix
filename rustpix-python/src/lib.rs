@@ -470,19 +470,9 @@ fn read_tpx3_hits(
     })
 }
 
-/// Process a TPX3 file into neutrons.
-///
-/// By default this returns a streaming iterator (`NeutronBatchStream`) that yields
-/// pulse-bounded batches to keep memory usage bounded. Use `collect=True` to return
-/// a single `NeutronBatch` for small files.
-///
-/// Additional kwargs:
-/// - out_of_core (bool): enable the out-of-core pipeline (default: True for streaming).
-/// - memory_fraction (float): fraction of available RAM to target (default: 0.5).
-/// - memory_budget_bytes (int): explicit memory budget override.
-/// - parallelism (int): worker threads for slice processing.
-/// - queue_depth (int): bounded queue depth for pipeline stages.
-/// - async_io (bool): enable async reader/worker pipeline.
+/// Process a TPX3 file into a `NeutronBatchStream`, or a `NeutronBatch` with `collect=True`.
+/// Streaming-only kwargs: `out_of_core=True`, `memory_fraction=0.5`, `memory_budget_bytes`,
+/// `parallelism`, `queue_depth`, `async_io`.
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, collect=false, **kwargs))]
 fn process_tpx3_neutrons(
@@ -708,14 +698,8 @@ fn cluster_hits(
 #[pyfunction]
 #[pyo3(signature = (path, detector_config=None, clustering_config=None, extraction_config=None, **kwargs))]
 /// Stream TPX3 neutrons in pulse-bounded batches.
-///
-/// Additional kwargs:
-/// - out_of_core (bool): enable the out-of-core pipeline (default: True)
-/// - memory_fraction (float): fraction of available RAM to target (default: 0.5)
-/// - memory_budget_bytes (int): explicit memory budget override
-/// - parallelism (int): worker threads for slice processing
-/// - queue_depth (int): bounded queue depth for pipeline stages
-/// - async_io (bool): enable async reader/worker pipeline
+/// Out-of-core kwargs: `out_of_core=True`, `memory_fraction=0.5`, `memory_budget_bytes`,
+/// `parallelism`, `queue_depth`, `async_io`.
 fn stream_tpx3_neutrons(
     path: &str,
     detector_config: Option<PyRef<'_, PyDetectorConfig>>,
@@ -808,20 +792,9 @@ fn stream_tpx3_hits(
 
 #[pyfunction]
 #[pyo3(signature = (path, bank="bank100", start=0, count=None, pixel_id_offset=None, width=512, height=512))]
-/// Read decoded events from a bank of an SNS NeXus file (`*.nxs.h5`).
-///
-/// Works on both facility files written by ADARA (e.g. VENUS_15159.nxs.h5)
-/// and files exported by rustpix.  `start`/`count` select an event slice
-/// (clamped to the bank size) so multi-billion-event files can be read in
-/// chunks; count=None reads to the end of the bank.
-///
-/// `pixel_id_offset`, `width`, and `height` describe the bank's pixel-ID
-/// layout.  The defaults match VENUS bank100 (offset 1_000_000, 512x512
-/// gap-removed grid); other banks need an explicit pixel_id_offset.
-///
-/// Returns a dict with numpy arrays "event_id" (u32), "x"/"y" (u16),
-/// "tof_ns" (u64), "pulse_time_ns" (u64, absolute Unix-epoch ns for
-/// facility files), plus scalars "bank", "start", and "total_events".
+/// Read SNS NeXus bank events; non-bank100 banks need `pixel_id_offset`.
+/// Keys: `event_id`, `x`, `y`, `tof_ns`, `pulse_time_ns` (Unix epoch if recorded), `bank`,
+/// `start`, `total_events`.
 #[allow(clippy::too_many_arguments)] // keyword arguments on the Python side
 fn read_sns_events(
     py: Python<'_>,
@@ -873,12 +846,9 @@ fn read_sns_events(
 }
 
 #[pyfunction]
-/// Summarize an SNS NeXus file: its event banks and run metadata.
-///
-/// Returns a dict with "banks" (dict of bank name -> {"events", "pulses"})
-/// and best-effort metadata entries ("run_number", "experiment_identifier",
-/// "start_time", "end_time", "title", "duration_s", "proton_charge_pc";
-/// None when the file does not record them).
+/// Summarize an SNS NeXus file: `banks` (name to `events`/`pulses`) and metadata, `None` if absent:
+/// `run_number`, `experiment_identifier`, `start_time`, `end_time`, `title`, `duration_s`,
+/// `proton_charge_pc`.
 fn sns_file_info(py: Python<'_>, path: &str) -> PyResult<PyObject> {
     let reader =
         SnsEventReader::open(path).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
@@ -1035,10 +1005,7 @@ fn collect_and_write_nexus_neutrons(
 }
 
 /// Write a `NeutronBatch` to a generic NeXus HDF5 file.
-///
-/// Rejects SNS `NXsnsevent` output (`*.nxs.h5`) because this path lacks
-/// per-pulse TDC timestamps required for correct `event_time_zero`/`event_index`.
-/// For per-pulse generic NeXus output, use [`collect_and_write_nexus_neutrons`].
+/// Errors on `*.nxs.h5` paths: SNS output needs per-pulse TDC timestamps this batch lacks.
 fn write_neutrons_hdf5(
     output_path: &str,
     neutrons: &NeutronBatch,

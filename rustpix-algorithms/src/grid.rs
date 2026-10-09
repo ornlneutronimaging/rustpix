@@ -350,14 +350,8 @@ mod tests {
 
     #[test]
     fn test_grid_requires_tof_sorted_input() {
-        // This test documents that if hits are not sorted by TOF, clustering might fail to link them
-        // if we rely on temporal pruning (break loop early).
-        //
-        // Example: Hit A (TOF 100), Hit B (TOF 200), Hit C (TOF 102)
-        // If stored as [A, B, C], when processing A:
-        //   - Check A vs B (diff 100). If window=10, loop breaks.
-        //   - A vs C never checked.
-        // Result: A not linked to C, even though diff is 2.
+        // The scan from A stops at the first later hit outside the window,
+        // so B (TOF 200) hides C (TOF 102) from A.
 
         let mut batch = HitBatch::default();
         batch.push((10, 10, 100, 5, 0, 0)); // Hit A
@@ -388,11 +382,7 @@ mod tests {
     fn test_grid_temporal_pruning() {
         let mut batch = HitBatch::default();
 
-        // Ensure that we don't scan infinity.
-        // A, B, C, D... sorted.
-        // A (0), B (100), C (200), D (300). Window = 50.
-        // A checks B -> fail, break. A checks C? No.
-        // If logic is correct, performance is O(N * window_density) not O(N^2).
+        // The scan from each hit stops at the first later hit outside the window.
 
         // Correctness check:
         batch.push((10, 10, 100, 5, 0, 0));

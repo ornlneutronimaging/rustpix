@@ -263,7 +263,7 @@ pub struct PixelMaskWriteData {
 /// Event data loaded from an `NXevent_data` group (hits).
 #[derive(Clone, Debug)]
 pub struct HitEventData {
-    /// Event IDs derived from pixel coordinates.
+    /// Pixel index per event, `y * x_size + x`.
     pub event_id: Vec<i32>,
     /// Time-of-flight values in nanoseconds.
     pub event_time_offset_ns: Vec<u64>,
@@ -288,7 +288,7 @@ pub struct HitEventData {
 /// Event data loaded from an `NXevent_data` group (neutrons).
 #[derive(Clone, Debug)]
 pub struct NeutronEventData {
-    /// Event IDs derived from pixel coordinates.
+    /// Pixel index per event, `y * x_size + x`, with `x` and `y` divided by `super_resolution_factor` and rounded.
     pub event_id: Vec<i32>,
     /// Time-of-flight values in nanoseconds.
     pub event_time_offset_ns: Vec<u64>,
@@ -580,10 +580,10 @@ where
     Ok(())
 }
 
-/// Writes hits, neutrons, and/or histogram data into a single HDF5/NeXus file.
+/// Writes the given payloads to one HDF5/NeXus file.
 ///
 /// # Errors
-/// Returns an error if HDF5 I/O fails or metadata options conflict.
+/// Fails on no payload, conflicting metadata, invalid data, or I/O.
 pub fn write_combined_hdf5_batches<P: AsRef<Path>>(
     path: P,
     hits: Option<(&[EventBatch], &HitWriteOptions)>,
@@ -655,10 +655,10 @@ pub fn write_combined_hdf5_batches<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Writes combined hit, neutron, histogram, and pixel mask data into a single HDF5/NeXus file.
+/// Single-batch form of [`write_combined_hdf5_batches`].
 ///
 /// # Errors
-/// Returns an error if HDF5 I/O fails or if the input data is inconsistent.
+/// Fails on no payload, conflicting metadata, invalid data, or I/O.
 pub fn write_combined_hdf5<P: AsRef<Path>>(
     path: P,
     hits: Option<(&EventBatch, &HitWriteOptions)>,
@@ -1346,7 +1346,7 @@ pub struct HistogramWriteData {
     pub time_of_flight_ns: Vec<f64>,
 }
 
-/// Histogram data loaded from `NXdata`.
+/// Histogram data loaded from an `NXdata` group.
 #[derive(Clone, Debug)]
 pub struct HistogramData {
     /// Flattened counts array.
@@ -1416,10 +1416,10 @@ pub struct Hdf5HistogramSink {
 }
 
 impl Hdf5HistogramSink {
-    /// Create a new histogram sink with bounded in-memory caching.
+    /// Creates the file, with chunk caching bounded by `memory`.
     ///
     /// # Errors
-    /// Returns an error if the file or datasets cannot be created or axes are invalid.
+    /// Fails on empty `shape`, mismatched axes, invalid options, or I/O.
     pub fn create<P: AsRef<Path>>(
         path: P,
         shape: HistogramShape,

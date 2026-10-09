@@ -106,16 +106,6 @@ impl DbscanClustering {
 
         let mut current_cluster_id = 0;
 
-        // Use slices for tracking to avoid split borrowing issues with state
-        // We'll pass slices to helper functions
-        // But we need to use the `visited` and `noise` from `state`.
-        // To avoid borrowing `state` while reading `ctx` (which borrows `state.grid`),
-        // we can split `state` or pass things differently.
-        // `ctx` borrows `state.grid`.
-        // `visited` and `noise` are separate fields.
-        // Rust might figure it out if we borrow fields separately.
-
-        // To make it safe and easier, let's extract the slices from state:
         let visited_slice = &mut state.visited[..n];
         let noise_slice = &mut state.noise[..n];
         let neighbors_buffer = &mut state.neighbors;

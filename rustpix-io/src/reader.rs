@@ -30,7 +30,6 @@ impl MappedFileReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(&path)?;
         // SAFETY: The file is opened read-only and we assume it is not modified concurrently.
-        // This is the standard safety contract for memory mapping.
         #[allow(unsafe_code)]
         let mmap = unsafe { Mmap::map(&file)? };
         Ok(Self {
@@ -122,7 +121,7 @@ pub struct Tpx3FileReader {
 }
 
 impl Tpx3FileReader {
-    /// Opens a TPX3 file for reading with default configuration.
+    /// Opens a TPX3 file with `DetectorConfig::default()`.
     ///
     /// # Errors
     /// Returns an error if the file cannot be opened or memory-mapped.
@@ -153,24 +152,15 @@ impl Tpx3FileReader {
         self.reader.len() / 8
     }
 
-    /// Reads and parses all hits from the file into a `HitBatch` (`SoA`).
-    ///
-    /// This uses the pulse-based time-ordered stream to ensure correct
-    /// temporal ordering across pulses and chips.
+    /// Reads all hits, time-ordered across pulses and chips.
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid or the data cannot be parsed.
+    /// Returns an error if the file size is invalid.
     pub fn read_batch(&self) -> Result<HitBatch> {
         self.read_batch_time_ordered()
     }
 
-    /// Reads hits using the efficient time-ordered stream.
-    ///
-    /// This uses a pulse-based K-way merge to produce time-ordered hits
-    /// without loading the entire file or performing a global sort.
-    ///
-    /// This is functionally equivalent to `read_batch()` and is retained
-    /// for clarity.
+    /// Equivalent to `read_batch`.
     ///
     /// # Errors
     /// Returns an error if the file size is invalid.

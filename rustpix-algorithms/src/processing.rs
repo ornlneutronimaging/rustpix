@@ -195,10 +195,10 @@ pub fn cluster_and_extract_batch(
         .map_err(Into::into)
 }
 
-/// Cluster hits in batches, then extract and append neutrons into a single batch.
+/// Cluster each batch and collect all neutrons into one batch.
 ///
 /// # Errors
-/// Returns an error if clustering or extraction fails for any batch.
+/// Returns the first clustering or extraction error.
 pub fn cluster_and_extract_stream<I>(
     batches: I,
     algorithm: ClusteringAlgorithm,

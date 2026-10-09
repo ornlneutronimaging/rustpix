@@ -55,8 +55,7 @@ impl Iterator for OutOfCoreNeutronStreamHandle {
 
 /// Threaded out-of-core stream with bounded queues.
 ///
-/// Dropping the stream signals cancellation and joins worker threads; if a
-/// batch is already being processed, shutdown waits for that batch to finish.
+/// Dropping it cancels the workers and waits for any in-flight batch.
 pub struct ThreadedOutOfCoreNeutronStream {
     /// Receives pulse outputs from the worker thread.
     receiver: mpsc::Receiver<Result<PulseNeutronBatch>>,
@@ -244,7 +243,7 @@ where
 /// Build an out-of-core neutron stream from a TPX3 reader.
 ///
 /// # Errors
-/// Returns an error if the reader fails or the memory budget is invalid.
+/// Reader errors or an invalid memory budget.
 pub fn out_of_core_neutron_stream(
     reader: &Tpx3FileReader,
     algorithm: ClusteringAlgorithm,
@@ -260,13 +259,10 @@ pub fn out_of_core_neutron_stream(
     Ok(Box::new(handle))
 }
 
-/// Build an out-of-core neutron stream handle from a TPX3 reader.
-///
-/// This exposes the underlying handle type, while [`out_of_core_neutron_stream`]
-/// returns a boxed iterator for compatibility.
+/// Like [`out_of_core_neutron_stream`], but returns the concrete handle.
 ///
 /// # Errors
-/// Returns an error if the reader fails or the memory budget is invalid.
+/// Reader errors or an invalid memory budget.
 pub fn out_of_core_neutron_stream_handle(
     reader: &Tpx3FileReader,
     algorithm: ClusteringAlgorithm,
