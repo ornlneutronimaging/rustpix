@@ -15,7 +15,7 @@ pub struct ClusteringConfig {
     pub temporal_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
-    /// Maximum cluster size (None = unlimited).
+    /// Clusters with more hits are dropped (`None` = no limit).
     pub max_cluster_size: Option<u16>,
 }
 

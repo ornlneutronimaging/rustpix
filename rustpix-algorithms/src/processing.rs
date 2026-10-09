@@ -102,40 +102,7 @@ pub fn cluster_and_extract(
     extraction: &ExtractionConfig,
     params: &AlgorithmParams,
 ) -> Result<Vec<Neutron>> {
-    let num_clusters = match algorithm {
-        ClusteringAlgorithm::Abs => {
-            let algo = AbsClustering::new(AbsConfig {
-                radius: clustering.radius,
-                neutron_correlation_window_ns: clustering.temporal_window_ns,
-                min_cluster_size: clustering.min_cluster_size,
-                scan_interval: params.abs_scan_interval,
-            });
-            let mut state = AbsState::default();
-            algo.cluster(batch, &mut state)?
-        }
-        ClusteringAlgorithm::Dbscan => {
-            let algo = DbscanClustering::new(DbscanConfig {
-                epsilon: clustering.radius,
-                temporal_window_ns: clustering.temporal_window_ns,
-                min_points: params.dbscan_min_points,
-                min_cluster_size: clustering.min_cluster_size,
-            });
-            let mut state = DbscanState::default();
-            algo.cluster(batch, &mut state)?
-        }
-        ClusteringAlgorithm::Grid => {
-            let algo = GridClustering::new(GridConfig {
-                radius: clustering.radius,
-                temporal_window_ns: clustering.temporal_window_ns,
-                min_cluster_size: clustering.min_cluster_size,
-                cell_size: params.grid_cell_size,
-                max_cluster_size: clustering.max_cluster_size.map(|value| value as usize),
-            });
-            let mut state = GridState::default();
-            algo.cluster(batch, &mut state)?
-        }
-    };
-
+    let num_clusters = cluster(batch, algorithm, clustering, params)?;
     let mut extractor = SimpleCentroidExtraction::new();
     extractor.configure(extraction.clone());
     extractor
@@ -154,45 +121,75 @@ pub fn cluster_and_extract_batch(
     extraction: &ExtractionConfig,
     params: &AlgorithmParams,
 ) -> Result<NeutronBatch> {
-    let num_clusters = match algorithm {
-        ClusteringAlgorithm::Abs => {
-            let algo = AbsClustering::new(AbsConfig {
-                radius: clustering.radius,
-                neutron_correlation_window_ns: clustering.temporal_window_ns,
-                min_cluster_size: clustering.min_cluster_size,
-                scan_interval: params.abs_scan_interval,
-            });
-            let mut state = AbsState::default();
-            algo.cluster(batch, &mut state)?
-        }
-        ClusteringAlgorithm::Dbscan => {
-            let algo = DbscanClustering::new(DbscanConfig {
-                epsilon: clustering.radius,
-                temporal_window_ns: clustering.temporal_window_ns,
-                min_points: params.dbscan_min_points,
-                min_cluster_size: clustering.min_cluster_size,
-            });
-            let mut state = DbscanState::default();
-            algo.cluster(batch, &mut state)?
-        }
-        ClusteringAlgorithm::Grid => {
-            let algo = GridClustering::new(GridConfig {
-                radius: clustering.radius,
-                temporal_window_ns: clustering.temporal_window_ns,
-                min_cluster_size: clustering.min_cluster_size,
-                cell_size: params.grid_cell_size,
-                max_cluster_size: clustering.max_cluster_size.map(|value| value as usize),
-            });
-            let mut state = GridState::default();
-            algo.cluster(batch, &mut state)?
-        }
-    };
-
+    let num_clusters = cluster(batch, algorithm, clustering, params)?;
     let mut extractor = SimpleCentroidExtraction::new();
     extractor.configure(extraction.clone());
     extractor
         .extract_soa_batch(batch, num_clusters)
         .map_err(Into::into)
+}
+
+fn cluster(
+    batch: &mut HitBatch,
+    algorithm: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    params: &AlgorithmParams,
+) -> Result<usize> {
+    let num_clusters = match algorithm {
+        ClusteringAlgorithm::Abs => AbsClustering::new(AbsConfig {
+            radius: clustering.radius,
+            neutron_correlation_window_ns: clustering.temporal_window_ns,
+            min_cluster_size: clustering.min_cluster_size,
+            scan_interval: params.abs_scan_interval,
+        })
+        .cluster(batch, &mut AbsState::default())?,
+        ClusteringAlgorithm::Dbscan => DbscanClustering::new(DbscanConfig {
+            epsilon: clustering.radius,
+            temporal_window_ns: clustering.temporal_window_ns,
+            min_points: params.dbscan_min_points,
+            min_cluster_size: clustering.min_cluster_size,
+        })
+        .cluster(batch, &mut DbscanState::default())?,
+        ClusteringAlgorithm::Grid => GridClustering::new(GridConfig {
+            radius: clustering.radius,
+            temporal_window_ns: clustering.temporal_window_ns,
+            min_cluster_size: clustering.min_cluster_size,
+            cell_size: params.grid_cell_size,
+            max_cluster_size: clustering.max_cluster_size.map(usize::from),
+        })
+        .cluster(batch, &mut GridState::default())?,
+    };
+    Ok(match clustering.max_cluster_size {
+        Some(max) => drop_oversized(batch, num_clusters, usize::from(max)),
+        None => num_clusters,
+    })
+}
+
+/// Relabels clusters with more than `max` hits as `-1` and renumbers the rest from 0.
+fn drop_oversized(batch: &mut HitBatch, num_clusters: usize, max: usize) -> usize {
+    let mut sizes = vec![0usize; num_clusters];
+    for &label in &batch.cluster_id {
+        if let Some(size) = usize::try_from(label).ok().and_then(|l| sizes.get_mut(l)) {
+            *size += 1;
+        }
+    }
+    let mut kept = 0i32;
+    let relabel: Vec<i32> = sizes
+        .iter()
+        .map(|&size| {
+            if size > max {
+                return -1;
+            }
+            kept += 1;
+            kept - 1
+        })
+        .collect();
+    for label in &mut batch.cluster_id {
+        if let Ok(old) = usize::try_from(*label) {
+            *label = relabel.get(old).copied().unwrap_or(-1);
+        }
+    }
+    usize::try_from(kept).unwrap_or(0)
 }
 
 /// Cluster and extract each TOF-ordered pulse separately; `pulse_starts` must ascend.
