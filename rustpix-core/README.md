@@ -1,34 +1,53 @@
 # rustpix-core
 
-Core traits and types for the rustpix pixel detector data processing library.
+Shared types for the rustpix crates: columnar hit and neutron containers,
+clustering and extraction settings, centroid extraction, and errors.
+[`rustpix-io`](https://crates.io/crates/rustpix-io) reads TPX3 files into a
+`HitBatch`, and [`rustpix-algorithms`](https://crates.io/crates/rustpix-algorithms)
+clusters it into neutrons.
 
-## Overview
+## Main types
 
-This crate provides the foundational types and traits used across the rustpix ecosystem:
+- `soa::HitBatch`: hits as parallel vectors `x`, `y`, `tof`, `tot`, `timestamp`,
+  `chip_id`, `cluster_id`. TOF is in 25 ns ticks.
+- `ClusteringConfig`: `radius` (pixels), `temporal_window_ns`, `min_cluster_size`
+  and `max_cluster_size` (applied by Grid only).
+- `ExtractionConfig` and `SimpleCentroidExtraction`: one TOT-weighted centroid
+  per labelled cluster.
+- `Neutron`, `NeutronBatch`: extracted events; `x` and `y` are pixel coordinates
+  times `super_resolution_factor` (default 8).
+- `Error` and `Result`.
 
-- `PixelHit` - Represents a single pixel hit with coordinates, time-of-arrival, and time-over-threshold
-- `Cluster` - A collection of pixel hits grouped together
-- `ClusterStats` - Statistical properties of a cluster (centroid, total ToT, etc.)
-- Traits for clustering algorithms and data processing
-
-## Usage
+## Example
 
 ```rust
-use rustpix_core::{PixelHit, Cluster, ClusterStats};
+use rustpix_core::soa::HitBatch;
+use rustpix_core::{ExtractionConfig, ExtractionError, NeutronExtraction, SimpleCentroidExtraction};
 
-// Create a pixel hit
-let hit = PixelHit::new(100, 200, 1000.0, 50);
+fn main() -> Result<(), ExtractionError> {
+    let mut hits = HitBatch::with_capacity(3);
+    // (x, y, tof, tot, timestamp, chip_id)
+    hits.push((10, 10, 1000, 30, 0, 0));
+    hits.push((12, 10, 1001, 10, 0, 0));
+    hits.push((50, 60, 2000, 15, 0, 0));
 
-// Access hit properties
-println!("Position: ({}, {})", hit.x(), hit.y());
-println!("Time of Arrival: {} ns", hit.toa());
-println!("Time over Threshold: {}", hit.tot());
+    // Labels normally come from a rustpix-algorithms clustering pass; -1 is noise.
+    hits.cluster_id.copy_from_slice(&[0, 0, 1]);
+
+    let extractor = SimpleCentroidExtraction::with_config(ExtractionConfig::default());
+    // Number of clusters; normally the value returned by cluster().
+    let neutrons = extractor.extract_soa(&hits, 2)?;
+
+    assert_eq!(neutrons.len(), 2);
+    assert_eq!(neutrons[0].n_hits, 2);
+    Ok(())
+}
 ```
 
 ## Features
 
-- `serde` - Enable serialization/deserialization support
+- `serde`: `Serialize` and `Deserialize` for `HitBatch`.
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE) for details.
+MIT. See [LICENSE](https://github.com/ornlneutronimaging/rustpix/blob/main/LICENSE).

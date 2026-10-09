@@ -1,67 +1,60 @@
 # rustpix-io
 
-Memory-mapped file I/O and output writers for rustpix.
+File I/O for [rustpix](https://github.com/ornlneutronimaging/rustpix). It reads
+Timepix3 `.tpx3` files through a memory map, returns hits time-ordered one pulse
+at a time, clusters a file into neutrons pulse by pulse within a memory budget,
+and writes neutrons as CSV or binary. The `hdf5` feature adds NeXus HDF5 and SNS
+`NXsnsevent` reading and writing.
 
-## Features
+## Main types
 
-- **Memory-Mapped Reading**: Efficient large file handling with memmap2
-- **Multiple Output Formats**: HDF5, Arrow/Parquet, CSV
-- **Streaming Writers**: Write data incrementally without buffering
-- **Metadata Preservation**: Store detector configuration and processing parameters
+- `Tpx3FileReader`: opens a `.tpx3` file; `stream_time_ordered_events()` yields
+  one batch per pulse, `read_batch()` returns every hit in one `HitBatch`.
+- `out_of_core_neutron_stream`: clusters a file pulse by pulse and yields one
+  `PulseNeutronBatch` per pulse; `OutOfCoreConfig` sets the memory budget and
+  worker threads.
+- `DataFileWriter`: neutrons as CSV or 28-byte binary records.
+- `hdf5` and `hdf5_sns` modules (feature `hdf5`): NeXus hits, neutrons,
+  histograms and pixel masks; SNS event files.
 
-## Usage
+## Example
 
-### Memory-Mapped Reading
-
-```rust
-use rustpix_io::MmapReader;
-
-let reader = MmapReader::open("large_file.tpx3")?;
-let data = reader.read_region(offset, length)?;
+```toml
+[dependencies]
+rustpix-io = "1.4"
+rustpix-core = "1.4"
+rustpix-algorithms = "1.4"
 ```
 
-### HDF5 Output
-
 ```rust
-use rustpix_io::hdf5::Hdf5Writer;
+use rustpix_algorithms::{AlgorithmParams, ClusteringAlgorithm};
+use rustpix_core::{ClusteringConfig, ExtractionConfig};
+use rustpix_io::{out_of_core_neutron_stream, DataFileWriter, OutOfCoreConfig, Tpx3FileReader};
 
-let mut writer = Hdf5Writer::create("output.h5")?;
-writer.write_neutrons(&neutrons)?;
-writer.write_metadata(&metadata)?;
-```
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let reader = Tpx3FileReader::open("run.tpx3")?;
+    let pulses = out_of_core_neutron_stream(
+        &reader,
+        ClusteringAlgorithm::Abs,
+        &ClusteringConfig::default(),
+        &ExtractionConfig::default(),
+        &AlgorithmParams::default(),
+        &OutOfCoreConfig::default(),
+    )?;
 
-### CSV Output
-
-```rust
-use rustpix_io::csv::CsvWriter;
-
-let mut writer = CsvWriter::create("output.csv")?;
-for batch in neutron_stream {
-    writer.write_batch(&batch)?;
+    let mut writer = DataFileWriter::create("neutrons.csv")?;
+    for (i, pulse) in pulses.enumerate() {
+        writer.write_neutron_batch_csv(&pulse?.neutrons, i == 0)?;
+    }
+    Ok(())
 }
 ```
 
-## HDF5 Schema
+## Features
 
-```
-output.h5
-├── neutrons/
-│   ├── x          (f64) X coordinates
-│   ├── y          (f64) Y coordinates
-│   ├── toa        (u64) Time of Arrival
-│   ├── tot_sum    (u32) Total TOT
-│   └── size       (u32) Cluster size
-└── metadata/
-    ├── version
-    ├── algorithm
-    └── parameters
-```
-
-## Optional Features
-
-- `hdf5` - Enable HDF5 output (requires static linking)
-- `serde` - Enable serialization support
+- `hdf5`: builds the HDF5 C library from source; needs CMake and a C compiler.
+- `serde`: `Serialize` and `Deserialize` for `HitBatch` and `scanner::Section`.
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE) for details.
+MIT. See [LICENSE](https://github.com/ornlneutronimaging/rustpix/blob/main/LICENSE).
