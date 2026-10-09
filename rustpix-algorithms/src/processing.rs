@@ -91,7 +91,7 @@ where
     }
 }
 
-/// Cluster hits in-place, then extract neutrons using the configured algorithm.
+/// Cluster one pulse of TOF-ordered hits, then extract neutrons.
 ///
 /// # Errors
 /// Returns an error if clustering or extraction fails.
@@ -143,7 +143,7 @@ pub fn cluster_and_extract(
         .map_err(Into::into)
 }
 
-/// Cluster hits in-place, then extract neutrons into a `NeutronBatch`.
+/// Cluster one pulse of TOF-ordered hits, then extract a `NeutronBatch`.
 ///
 /// # Errors
 /// Returns an error if clustering or extraction fails.

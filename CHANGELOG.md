@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Docs: clustering input requirements (one pulse per call; ascending TOF order
+  for ABS and Grid) and how each algorithm applies `radius` and
+  `temporal_window_ns`. The user guide's description of ABS matches the
+  implementation. (#135, #137)
 - `rustpix-tpx`: removed the unused `parser` and `error` source files and the
   `thiserror` and `rayon` dependencies. (#134)
 

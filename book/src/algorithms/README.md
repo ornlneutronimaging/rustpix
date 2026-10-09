@@ -10,23 +10,48 @@ Rustpix provides three clustering algorithms for grouping detector hits into neu
 | **DBSCAN** | O(n log n) | Noisy data, irregular clusters | Single-threaded |
 | **Grid** | O(n) | Large datasets, parallel processing | Multi-threaded |
 
-## ABS (Adjacency-Based Search)
+## Input Requirements
 
-The default algorithm. Uses 8-connectivity search to find adjacent pixels within temporal and spatial thresholds.
+Each clustering call works on the hits of one pulse. TOF restarts at every
+pulse, so if a batch holds several pulses, hits from different pulses with
+similar position and TOF are grouped together. `stream_tpx3_neutrons` and
+`process_tpx3_neutrons` (with the default `time_ordered=True`) cluster pulse by
+pulse.
+
+ABS and Grid also require the hits in ascending TOF order; on unsorted input,
+hits that belong together can end up in separate clusters. DBSCAN does not
+depend on order.
+
+## How `radius` and `temporal_window_ns` Are Applied
+
+The same `ClusteringConfig` gives different clusters depending on the algorithm:
+
+| Algorithm | `radius` | `temporal_window_ns` | Longest cluster duration |
+|-----------|----------|----------------------|--------------------------|
+| ABS | Hit vs. the cluster's bounding box, expanded by `radius` | Hit vs. the cluster's first hit | `temporal_window_ns` |
+| DBSCAN | Hit vs. hit, Euclidean | Hit vs. hit | Unbounded (neighbours chain) |
+| Grid | Hit vs. hit, Euclidean | Hit vs. hit | Unbounded (links chain) |
+
+For example, six hits in adjacent pixels, each 50 ns after the previous one,
+form one cluster with Grid or DBSCAN and three clusters with ABS (75 ns window).
+
+## ABS (Age-Based Spatial)
+
+The default algorithm. Builds clusters in a single pass over TOF-ordered hits.
 
 ### How It Works
 
-1. Hits are processed in time order
-2. For each hit, search for neighbors within radius and temporal window
-3. Group connected hits into clusters using flood-fill
-4. Periodically scan for completed clusters (configurable interval)
+1. Hits are processed in TOF order
+2. A hit joins an open cluster if it lies within `radius` of the cluster's bounding box and within `temporal_window_ns` of the cluster's first hit
+3. Otherwise it starts a new cluster
+4. Every `abs_scan_interval` hits, clusters whose first hit is older than the temporal window are closed
 
 ### Parameters
 
 | Parameter | Description | Typical Value |
 |-----------|-------------|---------------|
-| `radius` | Maximum pixel distance | 5.0 |
-| `temporal_window_ns` | Maximum time difference | 75.0 ns |
+| `radius` | Maximum distance from the cluster's bounding box (pixels) | 5.0 |
+| `temporal_window_ns` | Maximum time after the cluster's first hit | 75.0 ns |
 | `abs_scan_interval` | Hits between cluster scans | 100 |
 
 ### When to Use
@@ -60,8 +85,8 @@ Density-Based Spatial Clustering of Applications with Noise. Groups points based
 
 | Parameter | Description | Typical Value |
 |-----------|-------------|---------------|
-| `radius` | Epsilon (spatial search radius) | 5.0 |
-| `temporal_window_ns` | Temporal epsilon | 75.0 ns |
+| `radius` | Epsilon: maximum distance between neighbouring hits (pixels) | 5.0 |
+| `temporal_window_ns` | Maximum time difference between neighbouring hits | 75.0 ns |
 | `dbscan_min_points` | Minimum hits within the neighborhood, including the hit itself, for a core point (1 keeps isolated hits) | 2 |
 
 ### When to Use
@@ -95,8 +120,8 @@ Parallel grid-based clustering with spatial indexing.
 
 | Parameter | Description | Typical Value |
 |-----------|-------------|---------------|
-| `radius` | Maximum pixel distance | 5.0 |
-| `temporal_window_ns` | Maximum time difference | 75.0 ns |
+| `radius` | Maximum distance between two linked hits (pixels) | 5.0 |
+| `temporal_window_ns` | Maximum time difference between two linked hits | 75.0 ns |
 | `grid_cell_size` | Cell size in pixels | 32 |
 
 ### When to Use

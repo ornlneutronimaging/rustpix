@@ -9,9 +9,9 @@ use rustpix_core::soa::HitBatch;
 /// Configuration for grid-based clustering.
 #[derive(Clone, Debug)]
 pub struct GridConfig {
-    /// Spatial radius for neighbor detection (pixels).
+    /// Maximum distance (pixels) between two linked hits.
     pub radius: f64,
-    /// Temporal correlation window (nanoseconds).
+    /// Maximum TOF difference (ns) between two linked hits; links chain.
     pub temporal_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
@@ -66,9 +66,7 @@ impl GridClustering {
         Self { config }
     }
 
-    /// Cluster a batch of hits in-place.
-    ///
-    /// Updates `cluster_id` field in `batch`.
+    /// Cluster one pulse of TOF-ordered hits, setting `cluster_id`.
     ///
     /// # Errors
     /// Returns an error if clustering fails.

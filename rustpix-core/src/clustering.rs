@@ -4,15 +4,14 @@
 // Re-export ClusteringError for convenience
 pub use crate::error::ClusteringError;
 
-/// Configuration for clustering algorithms.
+/// Clustering parameters shared by all algorithms.
 ///
-/// This is a generic configuration that all clustering algorithms accept.
-/// Algorithm-specific configurations extend this.
+/// Each call expects one pulse; ABS and Grid also expect ascending TOF order.
 #[derive(Clone, Debug)]
 pub struct ClusteringConfig {
-    /// Spatial radius for neighbor detection (pixels).
+    /// Spatial radius (pixels): hit to hit for Grid and DBSCAN, hit to cluster box for ABS.
     pub radius: f64,
-    /// Temporal correlation window (nanoseconds).
+    /// Time window (ns): hit to hit for Grid and DBSCAN, hit to first cluster hit for ABS.
     pub temporal_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,

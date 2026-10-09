@@ -6,9 +6,9 @@ use rustpix_core::soa::HitBatch;
 /// Configuration for ABS (Age-Based Spatial) clustering.
 #[derive(Clone, Debug)]
 pub struct AbsConfig {
-    /// Spatial radius for neighbor detection (pixels).
+    /// Distance (pixels) a hit may lie outside an open cluster's bounding box.
     pub radius: f64,
-    /// Temporal correlation window (nanoseconds).
+    /// Maximum time (ns) after a cluster's first hit for another hit to join it.
     pub neutron_correlation_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
@@ -118,7 +118,7 @@ impl AbsClustering {
         Self { config }
     }
 
-    /// Cluster hits using the ABS algorithm.
+    /// Cluster one pulse of TOF-ordered hits using ABS.
     ///
     /// # Errors
     /// Returns an error if internal state limits are exceeded.

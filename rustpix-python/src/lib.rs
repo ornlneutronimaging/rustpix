@@ -644,6 +644,8 @@ fn process_tpx3_neutrons(
 
 #[pyfunction]
 #[pyo3(signature = (batch, clustering_config=None, extraction_config=None, **kwargs))]
+/// Cluster a `HitBatch` and extract neutrons.
+/// The batch should hold one pulse, in ascending TOF order for ABS and Grid.
 fn cluster_hits(
     mut batch: PyRefMut<'_, PyHitBatch>,
     clustering_config: Option<PyRef<'_, PyClusteringConfig>>,

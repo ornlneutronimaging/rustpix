@@ -7,9 +7,9 @@ use rustpix_core::soa::HitBatch;
 /// Configuration for DBSCAN clustering.
 #[derive(Clone, Debug)]
 pub struct DbscanConfig {
-    /// Spatial neighborhood radius (pixels).
+    /// Maximum Euclidean distance (pixels) between neighbouring hits.
     pub epsilon: f64,
-    /// Temporal correlation window (nanoseconds).
+    /// Maximum TOF difference (nanoseconds) between neighbouring hits.
     pub temporal_window_ns: f64,
     /// Minimum hits in a neighbourhood, counting the hit itself, to seed a cluster.
     pub min_points: usize,
