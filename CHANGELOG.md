@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Threaded out-of-core pipeline (`parallelism > 1` or `async_io`): a pulse
+  split to fit the memory budget yields one batch, as in the single-threaded
+  pipeline. (#138)
 - `Hdf5HistogramSink` writes its buffered counts when dropped without
   `flush()`. (#139)
 
