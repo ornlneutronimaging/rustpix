@@ -15,7 +15,7 @@ pub struct GridConfig {
     pub temporal_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
-    /// Maximum cluster size (None = unlimited).
+    /// Clusters with more hits are dropped (`None` = no limit).
     pub max_cluster_size: Option<usize>,
     /// Grid cell size (pixels).
     pub cell_size: usize,
@@ -116,7 +116,8 @@ impl GridClustering {
             cluster_sizes,
             root_to_label,
             n,
-            usize::from(self.config.min_cluster_size),
+            usize::from(self.config.min_cluster_size)
+                ..=self.config.max_cluster_size.unwrap_or(usize::MAX),
         );
 
         *hits_processed = n;
@@ -269,7 +270,7 @@ impl GridClustering {
         cluster_sizes: &mut [usize],
         root_to_label: &mut [i32],
         n: usize,
-        min_cluster_size: usize,
+        kept_sizes: std::ops::RangeInclusive<usize>,
     ) -> usize {
         cluster_sizes[..n].fill(0);
         for (i, root_slot) in roots.iter_mut().enumerate().take(n) {
@@ -284,15 +285,15 @@ impl GridClustering {
         for (i, &root) in roots.iter().enumerate().take(n) {
             let size = cluster_sizes[root];
 
-            if size < min_cluster_size {
-                batch.cluster_id[i] = -1;
-            } else {
+            if kept_sizes.contains(&size) {
                 let label_slot = &mut root_to_label[root];
                 if *label_slot < 0 {
                     *label_slot = next_label;
                     next_label += 1;
                 }
                 batch.cluster_id[i] = *label_slot;
+            } else {
+                batch.cluster_id[i] = -1;
             }
         }
 

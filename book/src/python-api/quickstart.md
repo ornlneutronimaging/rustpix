@@ -197,13 +197,13 @@ and rustpix's own NXsnsevent exports:
 import rustpix
 
 # Summarize banks and run metadata
-info = rustpix.sns_file_info("/SNS/VENUS/IPTS-35004/nexus/VENUS_15159.nxs.h5")
+info = rustpix.sns_file_info("/SNS/VENUS/IPTS-XXXXX/nexus/VENUS_15159.nxs.h5")
 print(info["banks"])       # {'bank100': {'events': 1545255312, 'pulses': 3675}, ...}
 print(info["run_number"], info["start_time"])
 
 # Read a slice of events (defaults: bank100, VENUS 512x512 geometry)
 events = rustpix.read_sns_events(
-    "/SNS/VENUS/IPTS-35004/nexus/VENUS_15159.nxs.h5",
+    "/SNS/VENUS/IPTS-XXXXX/nexus/VENUS_15159.nxs.h5",
     start=0,
     count=10_000_000,
 )

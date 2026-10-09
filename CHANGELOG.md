@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `rustpix-io` with the `hdf5` feature, and `cargo install rustpix-cli`, failed
+  to build without the repository's lockfile: `hdf5-metno` resolved to
+  `ndarray` 0.17 while `rustpix-io` required 0.16. `rustpix-io` now uses
+  `ndarray` 0.17.
+- `max_cluster_size` (Python `ClusteringConfig`, the GUI cluster-size limit)
+  is applied: clusters with more hits are dropped, for all three algorithms.
+  In 1.4.0 it had no effect.
+
+### Changed
+
+- The crates.io READMEs describe the current API, with one compiling example
+  each.
+
 ## [1.4.0] - 2026-10-09
 
 ### Added

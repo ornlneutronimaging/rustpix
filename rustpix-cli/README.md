@@ -1,57 +1,44 @@
 # rustpix-cli
 
-Command-line interface for rustpix pixel detector data processing.
+`rustpix` clusters the hits in Timepix3 (`.tpx3`) files into neutron events and
+writes them as CSV, binary, NeXus HDF5 or SNS HDF5, or bins them into a TIFF
+time-of-flight stack. It is the command-line tool of
+[rustpix](https://github.com/ornlneutronimaging/rustpix).
 
-## Installation
-
-### From crates.io
-
-```bash
-cargo install rustpix-cli
-```
-
-### From source
+## Install
 
 ```bash
-cargo install --path rustpix-cli
+cargo install --locked rustpix-cli
 ```
 
-## Usage
-
-```bash
-# Process a TPX3 file
-rustpix process input.tpx3 -o output.h5
-
-# Show file info
-rustpix info input.tpx3
-
-# Convert to different format
-rustpix convert input.tpx3 -f json -o output.json
-
-# Run with specific clustering algorithm
-rustpix process input.tpx3 --algorithm abs --eps 5.0 -o output.h5
-```
+This builds HDF5 from source and needs CMake and a C compiler. Prebuilt binaries
+are attached to each [GitHub release](https://github.com/ornlneutronimaging/rustpix/releases).
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `process` | Process TPX3 file with clustering |
-| `info` | Display file information |
-| `convert` | Convert between formats |
-| `validate` | Validate file integrity |
+| Command | Action |
+|---|---|
+| `process <INPUT>... -o <OUTPUT>` | Cluster hits and write neutron events |
+| `info <INPUT>` | Print packet and hit counts and TOF, x and y ranges |
+| `benchmark <INPUT>` | Time ABS, DBSCAN and Grid on the file |
+| `out-of-core-benchmark <INPUT>` | Time out-of-core processing with one and with several workers |
 
-## Options
+`rustpix <command> --help` lists every flag and its default.
 
+## Examples
+
+```bash
+# CSV, default ABS (Age-Based Spatial) clustering
+rustpix process run.tpx3 -o events.csv
+
+# Two files into one HDF5 file, Grid clustering, 3-pixel radius
+rustpix process run1.tpx3 run2.tpx3 -o events.h5 -a grid --radius 3
 ```
--o, --output <FILE>     Output file path
--a, --algorithm <ALG>   Clustering algorithm (abs, dbscan, graph, grid)
--e, --eps <FLOAT>       Spatial epsilon for clustering
--t, --time-eps <FLOAT>  Temporal epsilon for clustering
--v, --verbose           Verbose output
--h, --help              Print help
-```
+
+The output format follows the extension of `-o` (`.csv`, `.h5`, `.nxs.h5` for
+SNS, `.tif`; anything else is binary) or `-f`. `-a` selects `abs`, `dbscan` or
+`grid`.
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE) for details.
+MIT. See [LICENSE](https://github.com/ornlneutronimaging/rustpix/blob/main/LICENSE).
