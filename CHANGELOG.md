@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `rustpix-tpx`: removed the unused `parser` and `error` source files and the
+  `thiserror` and `rayon` dependencies. (#134)
+
 ## [1.3.0] - 2026-10-02
 
 ### Added
