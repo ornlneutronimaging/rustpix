@@ -33,7 +33,8 @@ rustpix process input.tpx3 -o output.h5
 
 # Export to ORNL SNS NXsnsevent HDF5
 rustpix process input.tpx3 -o output.nxs.h5 \
-    --run-number NNNNN --ipts IPTS-XXXXX
+    --run-number 12345 \
+    --ipts IPTS-XXXXX
 
 # Export to TIFF stack with custom TOF binning
 rustpix process input.tpx3 -o output.tiff \

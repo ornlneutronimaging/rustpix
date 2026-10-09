@@ -10,8 +10,8 @@ clusters it into neutrons.
 
 - `soa::HitBatch`: hits as parallel vectors `x`, `y`, `tof`, `tot`, `timestamp`,
   `chip_id`, `cluster_id`. TOF is in 25 ns ticks.
-- `ClusteringConfig`: `radius` (pixels), `temporal_window_ns`, `min_cluster_size`
-  and `max_cluster_size` (applied by Grid only).
+- `ClusteringConfig`: `radius` (pixels), `temporal_window_ns` and
+  `min_cluster_size`.
 - `ExtractionConfig` and `SimpleCentroidExtraction`: one TOT-weighted centroid
   per labelled cluster.
 - `Neutron`, `NeutronBatch`: extracted events; `x` and `y` are pixel coordinates
