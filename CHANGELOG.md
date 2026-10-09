@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Tpx3FileReader::read_batch_with_pulse_starts` returns the first hit index of
+  each pulse, and `rustpix_algorithms::cluster_and_extract_pulses` clusters a
+  multi-pulse batch pulse by pulse. (#140)
+
+### Fixed
+
+- Python: `cluster_hits` on a `read_tpx3_hits` batch and
+  `process_tpx3_neutrons(collect=True, time_ordered=False)` cluster each pulse
+  separately, so hits from different pulses are no longer merged into one
+  neutron. (#140)
+- DBSCAN: `min_points` counts the hit itself. At the default of 2 an isolated
+  pair forms a cluster; a setting of N behaves like N - 1 did in 1.3.0.
+  `min_points = 1` keeps isolated hits. (#136)
+- Threaded out-of-core pipeline (`parallelism > 1` or `async_io`): a pulse
+  split to fit the memory budget yields one batch, as in the single-threaded
+  pipeline. (#138)
+- `Hdf5HistogramSink` writes its buffered counts when dropped without
+  `flush()`. (#139)
+
+### Changed
+
+- Docs: clustering input requirements (one pulse per call; ascending TOF order
+  for ABS and Grid) and how each algorithm applies `radius` and
+  `temporal_window_ns`. The user guide's description of ABS matches the
+  implementation. (#135, #137)
+- `rustpix-tpx`: removed the unused `parser` and `error` source files and the
+  `thiserror` and `rayon` dependencies. (#134)
+
 ## [1.3.0] - 2026-10-02
 
 ### Added

@@ -3,7 +3,7 @@
 use crate::{AbsClustering, AbsConfig, AbsState, DbscanClustering, DbscanConfig, DbscanState};
 use crate::{GridClustering, GridConfig, GridState};
 use rustpix_core::clustering::ClusteringConfig;
-use rustpix_core::error::Result;
+use rustpix_core::error::{ProcessingError, Result};
 use rustpix_core::extraction::{ExtractionConfig, NeutronExtraction, SimpleCentroidExtraction};
 use rustpix_core::neutron::{Neutron, NeutronBatch};
 use rustpix_core::soa::HitBatch;
@@ -24,7 +24,7 @@ pub enum ClusteringAlgorithm {
 pub struct AlgorithmParams {
     /// ABS scan interval (hits between aging scans).
     pub abs_scan_interval: usize,
-    /// DBSCAN minimum points for a seed cluster.
+    /// DBSCAN minimum hits, including the hit itself, to seed a cluster.
     pub dbscan_min_points: usize,
     /// Grid cell size (pixels).
     pub grid_cell_size: usize,
@@ -91,7 +91,7 @@ where
     }
 }
 
-/// Cluster hits in-place, then extract neutrons using the configured algorithm.
+/// Cluster one pulse of TOF-ordered hits, then extract neutrons.
 ///
 /// # Errors
 /// Returns an error if clustering or extraction fails.
@@ -143,7 +143,7 @@ pub fn cluster_and_extract(
         .map_err(Into::into)
 }
 
-/// Cluster hits in-place, then extract neutrons into a `NeutronBatch`.
+/// Cluster one pulse of TOF-ordered hits, then extract a `NeutronBatch`.
 ///
 /// # Errors
 /// Returns an error if clustering or extraction fails.
@@ -195,10 +195,82 @@ pub fn cluster_and_extract_batch(
         .map_err(Into::into)
 }
 
-/// Cluster hits in batches, then extract and append neutrons into a single batch.
+/// Cluster and extract each TOF-ordered pulse separately; `pulse_starts` must ascend.
 ///
 /// # Errors
-/// Returns an error if clustering or extraction fails for any batch.
+/// Returns an error for invalid `pulse_starts` or failed clustering.
+pub fn cluster_and_extract_pulses(
+    batch: &mut HitBatch,
+    pulse_starts: &[usize],
+    algorithm: ClusteringAlgorithm,
+    clustering: &ClusteringConfig,
+    extraction: &ExtractionConfig,
+    params: &AlgorithmParams,
+) -> Result<NeutronBatch> {
+    if pulse_starts.windows(2).any(|pair| pair[0] > pair[1])
+        || pulse_starts
+            .last()
+            .is_some_and(|&start| start > batch.len())
+    {
+        return Err(ProcessingError::Config(format!(
+            "pulse starts must be ascending and at most the batch length ({})",
+            batch.len()
+        ))
+        .into());
+    }
+
+    let mut bounds = Vec::with_capacity(pulse_starts.len() + 2);
+    bounds.push(0);
+    bounds.extend_from_slice(pulse_starts);
+    bounds.push(batch.len());
+
+    let mut neutrons = NeutronBatch::default();
+    let mut label_offset = 0i32;
+    for pair in bounds.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        if start == end {
+            continue;
+        }
+
+        let mut pulse = copy_hits(batch, start, end);
+        let pulse_neutrons =
+            cluster_and_extract_batch(&mut pulse, algorithm, clustering, extraction, params)?;
+
+        let mut label_count = 0i32;
+        for (dest, &label) in batch.cluster_id[start..end]
+            .iter_mut()
+            .zip(&pulse.cluster_id)
+        {
+            *dest = if label < 0 {
+                -1
+            } else {
+                label_count = label_count.max(label.saturating_add(1));
+                label.saturating_add(label_offset)
+            };
+        }
+        label_offset = label_offset.saturating_add(label_count);
+        neutrons.append(&pulse_neutrons);
+    }
+
+    Ok(neutrons)
+}
+
+fn copy_hits(batch: &HitBatch, start: usize, end: usize) -> HitBatch {
+    HitBatch {
+        x: batch.x[start..end].to_vec(),
+        y: batch.y[start..end].to_vec(),
+        tof: batch.tof[start..end].to_vec(),
+        tot: batch.tot[start..end].to_vec(),
+        timestamp: batch.timestamp[start..end].to_vec(),
+        chip_id: batch.chip_id[start..end].to_vec(),
+        cluster_id: vec![-1; end - start],
+    }
+}
+
+/// Cluster each batch and collect all neutrons into one batch.
+///
+/// # Errors
+/// Returns the first clustering or extraction error.
 pub fn cluster_and_extract_stream<I>(
     batches: I,
     algorithm: ClusteringAlgorithm,

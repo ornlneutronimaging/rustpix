@@ -18,8 +18,9 @@ pub use abs::{AbsClustering, AbsConfig, AbsState};
 pub use dbscan::{DbscanClustering, DbscanConfig, DbscanState};
 pub use grid::{GridClustering, GridConfig, GridState};
 pub use processing::{
-    cluster_and_extract, cluster_and_extract_batch, cluster_and_extract_stream,
-    cluster_and_extract_stream_iter, AlgorithmParams, ClusterAndExtractStream, ClusteringAlgorithm,
+    cluster_and_extract, cluster_and_extract_batch, cluster_and_extract_pulses,
+    cluster_and_extract_stream, cluster_and_extract_stream_iter, AlgorithmParams,
+    ClusterAndExtractStream, ClusteringAlgorithm,
 };
 pub use spatial::SpatialGrid;
 

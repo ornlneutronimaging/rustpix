@@ -30,7 +30,6 @@ impl MappedFileReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(&path)?;
         // SAFETY: The file is opened read-only and we assume it is not modified concurrently.
-        // This is the standard safety contract for memory mapping.
         #[allow(unsafe_code)]
         let mmap = unsafe { Mmap::map(&file)? };
         Ok(Self {
@@ -122,7 +121,7 @@ pub struct Tpx3FileReader {
 }
 
 impl Tpx3FileReader {
-    /// Opens a TPX3 file for reading with default configuration.
+    /// Opens a TPX3 file with `DetectorConfig::default()`.
     ///
     /// # Errors
     /// Returns an error if the file cannot be opened or memory-mapped.
@@ -153,28 +152,27 @@ impl Tpx3FileReader {
         self.reader.len() / 8
     }
 
-    /// Reads and parses all hits from the file into a `HitBatch` (`SoA`).
-    ///
-    /// This uses the pulse-based time-ordered stream to ensure correct
-    /// temporal ordering across pulses and chips.
+    /// Reads all hits, time-ordered across pulses and chips.
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid or the data cannot be parsed.
+    /// Returns an error if the file size is invalid.
     pub fn read_batch(&self) -> Result<HitBatch> {
         self.read_batch_time_ordered()
     }
 
-    /// Reads hits using the efficient time-ordered stream.
-    ///
-    /// This uses a pulse-based K-way merge to produce time-ordered hits
-    /// without loading the entire file or performing a global sort.
-    ///
-    /// This is functionally equivalent to `read_batch()` and is retained
-    /// for clarity.
+    /// Equivalent to `read_batch`.
     ///
     /// # Errors
     /// Returns an error if the file size is invalid.
     pub fn read_batch_time_ordered(&self) -> Result<HitBatch> {
+        self.read_batch_with_pulse_starts().map(|(batch, _)| batch)
+    }
+
+    /// Like [`read_batch`](Self::read_batch), plus each pulse's first hit index.
+    ///
+    /// # Errors
+    /// Returns an error if the file size is invalid.
+    pub fn read_batch_with_pulse_starts(&self) -> Result<(HitBatch, Vec<usize>)> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
                 "file size {} is not a multiple of 8 (file: {})",
@@ -188,10 +186,15 @@ impl Tpx3FileReader {
 
         let stream = TimeOrderedStream::new(data, &sections, &self.config);
         let mut batch = HitBatch::default();
+        let mut pulse_starts = Vec::new();
         for pulse_batch in stream {
+            if pulse_batch.is_empty() {
+                continue;
+            }
+            pulse_starts.push(batch.len());
             batch.append(&pulse_batch);
         }
-        Ok(batch)
+        Ok((batch, pulse_starts))
     }
 
     /// Returns a time-ordered stream of hit batches (pulse-merged).
@@ -290,5 +293,43 @@ mod tests {
 
         let reader = Tpx3FileReader::open(file.path()).unwrap();
         assert!(reader.read_batch().is_err());
+    }
+
+    #[test]
+    fn test_read_batch_with_pulse_starts() {
+        let header =
+            |chip: u8| rustpix_tpx::Tpx3Packet::TPX3_HEADER_MAGIC | (u64::from(chip) << 32);
+        let tdc = |ts: u32| 0x6F00_0000_0000_0000 | (u64::from(ts) << 12);
+        let hit = |ts: u32| {
+            0xB000_0000_0000_0000
+                | (u64::from(ts & 0x3FFF) << 30)
+                | (10u64 << 20)
+                | u64::from(ts >> 14)
+        };
+        let packets = [
+            header(0),
+            tdc(1000),
+            hit(1100),
+            tdc(2000),
+            hit(2100),
+            tdc(3000),
+            header(1),
+            tdc(1000),
+            hit(1200),
+            tdc(2000),
+            hit(2050),
+            tdc(3000),
+        ];
+        let mut file = NamedTempFile::new().unwrap();
+        for packet in packets {
+            file.write_all(&packet.to_le_bytes()).unwrap();
+        }
+        file.flush().unwrap();
+
+        let reader = Tpx3FileReader::open(file.path()).unwrap();
+        let (batch, pulse_starts) = reader.read_batch_with_pulse_starts().unwrap();
+        assert_eq!(batch.tof, vec![100, 200, 50, 100]);
+        assert_eq!(pulse_starts, vec![0, 2]);
+        assert_eq!(batch, reader.read_batch().unwrap());
     }
 }

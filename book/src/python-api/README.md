@@ -63,7 +63,7 @@ Three clustering algorithms are available:
 
 | Algorithm | Description | Best For |
 |-----------|-------------|----------|
-| `abs` | Adjacency-Based Search (8-connectivity) | General use, balanced |
+| `abs` | Age-Based Spatial (single pass over TOF-ordered hits) | General use, balanced |
 | `dbscan` | Density-based spatial clustering | Noisy data |
 | `grid` | Parallel grid-based clustering | Large datasets |
 

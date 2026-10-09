@@ -6,9 +6,9 @@ use rustpix_core::soa::HitBatch;
 /// Configuration for ABS (Age-Based Spatial) clustering.
 #[derive(Clone, Debug)]
 pub struct AbsConfig {
-    /// Spatial radius for neighbor detection (pixels).
+    /// Distance (pixels) a hit may lie outside an open cluster's bounding box.
     pub radius: f64,
-    /// Temporal correlation window (nanoseconds).
+    /// Maximum time (ns) after a cluster's first hit for another hit to join it.
     pub neutron_correlation_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
@@ -118,7 +118,7 @@ impl AbsClustering {
         Self { config }
     }
 
-    /// Cluster hits using the ABS algorithm.
+    /// Cluster one pulse of TOF-ordered hits using ABS.
     ///
     /// # Errors
     /// Returns an error if internal state limits are exceeded.
@@ -130,12 +130,6 @@ impl AbsClustering {
         if batch.is_empty() {
             return Ok(0);
         }
-
-        // Initialize state if needed (or assume persistent state for streaming?)
-        // If streaming, we keep state.
-        // But users might want to cluster a single batch.
-        // Let's assume persistent state passed in `state`.
-        // We only reset `cluster_id` in batch.
 
         let n = batch.len();
         // Since batch.cluster_id stores per-hit result, we write to it eventually.
@@ -199,22 +193,7 @@ impl AbsClustering {
             }
         }
 
-        // Final cleanup?
-        // If this is streaming, we DON'T close active buckets at end of batch unless strictly required.
-        // But user expects clustering to finish for batch?
-        // If we keep state, we might return partial hits?
-        // The `cluster` function usually assumes a closed batch.
-        // If streaming, we should probably close everything to yield results,
-        // OR we yield only closed clusters?
-        // The `HitBatch` needs to be fully labeled if we want to extract from it.
-        // If we leave buckets open, those hits have cluster_id = -1.
-
-        // For now, force close everything at end of batch to match existing behavior on distinct files.
-        // Stream users might want persistence.
-        // But `process_section_into_batch` creates isolated batches per chunk.
-        // If we want cross-chunk clustering, we need persistent state.
-        // I'll close all for now.
-
+        // Close every open bucket so clusters never span batches.
         let last_tof = batch.tof.last().copied().unwrap_or(0);
         let min_cluster_size = u32::from(self.config.min_cluster_size);
         Ok(Self::finish_batch(

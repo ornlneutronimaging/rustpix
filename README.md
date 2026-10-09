@@ -13,7 +13,7 @@ High-performance pixel detector data processing for neutron imaging. Supports Ti
 
 - **Fast TPX3 Processing**: Parallel packet parsing with memory-mapped I/O
 - **Multiple Clustering Algorithms**:
-  - ABS (Adjacency-Based Search) - 8-connectivity clustering
+  - ABS (Age-Based Spatial) - single-pass clustering of TOF-ordered hits
   - DBSCAN - Density-based with spatial indexing
   - Graph - Union-find connected components
   - Grid - Parallel grid-based clustering

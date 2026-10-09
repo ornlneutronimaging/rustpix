@@ -55,8 +55,7 @@ impl Iterator for OutOfCoreNeutronStreamHandle {
 
 /// Threaded out-of-core stream with bounded queues.
 ///
-/// Dropping the stream signals cancellation and joins worker threads; if a
-/// batch is already being processed, shutdown waits for that batch to finish.
+/// Dropping it cancels the workers and waits for any in-flight batch.
 pub struct ThreadedOutOfCoreNeutronStream {
     /// Receives pulse outputs from the worker thread.
     receiver: mpsc::Receiver<Result<PulseNeutronBatch>>,
@@ -244,7 +243,7 @@ where
 /// Build an out-of-core neutron stream from a TPX3 reader.
 ///
 /// # Errors
-/// Returns an error if the reader fails or the memory budget is invalid.
+/// Reader errors or an invalid memory budget.
 pub fn out_of_core_neutron_stream(
     reader: &Tpx3FileReader,
     algorithm: ClusteringAlgorithm,
@@ -260,13 +259,10 @@ pub fn out_of_core_neutron_stream(
     Ok(Box::new(handle))
 }
 
-/// Build an out-of-core neutron stream handle from a TPX3 reader.
-///
-/// This exposes the underlying handle type, while [`out_of_core_neutron_stream`]
-/// returns a boxed iterator for compatibility.
+/// Like [`out_of_core_neutron_stream`], but returns the concrete handle.
 ///
 /// # Errors
-/// Returns an error if the reader fails or the memory budget is invalid.
+/// Reader errors or an invalid memory budget.
 pub fn out_of_core_neutron_stream_handle(
     reader: &Tpx3FileReader,
     algorithm: ClusteringAlgorithm,
@@ -352,9 +348,11 @@ where
             None
         };
 
+        let mut pulses = PulseAccumulator::default();
+
         loop {
             if cancel_worker.load(Ordering::Relaxed) {
-                break;
+                return;
             }
             let group = match group_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(group) => group,
@@ -363,7 +361,7 @@ where
             };
 
             if cancel_worker.load(Ordering::Relaxed) {
-                break;
+                return;
             }
 
             let result = if let Some(pool) = &pool {
@@ -375,8 +373,11 @@ where
             };
 
             match result {
-                Ok(group_batches) => {
-                    for batch in group_batches {
+                Ok(outputs) => {
+                    for output in outputs {
+                        let Some(batch) = pulses.push(output) else {
+                            continue;
+                        };
                         if cancel_worker.load(Ordering::Relaxed) {
                             return;
                         }
@@ -386,10 +387,20 @@ where
                     }
                 }
                 Err(err) => {
+                    if let Some(batch) = pulses.finish() {
+                        let _ = out_tx.send(Ok(batch));
+                    }
                     let _ = out_tx.send(Err(err));
                     return;
                 }
             }
+        }
+
+        if cancel_worker.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(batch) = pulses.finish() {
+            let _ = out_tx.send(Ok(batch));
         }
     });
 
@@ -407,7 +418,7 @@ fn process_group(
     extraction: &ExtractionConfig,
     params: &AlgorithmParams,
     parallel: bool,
-) -> Result<Vec<PulseNeutronBatch>> {
+) -> Result<Vec<SliceOutput>> {
     let slice_results: Vec<Result<SliceOutput>> = if parallel {
         group
             .slices
@@ -422,47 +433,42 @@ fn process_group(
             .collect()
     };
 
-    let mut outputs = Vec::with_capacity(slice_results.len());
-    for result in slice_results {
-        outputs.push(result?);
-    }
+    slice_results.into_iter().collect()
+}
 
-    let mut batches = Vec::new();
-    let mut current_tdc: Option<u64> = None;
-    let mut current_batch = PulseNeutronBatch {
-        tdc_timestamp_25ns: 0,
-        hits_processed: 0,
-        neutrons: NeutronBatch::default(),
-    };
+/// Merges consecutive slice outputs with the same TDC into one batch per pulse.
+#[derive(Default)]
+struct PulseAccumulator {
+    open: Option<PulseNeutronBatch>,
+}
 
-    for output in outputs {
-        if current_tdc != Some(output.tdc_timestamp_25ns) {
-            if current_tdc.is_some()
-                && (current_batch.hits_processed > 0 || !current_batch.neutrons.is_empty())
-            {
-                batches.push(current_batch);
-            }
-            current_batch = PulseNeutronBatch {
-                tdc_timestamp_25ns: output.tdc_timestamp_25ns,
-                hits_processed: 0,
-                neutrons: NeutronBatch::default(),
-            };
-            current_tdc = Some(output.tdc_timestamp_25ns);
+impl PulseAccumulator {
+    /// Adds a slice output and returns the previous pulse once a new TDC starts.
+    fn push(&mut self, output: SliceOutput) -> Option<PulseNeutronBatch> {
+        if let Some(open) = self
+            .open
+            .as_mut()
+            .filter(|open| open.tdc_timestamp_25ns == output.tdc_timestamp_25ns)
+        {
+            open.neutrons.append(&output.neutrons);
+            open.hits_processed = open.hits_processed.saturating_add(output.hits_processed);
+            return None;
         }
 
-        current_batch.neutrons.append(&output.neutrons);
-        current_batch.hits_processed = current_batch
-            .hits_processed
-            .saturating_add(output.hits_processed);
+        let completed = self.finish();
+        self.open = Some(PulseNeutronBatch {
+            tdc_timestamp_25ns: output.tdc_timestamp_25ns,
+            hits_processed: output.hits_processed,
+            neutrons: output.neutrons,
+        });
+        completed
     }
 
-    if current_tdc.is_some()
-        && (current_batch.hits_processed > 0 || !current_batch.neutrons.is_empty())
-    {
-        batches.push(current_batch);
+    fn finish(&mut self) -> Option<PulseNeutronBatch> {
+        self.open
+            .take()
+            .filter(|pulse| pulse.hits_processed > 0 || !pulse.neutrons.is_empty())
     }
-
-    Ok(batches)
 }
 
 fn process_slice_output(
@@ -737,5 +743,82 @@ mod tests {
         expected.sort_unstable();
 
         assert_eq!(threaded_tofs, expected);
+    }
+
+    type PulseSummary = (u64, usize, Vec<u32>);
+
+    fn summarize<I>(iter: I) -> Vec<PulseSummary>
+    where
+        I: Iterator<Item = Result<PulseNeutronBatch>>,
+    {
+        iter.map(|batch| {
+            let batch = batch.unwrap();
+            let mut tofs = batch.neutrons.tof.clone();
+            tofs.sort_unstable();
+            (batch.tdc_timestamp_25ns, batch.hits_processed, tofs)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn out_of_core_threaded_emits_one_batch_per_pulse() {
+        let pulses = || {
+            vec![
+                make_event_batch(
+                    1,
+                    &[
+                        (1, 1, 1, 20, 1, 0),
+                        (50, 50, 2, 20, 2, 0),
+                        (100, 100, 3, 20, 3, 0),
+                        (150, 150, 4, 20, 4, 0),
+                        (200, 200, 5, 20, 5, 0),
+                    ],
+                ),
+                make_event_batch(2, &[(10, 10, 7, 20, 7, 0)]),
+                make_event_batch(
+                    3,
+                    &[
+                        (5, 5, 1, 20, 1, 0),
+                        (60, 60, 2, 20, 2, 0),
+                        (120, 120, 3, 20, 3, 0),
+                        (180, 180, 4, 20, 4, 0),
+                    ],
+                ),
+            ]
+        };
+        let clustering = ClusteringConfig {
+            radius: 1.0,
+            temporal_window_ns: 25.0,
+            min_cluster_size: 1,
+            max_cluster_size: None,
+        };
+        let extraction = ExtractionConfig::default();
+        let params = AlgorithmParams::default();
+
+        for budget in [32, 46, 10_000] {
+            let config = OutOfCoreConfig::default().with_memory_budget_bytes(budget);
+            let single = OutOfCoreNeutronStream::new(
+                crate::out_of_core::PulseBatcher::new(pulses().into_iter(), &config, 1).unwrap(),
+                ClusteringAlgorithm::Grid,
+                clustering.clone(),
+                extraction.clone(),
+                params.clone(),
+            );
+            let threaded = build_threaded_stream(
+                crate::out_of_core::PulseBatcher::new(pulses().into_iter(), &config, 1).unwrap(),
+                ClusteringAlgorithm::Grid,
+                clustering.clone(),
+                extraction.clone(),
+                params.clone(),
+                2,
+                1,
+            );
+
+            let single = summarize(single);
+            let threaded = summarize(threaded);
+            let tdcs: Vec<u64> = threaded.iter().map(|pulse| pulse.0).collect();
+            assert_eq!(tdcs, vec![1, 2, 3], "budget {budget}");
+            assert_eq!(threaded, single, "budget {budget}");
+        }
     }
 }

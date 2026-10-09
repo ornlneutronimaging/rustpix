@@ -10,7 +10,7 @@
 
 - **Fast TPX3 Processing**: Parallel packet parsing with memory-mapped I/O
 - **Multiple Clustering Algorithms**:
-  - ABS (Adjacency-Based Search) - 8-connectivity clustering
+  - ABS (Age-Based Spatial) - single-pass clustering of TOF-ordered hits
   - DBSCAN - Density-based with spatial indexing
   - Grid - Parallel grid-based clustering
 - **Streaming Architecture**: Process files larger than RAM
