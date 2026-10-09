@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use rustpix_algorithms::{
-    cluster_and_extract_batch, cluster_and_extract_stream, cluster_and_extract_stream_iter,
-    AlgorithmParams, ClusteringAlgorithm,
+    cluster_and_extract_batch, cluster_and_extract_pulses, cluster_and_extract_stream,
+    cluster_and_extract_stream_iter, AlgorithmParams, ClusteringAlgorithm,
 };
 use rustpix_core::clustering::ClusteringConfig;
 use rustpix_core::extraction::ExtractionConfig;
@@ -218,6 +218,8 @@ impl PyExtractionConfig {
 #[pyclass(name = "HitBatch")]
 struct PyHitBatch {
     batch: Option<HitBatch>,
+    /// Index of the first hit of each pulse; empty means the whole batch is one pulse.
+    pulse_starts: Vec<usize>,
     metadata: BatchMetadata,
 }
 
@@ -400,6 +402,7 @@ impl PyHitBatchStream {
     fn __next__(&mut self) -> Option<PyHitBatch> {
         self.stream.next().map(|batch| PyHitBatch {
             batch: Some(batch),
+            pulse_starts: Vec::new(),
             metadata: self.metadata.clone(),
         })
     }
@@ -453,12 +456,13 @@ fn read_tpx3_hits(
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         .with_config(config.clone());
 
-    let batch = reader
-        .read_batch()
+    let (batch, pulse_starts) = reader
+        .read_batch_with_pulse_starts()
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     Ok(PyHitBatch {
         batch: Some(batch),
+        pulse_starts,
         metadata: BatchMetadata {
             detector: config,
             clustering: None,
@@ -585,11 +589,18 @@ fn process_tpx3_neutrons(
             cluster_and_extract_stream(stream, algo, &clustering, &extraction, &params)
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         } else {
-            let mut batch = reader
-                .read_batch()
+            let (mut batch, pulse_starts) = reader
+                .read_batch_with_pulse_starts()
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-            cluster_and_extract_batch(&mut batch, algo, &clustering, &extraction, &params)
-                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
+            cluster_and_extract_pulses(
+                &mut batch,
+                &pulse_starts,
+                algo,
+                &clustering,
+                &extraction,
+                &params,
+            )
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
         };
 
         // Write HDF5 if output_path was specified (skip if already written
@@ -644,8 +655,8 @@ fn process_tpx3_neutrons(
 
 #[pyfunction]
 #[pyo3(signature = (batch, clustering_config=None, extraction_config=None, **kwargs))]
-/// Cluster a `HitBatch` and extract neutrons.
-/// The batch should hold one pulse, in ascending TOF order for ABS and Grid.
+/// Cluster each pulse of a `HitBatch` separately and extract neutrons.
+/// Cluster IDs written to the hits are unique across the batch.
 fn cluster_hits(
     mut batch: PyRefMut<'_, PyHitBatch>,
     clustering_config: Option<PyRef<'_, PyClusteringConfig>>,
@@ -667,13 +678,18 @@ fn cluster_hits(
     let params = selection.params;
     let algo = selection.algorithm;
 
-    let batch_ref = batch
-        .batch
+    let PyHitBatch {
+        batch: hits,
+        pulse_starts,
+        ..
+    } = &mut *batch;
+    let hits = hits
         .as_mut()
         .ok_or_else(|| PyValueError::new_err("HitBatch data has already been moved"))?;
 
-    let neutrons = cluster_and_extract_batch(batch_ref, algo, &clustering, &extraction, &params)
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    let neutrons =
+        cluster_and_extract_pulses(hits, pulse_starts, algo, &clustering, &extraction, &params)
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
     if let Some(ref path) = output_path {
         write_neutrons_hdf5(

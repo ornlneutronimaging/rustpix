@@ -14,9 +14,10 @@ Rustpix provides three clustering algorithms for grouping detector hits into neu
 
 Each clustering call works on the hits of one pulse. TOF restarts at every
 pulse, so if a batch holds several pulses, hits from different pulses with
-similar position and TOF are grouped together. `stream_tpx3_neutrons` and
-`process_tpx3_neutrons` (with the default `time_ordered=True`) cluster pulse by
-pulse.
+similar position and TOF are grouped together. The Python functions
+(`process_tpx3_neutrons`, `stream_tpx3_neutrons` and `cluster_hits`) cluster
+pulse by pulse. In Rust, cluster a multi-pulse batch from
+`Tpx3FileReader::read_batch_with_pulse_starts` with `cluster_and_extract_pulses`.
 
 ABS and Grid also require the hits in ascending TOF order; on unsorted input,
 hits that belong together can end up in separate clusters. DBSCAN does not
