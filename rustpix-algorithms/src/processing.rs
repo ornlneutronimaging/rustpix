@@ -195,7 +195,7 @@ pub fn cluster_and_extract_batch(
         .map_err(Into::into)
 }
 
-/// Cluster and extract each pulse separately; `pulse_starts` are ascending indices.
+/// Cluster and extract each TOF-ordered pulse separately; `pulse_starts` must ascend.
 ///
 /// # Errors
 /// Returns an error for invalid `pulse_starts` or failed clustering.
