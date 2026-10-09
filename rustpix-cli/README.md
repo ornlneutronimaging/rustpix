@@ -8,7 +8,7 @@ time-of-flight stack. It is the command-line tool of
 ## Install
 
 ```bash
-cargo install rustpix-cli
+cargo install --locked rustpix-cli
 ```
 
 This builds HDF5 from source and needs CMake and a C compiler. Prebuilt binaries

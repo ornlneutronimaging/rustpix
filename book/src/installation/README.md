@@ -27,7 +27,7 @@ brew install --cask rustpix
 ### Rust Users (CLI)
 
 ```bash
-cargo install rustpix-cli
+cargo install --locked rustpix-cli
 ```
 
 ## System Requirements

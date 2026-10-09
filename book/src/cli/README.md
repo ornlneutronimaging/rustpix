@@ -5,7 +5,7 @@ The `rustpix` CLI provides batch processing capabilities for TPX3 files.
 ## Installation
 
 ```bash
-cargo install rustpix-cli
+cargo install --locked rustpix-cli
 ```
 
 Or build from source:
@@ -33,7 +33,7 @@ rustpix process input.tpx3 -o output.h5
 
 # Export to ORNL SNS NXsnsevent HDF5
 rustpix process input.tpx3 -o output.nxs.h5 \
-    --run-number 12345 --ipts IPTS-35004
+    --run-number NNNNN --ipts IPTS-XXXXX
 
 # Export to TIFF stack with custom TOF binning
 rustpix process input.tpx3 -o output.tiff \
@@ -71,7 +71,7 @@ The output format is auto-detected from the file extension, or can be overridden
 |------|---------|---------|-------------|
 | `--format` (`-f`) | All | Auto-detect | Override output format |
 | `--run-number` | `sns-hdf5` | `0` | SNS run number |
-| `--ipts` | `sns-hdf5` | `""` | Experiment identifier (e.g., `IPTS-35004`) |
+| `--ipts` | `sns-hdf5` | `""` | Experiment identifier (e.g., `IPTS-XXXXX`) |
 | `--instrument` | `sns-hdf5` | `venus` | Instrument preset |
 | `--tof-bins` | `tiff` | `200` | Number of TOF bins |
 | `--tof-max` | `tiff` | Auto | Maximum TOF in 25ns ticks |

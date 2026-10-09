@@ -42,7 +42,7 @@ brew install --cask rustpix  # GUI app
 
 ```bash
 # CLI tool
-cargo install rustpix-cli
+cargo install --locked rustpix-cli
 
 # Library
 cargo add rustpix-core rustpix-algorithms

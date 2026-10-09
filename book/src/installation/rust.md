@@ -5,7 +5,7 @@
 Install the command-line interface via cargo:
 
 ```bash
-cargo install rustpix-cli
+cargo install --locked rustpix-cli
 ```
 
 This installs the `rustpix` binary to `~/.cargo/bin/`.

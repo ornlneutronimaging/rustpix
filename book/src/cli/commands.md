@@ -31,7 +31,7 @@ rustpix process [OPTIONS] -o <OUTPUT> <INPUT>...
 | `--queue-depth <INT>` | `2` | Pipeline queue depth |
 | `--async-io <BOOL>` | `false` | Enable async I/O pipeline |
 | `--run-number <INT>` | `0` | Run number for SNS HDF5 export |
-| `--ipts <STRING>` | `""` | Experiment identifier for SNS HDF5 (e.g., `IPTS-35004`) |
+| `--ipts <STRING>` | `""` | Experiment identifier for SNS HDF5 (e.g., `IPTS-XXXXX`) |
 | `--instrument <NAME>` | `venus` | Instrument preset for SNS HDF5 (`venus`) |
 | `--tof-bins <INT>` | `200` | Number of TOF bins for TIFF output |
 | `--tof-max <INT>` | Auto | Maximum TOF in 25ns ticks for TIFF (auto-detect if omitted) |
@@ -52,8 +52,8 @@ rustpix process input.tpx3 -o output.h5
 
 # ORNL SNS NXsnsevent HDF5 export
 rustpix process input.tpx3 -o output.nxs.h5 \
-    --run-number 12345 \
-    --ipts IPTS-35004
+    --run-number NNNNN \
+    --ipts IPTS-XXXXX
 
 # TIFF stack with custom TOF binning
 rustpix process input.tpx3 -o output.tiff \

@@ -156,7 +156,7 @@ rustpix also supports export in the ORNL SNS/HFIR `NXsnsevent` schema used by in
 /
   entry/                           (NXentry, definition="NXsnsevent")
     run_number                     (string)
-    experiment_identifier          (string, e.g. "IPTS-35004")
+    experiment_identifier          (string, e.g. "IPTS-XXXXX")
     start_time                     (string, ISO 8601)
     end_time                       (string, ISO 8601)
     duration                       (f64, seconds)
