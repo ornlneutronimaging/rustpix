@@ -30,6 +30,7 @@ use hdf5::{Attribute, Dataset, File, Group};
 use ndarray::s;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 
 const NS_PER_TICK: u64 = 25;
 const US_PER_TICK: f64 = 25.0 / 1000.0;
@@ -1177,6 +1178,8 @@ pub struct SnsEventReader {
     _file: File,
     entry: Group,
     banks: Vec<SnsBankInfo>,
+    /// Banks whose whole `event_index` has been checked to be sorted.
+    sorted_banks: Mutex<HashSet<String>>,
 }
 
 impl SnsEventReader {
@@ -1210,6 +1213,7 @@ impl SnsEventReader {
             _file: file,
             entry,
             banks,
+            sorted_banks: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1276,17 +1280,19 @@ impl SnsEventReader {
 
         // Decode pixel IDs to x/y on the bank grid.
         check_bank_geometry(config)?;
-        let area = config.width * config.height;
+        let area = u64::from(config.width) * u64::from(config.height);
         events.x.reserve(events.event_id.len());
         events.y.reserve(events.event_id.len());
         for &id in &events.event_id {
-            let rel = id.checked_sub(config.pixel_id_offset).filter(|&r| r < area);
+            let rel = id
+                .checked_sub(config.pixel_id_offset)
+                .filter(|&r| u64::from(r) < area);
             let Some(rel) = rel else {
                 return Err(Error::InvalidFormat(format!(
                     "pixel ID {id} outside bank {} range [{}, {})",
                     config.name,
                     config.pixel_id_offset,
-                    config.pixel_id_offset.saturating_add(area),
+                    u64::from(config.pixel_id_offset) + area,
                 )));
             };
             events.x.push((rel % config.width) as u16);
@@ -1320,25 +1326,13 @@ impl SnsEventReader {
                 n_pulses,
             )));
         }
+        self.check_event_index_sorted(&config.name, &index_ds, n_pulses)?;
         let index_at =
             |p: usize| -> Result<u64> { Ok(index_ds.read_slice_1d::<u64, _>(s![p..=p])?[0]) };
         // The pulse holding event i is the last one whose first-event index is <= i.
         let first = last_pulse_at_or_before(n_pulses, start, &index_at)?;
         let last = last_pulse_at_or_before(n_pulses, end - 1, &index_at)?.max(first);
-        if last - first >= MAX_PULSES_PER_READ {
-            return Err(Error::InvalidFormat(format!(
-                "bank {}: {} pulses span the requested events; read fewer events at a time",
-                config.name,
-                last - first + 1,
-            )));
-        }
         let event_index = index_ds.read_slice_1d::<u64, _>(s![first..=last])?.to_vec();
-        if event_index.windows(2).any(|w| w[0] > w[1]) {
-            return Err(Error::InvalidFormat(format!(
-                "bank {}: event_index is not sorted",
-                config.name
-            )));
-        }
         let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
         let base_ns = pulse_offset_ns(&tz_ds)?;
         let pulse_ns = tz_ds
@@ -1359,6 +1353,52 @@ impl SnsEventReader {
         Ok(events)
     }
 }
+
+impl SnsEventReader {
+    /// Checks once per bank that the whole `event_index` is non-decreasing.
+    ///
+    /// The pulse search assumes sorted input, so an unsorted index would assign
+    /// events to the wrong pulse without any local sign of it.
+    fn check_event_index_sorted(
+        &self,
+        bank: &str,
+        index_ds: &Dataset,
+        n_pulses: usize,
+    ) -> Result<()> {
+        let mut sorted_banks = self
+            .sorted_banks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sorted_banks.contains(bank) {
+            return Ok(());
+        }
+        if n_pulses > MAX_PULSES {
+            return Err(Error::InvalidFormat(format!(
+                "bank {bank}: {n_pulses} pulses exceed the supported {MAX_PULSES}"
+            )));
+        }
+        let mut previous = 0u64;
+        let mut chunk_start = 0;
+        while chunk_start < n_pulses {
+            let chunk_end = n_pulses.min(chunk_start + EVENT_INDEX_CHUNK);
+            let chunk = index_ds.read_slice_1d::<u64, _>(s![chunk_start..chunk_end])?;
+            for &value in &chunk {
+                if value < previous {
+                    return Err(Error::InvalidFormat(format!(
+                        "bank {bank}: event_index is not sorted"
+                    )));
+                }
+                previous = value;
+            }
+            chunk_start = chunk_end;
+        }
+        sorted_banks.insert(bank.to_string());
+        Ok(())
+    }
+}
+
+/// Pulses read per chunk when checking `event_index` order (8 MiB of `u64`).
+const EVENT_INDEX_CHUNK: usize = 1 << 20;
 
 /// Read events from `bank100` of a VENUS SNS `NeXus` file (one-shot).
 ///
@@ -1391,8 +1431,8 @@ fn units_scale_ns(dataset: &Dataset, default_units: &str) -> Result<f64> {
     }
 }
 
-/// Upper bound on pulses read for one event slice (about 12 days at 60 Hz).
-const MAX_PULSES_PER_READ: usize = 1 << 26;
+/// Upper bound on pulses in one bank (about 12 days at 60 Hz).
+const MAX_PULSES: usize = 1 << 26;
 
 /// Index of the last pulse whose first-event index is <= `event`, or 0 if none is.
 fn last_pulse_at_or_before(

@@ -49,8 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid, and could destroy an existing file before failing.
 - The SNS reader read `event_time_zero` and `event_index` whole for every
   call; a file declaring huge arrays aborted the process. It now reads only
-  the pulses covering the requested events and requires `event_index` to be
-  sorted.
+  the pulses covering the requested events, requires the whole `event_index`
+  to be sorted, and rejects banks with more than 2^26 pulses (about 12 days at
+  60 Hz).
 - The SNS reader ignored `units`, `offset_seconds` and `offset_nanoseconds`
   attributes stored as 1-element arrays and silently used defaults (TOF could
   come back 1000x too large; pulse times run-relative instead of absolute).
@@ -99,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pixel to the nearer real pixel inside the bank instead of dropping it.
 - One-shot HDF5 exports keep an existing destination's permissions; a
   symbolic link at the destination is replaced by the new file, not followed.
+  The file is written in an owner-only directory beside the destination, so
+  other users can neither read it nor redirect the write.
 - `SnsEventSink::create` rejects bank geometries whose pixel IDs or
   coordinates do not fit, and a run duration that is not between 0 and 1e10 s.
 - The SNS reader returns an error for an unparseable ISO `offset` on

@@ -9,49 +9,47 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Creates a new, empty file with a fresh name beside `path`.
+/// Creates a new directory with a fresh name beside `path`, accessible to its owner only.
 ///
-/// Exclusive creation means an existing file or link at that name is never reused.
-/// A `private` file is created readable by its owner only.
-fn reserve_temp_sibling(path: &Path, private: bool) -> io::Result<PathBuf> {
+/// Exclusive creation means an existing entry at that name is never reused, and
+/// other users cannot add, replace or read entries inside it.
+fn reserve_staging_dir(path: &Path) -> io::Result<PathBuf> {
     for _ in 0..64 {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temp = path.with_file_name(format!(
+        let dir = path.with_file_name(format!(
             ".rustpix-{}-{sequence}-{nanos:08x}.partial",
             std::process::id()
         ));
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        if private {
-            owner_only(&mut options);
-        }
-        match options.open(&temp) {
-            Ok(_) => return Ok(temp),
+        let mut builder = fs::DirBuilder::new();
+        owner_only(&mut builder);
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        "could not reserve a temporary output file",
+        "could not reserve a temporary output directory",
     ))
 }
 
 #[cfg(unix)]
-fn owner_only(options: &mut fs::OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
+fn owner_only(builder: &mut fs::DirBuilder) {
+    use std::os::unix::fs::DirBuilderExt;
+    builder.mode(0o700);
 }
 
 #[cfg(not(unix))]
-fn owner_only(_: &mut fs::OpenOptions) {}
+fn owner_only(_: &mut fs::DirBuilder) {}
 
 /// Runs `write` on a temporary file beside `path`, then renames it onto `path`.
 ///
-/// When `write` fails the temporary file is removed and `path` is untouched. An
+/// The temporary file lives in an owner-only directory, so writers that open it
+/// by name cannot be redirected. When `write` fails, `path` is untouched. An
 /// existing regular file keeps its permissions; a symbolic link at `path` is
 /// replaced, not followed.
 pub(crate) fn write_then_replace<T>(
@@ -59,9 +57,8 @@ pub(crate) fn write_then_replace<T>(
     write: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
     let path = std::path::absolute(path)?;
-    let replacing_file = fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
-    // The replaced file's mode is applied only at rename, so the data stays private until then.
-    let temp = reserve_temp_sibling(&path, replacing_file)?;
+    let dir = reserve_staging_dir(&path)?;
+    let temp = dir.join("output");
     let outcome = write(&temp).and_then(|value| {
         if let Ok(existing) = fs::symlink_metadata(&path) {
             if existing.is_file() {
@@ -74,6 +71,7 @@ pub(crate) fn write_then_replace<T>(
     if outcome.is_err() {
         let _ = fs::remove_file(&temp);
     }
+    let _ = fs::remove_dir(&dir);
     outcome
 }
 
@@ -87,14 +85,16 @@ mod tests {
     }
 
     #[test]
-    fn replacement_is_owner_only_until_renamed() {
+    fn staging_is_private_and_removed() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.h5");
         fs::write(&dest, b"old").unwrap();
         fs::set_permissions(&dest, fs::Permissions::from_mode(0o440)).unwrap();
 
         write_then_replace(&dest, |temp| {
-            assert_eq!(mode(temp), 0o600);
+            let staging = temp.parent().unwrap();
+            assert_eq!(staging.parent().unwrap(), dir.path());
+            assert_eq!(mode(staging), 0o700);
             fs::write(temp, b"new")?;
             Ok(())
         })
@@ -102,6 +102,23 @@ mod tests {
 
         assert_eq!(mode(&dest), 0o440);
         assert_eq!(fs::read(&dest).unwrap(), b"new");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_write_leaves_destination_and_no_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.h5");
+        fs::write(&dest, b"old").unwrap();
+
+        let result: Result<()> = write_then_replace(&dest, |temp| {
+            fs::write(temp, b"partial")?;
+            Err(io::Error::other("write failed").into())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"old");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use hdf5::types::{VarLenAscii, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
-use rustpix_io::hdf5_sns::{venus_bank100_config, SnsEventReader};
+use rustpix_io::hdf5_sns::{venus_bank100_config, SnsBankConfig, SnsEventReader};
 use std::path::Path;
 use std::str::FromStr;
 use tempfile::TempDir;
@@ -163,7 +163,7 @@ fn epics_offset_stored_as_one_element_array_is_honoured() {
 }
 
 #[test]
-fn huge_declared_pulse_arrays_are_not_read_whole() {
+fn huge_declared_pulse_arrays_are_rejected_without_reading() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("run.nxs.h5");
     let file = File::create(&path).unwrap();
@@ -197,10 +197,10 @@ fn huge_declared_pulse_arrays_are_not_read_whole() {
         .unwrap();
     drop(file);
 
-    let events = reader(&path)
+    let err = reader(&path)
         .read_events(&venus_bank100_config(), 0, Some(1))
-        .unwrap();
-    assert_eq!(events.pulse_time_ns.len(), 1);
+        .unwrap_err();
+    assert!(err.to_string().contains("pulses exceed"), "{err}");
 }
 
 #[test]
@@ -241,6 +241,71 @@ fn unsorted_event_index_is_an_error() {
     assert!(reader(&path)
         .read_events(&venus_bank100_config(), 0, None)
         .is_err());
+}
+
+#[test]
+fn unsorted_event_index_outside_the_read_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("run.nxs.h5");
+    let file = File::create(&path).unwrap();
+    // The search for any event lands on pulse 2; the decrease is before it.
+    write_bank(
+        &file,
+        &Bank {
+            tof_us: &[1.0, 2.0, 3.0, 4.0, 5.0],
+            pulse_s: &[0.0, 0.1, 0.2, 0.3],
+            event_index: &[0, 5, 0, 5],
+        },
+    );
+    drop(file);
+
+    let reader = reader(&path);
+    let config = venus_bank100_config();
+    assert!(reader.read_events(&config, 0, None).is_err());
+    assert!(reader.read_events(&config, 4, Some(1)).is_err());
+}
+
+#[test]
+fn bank_of_2_pow_32_pixels_reads_back() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("run.nxs.h5");
+    let file = File::create(&path).unwrap();
+    let group = file
+        .create_group("entry")
+        .unwrap()
+        .create_group("bank100_events")
+        .unwrap();
+    group
+        .new_dataset_builder()
+        .with_data(&[0u32, u32::MAX])
+        .create("event_id")
+        .unwrap();
+    group
+        .new_dataset_builder()
+        .with_data(&[1.0f32, 2.0])
+        .create("event_time_offset")
+        .unwrap();
+    group
+        .new_dataset_builder()
+        .with_data(&[0.0f64])
+        .create("event_time_zero")
+        .unwrap();
+    group
+        .new_dataset_builder()
+        .with_data(&[0u64])
+        .create("event_index")
+        .unwrap();
+    drop(file);
+
+    let config = SnsBankConfig {
+        pixel_id_offset: 0,
+        width: 65_536,
+        height: 65_536,
+        ..venus_bank100_config()
+    };
+    let events = reader(&path).read_events(&config, 0, None).unwrap();
+    assert_eq!(events.x, [0, 65_535]);
+    assert_eq!(events.y, [0, 65_535]);
 }
 
 #[test]
