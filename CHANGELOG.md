@@ -74,6 +74,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ISO 8601 offsets without a colon (`+0530`) were read as whole hours, and
   out-of-range dates and times were accepted; both are now rejected.
 
+- GUI: a failed HDF5 export deleted the file chosen as destination even when
+  the export never wrote to it (for example a read-only or locked file).
+  Exports now write to a temporary file beside the destination and replace
+  it only on success.
+- GUI: cancelling a TPX3 load could leave the loader threads blocked for the
+  rest of the session, holding the mapped file and partial data.
+- GUI: results of a cancelled or superseded load or clustering run could be
+  applied to the newly selected file; each job now has its own message
+  channel and cancel flag.
+- GUI: re-running clustering in the Neutrons view left the previous image on
+  screen, and the TOF slice index was not reset for new data.
+- GUI: deleting a polygon vertex, or a rejected vertex drag, left the ROI
+  spectrum stale; deleting a vertex could also make the polygon cross itself.
+- GUI: a zero-byte or headerless `.tpx3` file panicked the loader or loaded
+  as an empty "Ready" dataset, and a large non-TPX3 file made the section
+  scan crawl; these are now load errors.
+- GUI: the spectrum TOF axis and spectrum CSV followed the live TDC
+  frequency control instead of the loaded data's binning.
+- GUI: the generic HDF5 export wrote all neutrons as one pulse at TDC 0; it
+  now writes one pulse per recorded pulse.
+- GUI: SNS NeXus TOF values were truncated to 25 ns ticks; events above
+  16.384 ms could land one tick early. They are now rounded.
+- GUI: events with TOF beyond the histogram range were added to the last
+  bin; they are now left out and counted in the status line.
+- GUI: the spectrum CSV dropped rows whose energy is undefined; they are now
+  kept with an empty energy cell. A non-numeric SNS run number is refused
+  instead of being written as 0.
+
 ### Changed
 
 - Clustering rejects invalid parameters with `ClusteringError::InvalidConfig`

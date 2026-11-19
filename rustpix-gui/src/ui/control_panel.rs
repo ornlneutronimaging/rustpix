@@ -1650,7 +1650,6 @@ x,y are local chip coordinates (pixels).",
             );
         }
         if resp.clicked() {
-            self.processing.reset_cancel();
             self.run_processing();
         }
     }

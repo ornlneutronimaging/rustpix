@@ -129,14 +129,12 @@ impl ProcessingState {
         self.cancel_flag.store(true, Ordering::SeqCst);
     }
 
-    /// Reset the cancellation flag for a new operation.
-    pub fn reset_cancel(&self) {
-        self.cancel_flag.store(false, Ordering::SeqCst);
-    }
-
-    /// Get a clone of the cancel flag for passing to workers.
-    #[must_use]
-    pub fn cancel_flag_clone(&self) -> Arc<AtomicBool> {
+    /// Cancels the previous operation and returns a fresh flag for the next one.
+    ///
+    /// Each operation owns its flag, so starting a new one never revives a cancelled worker.
+    pub fn start_job(&mut self) -> Arc<AtomicBool> {
+        self.request_cancel();
+        self.cancel_flag = Arc::new(AtomicBool::new(false));
         Arc::clone(&self.cancel_flag)
     }
 }
@@ -231,6 +229,22 @@ mod tests {
             eta.remaining(at(base, 3.0)).is_none(),
             "history from before the reset must not leak into the estimate"
         );
+    }
+
+    #[test]
+    fn a_new_job_never_revives_a_cancelled_one() {
+        let mut state = ProcessingState::default();
+        let first = state.start_job();
+        let second = state.start_job();
+        assert!(
+            first.load(Ordering::SeqCst),
+            "starting a job cancels the previous one"
+        );
+        assert!(!second.load(Ordering::SeqCst));
+        state.request_cancel();
+        let third = state.start_job();
+        assert!(second.load(Ordering::SeqCst));
+        assert!(!third.load(Ordering::SeqCst));
     }
 
     #[test]

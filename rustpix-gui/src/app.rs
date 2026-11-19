@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -269,6 +270,8 @@ pub struct RustpixApp {
     pub(crate) rx: Receiver<AppMessage>,
     /// Message sender for async operations.
     pub(crate) tx: Sender<AppMessage>,
+    /// Messages from the current load or clustering job; replaced when a new job starts.
+    job_rx: Option<Receiver<AppMessage>>,
 
     /// Processing state (loading/clustering progress).
     pub(crate) processing: ProcessingState,
@@ -341,6 +344,7 @@ impl Default for RustpixApp {
             neutron_data_revision: 0,
             rx,
             tx,
+            job_rx: None,
 
             processing: ProcessingState::default(),
             statistics: Statistics::default(),
@@ -361,11 +365,10 @@ impl RustpixApp {
         self.reset_load_state(path.as_path());
         crate::recent::add(&mut self.file_open.recent, path.as_path());
 
-        let tx = self.tx.clone();
+        let (tx, cancel_flag) = self.start_job();
         let detector_config = self.current_detector_config();
         let hit_tof_bins = self.hit_tof_bins;
         let cache_hits = self.ui_state.cache.cache_hits_in_memory;
-        let cancel_flag = self.processing.cancel_flag_clone();
         thread::spawn(move || {
             load_file_worker(
                 path.as_path(),
@@ -389,7 +392,6 @@ impl RustpixApp {
         self.processing.is_loading = true;
         self.processing.progress = 0.0;
         self.processing.eta.reset();
-        self.processing.reset_cancel();
         self.processing.status_text.clear();
         self.processing.status_text.push_str("Loading file...");
         self.hit_batch = None;
@@ -424,9 +426,6 @@ impl RustpixApp {
         self.ui_state.spectrum_last_plot_rect = None;
         self.ui_state.roi_rename_id = None;
         self.ui_state.roi_rename_text.clear();
-        self.ui_state.export.in_progress = false;
-        self.ui_state.export.progress = 0.0;
-        self.ui_state.export.status.clear();
         self.roi_state.clear();
         self.roi_spectra_hits = RoiSpectraCache::default();
         self.roi_spectra_neutrons = RoiSpectraCache::default();
@@ -438,9 +437,19 @@ impl RustpixApp {
         self.pixel_masks = None;
     }
 
+    /// Starts a load or clustering job, superseding any job still running.
+    ///
+    /// Returns the job's message sender and cancel flag; messages from earlier jobs are dropped.
+    fn start_job(&mut self) -> (Sender<AppMessage>, Arc<AtomicBool>) {
+        let (tx, rx) = channel();
+        self.job_rx = Some(rx);
+        (tx, self.processing.start_job())
+    }
+
     /// Cancel the current loading or processing operation.
     pub fn cancel_operation(&mut self) {
         self.processing.request_cancel();
+        self.job_rx = None;
         if self.processing.is_loading {
             self.processing.is_loading = false;
             self.processing.status_text = "Load cancelled".to_string();
@@ -468,7 +477,7 @@ impl RustpixApp {
             self.processing.status_text.push_str("Clustering...");
             self.processing_super_resolution_factor = self.super_resolution_factor;
 
-            let tx = self.tx.clone();
+            let (tx, cancel_flag) = self.start_job();
             let algo_type = self.algo_type;
             let config = ClusteringWorkerConfig {
                 radius: self.radius,
@@ -485,7 +494,7 @@ impl RustpixApp {
                     .hit_batch
                     .as_ref()
                     .map_or(self.statistics.hit_count, |batch| batch.len()),
-                cancel_flag: self.processing.cancel_flag_clone(),
+                cancel_flag,
             };
 
             thread::spawn(move || run_clustering_worker(&path, &tx, algo_type, &config));
@@ -493,7 +502,7 @@ impl RustpixApp {
     }
 
     /// Get the active hyperstack based on view mode.
-    fn active_hyperstack(&self) -> Option<&Hyperstack3D> {
+    pub(crate) fn active_hyperstack(&self) -> Option<&Hyperstack3D> {
         match self.ui_state.view_mode {
             ViewMode::Hits => self.hyperstack.as_deref(),
             ViewMode::Neutrons => self.neutron_hyperstack.as_deref(),
@@ -946,6 +955,7 @@ impl RustpixApp {
             hit_batch: self.hit_batch.clone(),
             hit_pulse_bounds: self.hit_pulse_bounds.clone(),
             neutrons: Arc::clone(&self.neutrons),
+            neutron_pulse_bounds: self.neutron_pulse_bounds.clone(),
             hyperstack: self.hyperstack.clone(),
             neutron_hyperstack: self.neutron_hyperstack.clone(),
             pixel_masks: self.pixel_masks.clone(),
@@ -985,7 +995,16 @@ impl RustpixApp {
         }
 
         let sns_opts = &self.ui_state.export.sns;
-        let run_number = sns_opts.run_number.trim().parse::<u32>().unwrap_or(0);
+        let run_text = sns_opts.run_number.trim();
+        let run_number = if run_text.is_empty() {
+            0
+        } else if let Ok(number) = run_text.parse::<u32>() {
+            number
+        } else {
+            self.ui_state.export.status =
+                format!("Run number must be a whole number, not \"{run_text}\"");
+            return;
+        };
         let proton_charge = sns_opts
             .proton_charge
             .trim()
@@ -1527,7 +1546,14 @@ impl RustpixApp {
 
     /// Handle pending messages from async workers.
     pub fn handle_messages(&mut self, ctx: &egui::Context) {
-        while let Ok(msg) = self.rx.try_recv() {
+        loop {
+            let msg = match self.rx.try_recv() {
+                Ok(msg) => msg,
+                Err(_) => match self.job_rx.as_ref().map(Receiver::try_recv) {
+                    Some(Ok(msg)) => msg,
+                    _ => break,
+                },
+            };
             match msg {
                 AppMessage::LoadProgress(p, s) => self.handle_load_progress(p, s),
                 AppMessage::ProcessingProgress(p, s) => self.handle_processing_progress(p, s),
@@ -1606,6 +1632,13 @@ impl RustpixApp {
         self.hit_data_revision = self.hit_data_revision.wrapping_add(1);
 
         self.ui_state.histogram_view.needs_plot_reset = true;
+        self.ui_state.current_tof_bin = 0;
+        if let Some(above) = self.hyperstack.as_deref().map(Hyperstack3D::above_range) {
+            if above > 0 {
+                self.processing.status_text =
+                    format!("Ready ({above} events beyond the TOF range left out)");
+            }
+        }
 
         let img = self.generate_histogram();
         self.texture = Some(ctx.load_texture("hist", img, egui::TextureOptions::NEAREST));
@@ -1658,6 +1691,8 @@ impl RustpixApp {
         self.neutrons = Arc::new(neutrons);
         self.neutron_pulse_bounds = Some(Arc::new(neutron_pulse_bounds));
         self.neutron_super_resolution_factor = super_res_factor;
+        self.ui_state.current_tof_bin = 0;
+        self.texture = None;
     }
 
     fn handle_processing_error(&mut self, error: &str) {
@@ -1723,6 +1758,7 @@ struct ExportHdf5Request {
     hit_batch: Option<Arc<HitBatch>>,
     hit_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
     neutrons: Arc<NeutronBatch>,
+    neutron_pulse_bounds: Option<Arc<Vec<PulseBounds>>>,
     hyperstack: Option<Arc<Hyperstack3D>>,
     neutron_hyperstack: Option<Arc<Hyperstack3D>>,
     pixel_masks: Option<PixelMaskData>,
@@ -1785,10 +1821,7 @@ fn export_hdf5_worker(
         histogram_payload.as_ref().zip(histogram_options.as_ref()),
         mask_payload.as_ref().zip(mask_options.as_ref()),
     )
-    .map_err(|err| {
-        remove_partial_file(&request.path);
-        anyhow!("HDF5 export failed: {err}")
-    })?;
+    .map_err(|err| anyhow!("HDF5 export failed: {err}"))?;
 
     send_export_progress(tx, 0.95, "Validating export");
     let warnings = match validate_hdf5_export(&request.path, &request.options) {
@@ -1813,11 +1846,9 @@ fn export_sns_hdf5_worker(
     let mut warnings = Vec::new();
 
     send_export_progress(tx, 0.10, "Creating SNS HDF5 file");
-    let mut sink =
-        SnsEventSink::create(&request.path, request.write_options.clone()).map_err(|err| {
-            remove_partial_file(&request.path);
-            anyhow!("Failed to create SNS HDF5 file: {err}")
-        })?;
+    let partial = PartialFile::beside(&request.path);
+    let mut sink = SnsEventSink::create(partial.path(), request.write_options.clone())
+        .map_err(|err| anyhow!("Failed to create SNS HDF5 file: {err}"))?;
 
     match request.event_source {
         SnsEventSource::Hits => {
@@ -1839,10 +1870,8 @@ fn export_sns_hdf5_worker(
                             tdc_timestamp_25ns: bound.tdc_timestamp_25ns,
                             hits,
                         };
-                        sink.write_hits(0, &event_batch).map_err(|err| {
-                            remove_partial_file(&request.path);
-                            anyhow!("Failed writing hit pulse {i}: {err}")
-                        })?;
+                        sink.write_hits(0, &event_batch)
+                            .map_err(|err| anyhow!("Failed writing hit pulse {i}: {err}"))?;
                         if i % 500 == 0 {
                             #[allow(clippy::cast_precision_loss)]
                             let progress = 0.20 + 0.70 * (i as f32 / total as f32);
@@ -1855,10 +1884,8 @@ fn export_sns_hdf5_worker(
                         tdc_timestamp_25ns: 0,
                         hits: (*batch).clone(),
                     };
-                    sink.write_hits(0, &event_batch).map_err(|err| {
-                        remove_partial_file(&request.path);
-                        anyhow!("Failed writing hits: {err}")
-                    })?;
+                    sink.write_hits(0, &event_batch)
+                        .map_err(|err| anyhow!("Failed writing hits: {err}"))?;
                 }
             } else {
                 warnings.push("No hit data available for SNS export".to_string());
@@ -1887,10 +1914,8 @@ fn export_sns_hdf5_worker(
                             tdc_timestamp_25ns: bound.tdc_timestamp_25ns,
                             neutrons: pulse_neutrons,
                         };
-                        sink.write_neutrons(0, &event_batch).map_err(|err| {
-                            remove_partial_file(&request.path);
-                            anyhow!("Failed writing neutron pulse {i}: {err}")
-                        })?;
+                        sink.write_neutrons(0, &event_batch)
+                            .map_err(|err| anyhow!("Failed writing neutron pulse {i}: {err}"))?;
                         if i % 500 == 0 {
                             #[allow(clippy::cast_precision_loss)]
                             let progress = 0.20 + 0.70 * (i as f32 / total as f32);
@@ -1903,20 +1928,19 @@ fn export_sns_hdf5_worker(
                         tdc_timestamp_25ns: 0,
                         neutrons: neutrons.clone(),
                     };
-                    sink.write_neutrons(0, &neutron_batch).map_err(|err| {
-                        remove_partial_file(&request.path);
-                        anyhow!("Failed writing neutrons: {err}")
-                    })?;
+                    sink.write_neutrons(0, &neutron_batch)
+                        .map_err(|err| anyhow!("Failed writing neutrons: {err}"))?;
                 }
             }
         }
     }
 
     send_export_progress(tx, 0.90, "Finalizing");
-    sink.finalize().map_err(|err| {
-        remove_partial_file(&request.path);
-        anyhow!("Failed to finalize SNS HDF5: {err}")
-    })?;
+    sink.finalize()
+        .map_err(|err| anyhow!("Failed to finalize SNS HDF5: {err}"))?;
+
+    drop(sink);
+    partial.commit()?;
 
     let size = std::fs::metadata(&request.path).map_or(0, |m| m.len());
     send_export_progress(tx, 1.0, "Export complete");
@@ -2447,11 +2471,38 @@ fn prepare_neutron_export(
         include_chip_id: request.options.fields.chip_id,
         include_n_hits: request.options.cluster_fields.n_hits,
     };
-    let payload = NeutronEventBatch {
-        tdc_timestamp_25ns: 0,
-        neutrons: neutrons.clone(),
+    Ok((
+        Some(neutron_pulses(
+            neutrons,
+            request.neutron_pulse_bounds.as_ref().map(|b| b.as_slice()),
+        )),
+        Some(options),
+    ))
+}
+
+/// Splits neutrons into one batch per recorded pulse, or one batch at TDC 0 without bounds.
+fn neutron_pulses(
+    neutrons: &NeutronBatch,
+    bounds: Option<&[PulseBounds]>,
+) -> Vec<NeutronEventBatch> {
+    let Some(bounds) = bounds.filter(|bounds| {
+        bounds
+            .iter()
+            .all(|b| b.start.saturating_add(b.len) <= neutrons.len())
+    }) else {
+        return vec![NeutronEventBatch {
+            tdc_timestamp_25ns: 0,
+            neutrons: neutrons.clone(),
+        }];
     };
-    Ok((Some(vec![payload]), Some(options)))
+    bounds
+        .iter()
+        .filter(|bound| bound.len > 0)
+        .map(|bound| NeutronEventBatch {
+            tdc_timestamp_25ns: bound.tdc_timestamp_25ns,
+            neutrons: slice_neutron_batch(neutrons, bound.start, bound.len),
+        })
+        .collect()
 }
 
 fn prepare_histogram_export(
@@ -2564,12 +2615,47 @@ fn ensure_deflate_available() -> Result<()> {
     }
 }
 
-fn remove_partial_file(path: &Path) {
-    if let Err(err) = std::fs::remove_file(path) {
-        log::warn!(
-            "Failed to remove partial HDF5 file {}: {err}",
-            path.display()
+/// An export written beside its destination and renamed onto it by [`PartialFile::commit`].
+///
+/// Dropping it uncommitted removes only the file this export created.
+struct PartialFile {
+    temp: PathBuf,
+    dest: PathBuf,
+    committed: bool,
+}
+
+impl PartialFile {
+    fn beside(dest: &Path) -> Self {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = dest.file_name().map_or_else(
+            || "export".to_string(),
+            |n| n.to_string_lossy().into_owned(),
         );
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            temp: dest.with_file_name(format!(".{name}.{}-{sequence}.partial", std::process::id())),
+            dest: dest.to_path_buf(),
+            committed: false,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.temp
+    }
+
+    fn commit(mut self) -> Result<()> {
+        std::fs::rename(&self.temp, &self.dest)
+            .map_err(|err| anyhow!("Failed to save {}: {err}", self.dest.display()))?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PartialFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.temp);
+        }
     }
 }
 
@@ -3018,5 +3104,65 @@ impl eframe::App for RustpixApp {
         if self.processing.is_loading || self.processing.is_processing {
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn partial_file_replaces_destination_only_on_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("run.nxs.h5");
+        std::fs::write(&dest, b"previous export").unwrap();
+
+        let abandoned = PartialFile::beside(&dest);
+        std::fs::write(abandoned.path(), b"partial").unwrap();
+        drop(abandoned);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous export");
+
+        let finished = PartialFile::beside(&dest);
+        std::fs::write(finished.path(), b"new export").unwrap();
+        finished.commit().unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new export");
+
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1);
+    }
+
+    #[test]
+    fn neutrons_are_exported_per_pulse() {
+        let mut neutrons = NeutronBatch::default();
+        for tof in [10, 20, 30] {
+            neutrons.push(rustpix_core::neutron::Neutron::new(8.0, 8.0, tof, 10, 1, 0));
+        }
+        let bounds = [
+            PulseBounds {
+                tdc_timestamp_25ns: 100,
+                start: 0,
+                len: 2,
+            },
+            PulseBounds {
+                tdc_timestamp_25ns: 200,
+                start: 2,
+                len: 0,
+            },
+            PulseBounds {
+                tdc_timestamp_25ns: 300,
+                start: 2,
+                len: 1,
+            },
+        ];
+        let pulses = neutron_pulses(&neutrons, Some(&bounds));
+        let summary: Vec<(u64, Vec<u32>)> = pulses
+            .iter()
+            .map(|p| (p.tdc_timestamp_25ns, p.neutrons.tof.clone()))
+            .collect();
+        assert_eq!(summary, vec![(100, vec![10, 20]), (300, vec![30])]);
+
+        let single = neutron_pulses(&neutrons, None);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].tdc_timestamp_25ns, 0);
     }
 }

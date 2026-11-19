@@ -491,6 +491,7 @@ impl RoiState {
             if let RoiShape::Polygon { vertices } = &mut roi.shape {
                 if polygon_self_intersects(vertices) {
                     *vertices = drag.previous;
+                    self.touch();
                     return Err(RoiCommitError::SelfIntersecting);
                 }
             }
@@ -500,13 +501,22 @@ impl RoiState {
     }
 
     /// Delete a polygon vertex by hit test.
+    ///
+    /// Returns `false` when no vertex is hit, the polygon would drop below three
+    /// vertices, or the remaining polygon would cross itself.
     pub fn delete_vertex_at(&mut self, point: PlotPoint, threshold: f64) -> bool {
-        if let Some((roi_id, index)) = self.hit_test_vertex(point, threshold) {
-            if let Some(roi) = self.rois.iter_mut().find(|roi| roi.id == roi_id) {
-                return roi.delete_vertex(index);
-            }
+        let Some((roi_id, index)) = self.hit_test_vertex(point, threshold) else {
+            return false;
+        };
+        let deleted = self
+            .rois
+            .iter_mut()
+            .find(|roi| roi.id == roi_id)
+            .is_some_and(|roi| roi.delete_vertex(index));
+        if deleted {
+            self.touch();
         }
-        false
+        deleted
     }
 
     /// Insert a polygon vertex on edge hit.
@@ -1034,7 +1044,11 @@ impl Roi {
         if vertices.len() <= 3 || index >= vertices.len() {
             return false;
         }
-        vertices.remove(index);
+        let removed = vertices.remove(index);
+        if polygon_self_intersects(vertices) {
+            vertices.insert(index, removed);
+            return false;
+        }
         true
     }
 }
@@ -1302,4 +1316,78 @@ fn roi_palette_color(index: usize) -> Color32 {
         Color32::from_rgb(0x06, 0xb6, 0xd4),
     ];
     PALETTE[index % PALETTE.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn polygon(state: &mut RoiState, vertices: &[(f64, f64)]) -> usize {
+        for &(x, y) in vertices {
+            state.add_polygon_point(PlotPoint::new(x, y));
+        }
+        state.commit_polygon(3).unwrap();
+        let id = state.rois.last().unwrap().id;
+        state.set_edit_mode(id, true);
+        id
+    }
+
+    fn vertices(state: &RoiState, id: usize) -> Vec<(f64, f64)> {
+        match &state.rois.iter().find(|roi| roi.id == id).unwrap().shape {
+            RoiShape::Polygon { vertices } => vertices.clone(),
+            RoiShape::Rectangle { .. } => panic!("expected a polygon"),
+        }
+    }
+
+    #[test]
+    fn deleting_a_vertex_invalidates_cached_spectra() {
+        let mut state = RoiState::default();
+        let id = polygon(
+            &mut state,
+            &[(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)],
+        );
+        let before = state.revision();
+
+        assert!(state.delete_vertex_at(PlotPoint::new(40.0, 40.0), 1.0));
+        assert_eq!(vertices(&state, id).len(), 3);
+        assert_ne!(state.revision(), before);
+    }
+
+    #[test]
+    fn deleting_a_vertex_that_would_cross_edges_is_refused() {
+        let mut state = RoiState::default();
+        let shape = [
+            (10.0, 10.0),
+            (5.0, 60.0),
+            (50.0, 50.0),
+            (10.0, 50.0),
+            (50.0, 10.0),
+        ];
+        let id = polygon(&mut state, &shape);
+        let before = state.revision();
+
+        assert!(!state.delete_vertex_at(PlotPoint::new(5.0, 60.0), 1.0));
+        assert_eq!(vertices(&state, id), shape.to_vec());
+        assert_eq!(state.revision(), before);
+    }
+
+    #[test]
+    fn rejected_vertex_drag_invalidates_cached_spectra() {
+        let mut state = RoiState::default();
+        let id = polygon(
+            &mut state,
+            &[(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)],
+        );
+        let original = vertices(&state, id);
+        let bounds = PlotBounds::from_min_max([0.0, 0.0], [100.0, 100.0]);
+
+        state.start_vertex_drag(id, 2, PlotPoint::new(40.0, 40.0), bounds);
+        // Dragging the corner across the opposite edge makes the outline cross itself.
+        state.update_vertex_drag(PlotPoint::new(-20.0, 20.0));
+        let during_drag = state.revision();
+        assert!(state.end_vertex_drag().is_err());
+
+        assert_eq!(vertices(&state, id), original);
+        assert_ne!(state.revision(), during_drag);
+    }
 }
