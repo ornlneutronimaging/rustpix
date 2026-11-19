@@ -310,20 +310,18 @@ impl AbsClustering {
             }
         }
 
-        let req_w = max_x + 32;
-        let req_h = max_y + 32;
-        let req_grid_w = req_w / cell_size + 1;
-        let req_grid_h = req_h / cell_size + 1;
-        let req_total = req_grid_w * req_grid_h;
+        // One empty column and row beyond the last hit's cell, so the 3x3 search
+        // never reads past a row's end into the next row.
+        let req_grid_w = max_x / cell_size + 2;
+        let req_grid_h = max_y / cell_size + 2;
 
-        // Insertion, lookup and removal all use `grid_w` as the row stride, so
-        // the grid is rebuilt whenever the width changes.
-        if req_grid_w != state.grid_w || req_grid_h > state.grid_h {
+        // Insertion, lookup and removal all use `grid_w` as the row stride. A
+        // grid too small in either direction is rebuilt to this batch's size.
+        if req_grid_w > state.grid_w || req_grid_h > state.grid_h {
             state.grid_w = req_grid_w;
             state.grid_h = req_grid_h;
             state.grid = vec![Vec::new(); state.grid_w * state.grid_h];
         }
-        let _ = req_total;
 
         state.grid_w
     }
@@ -384,9 +382,6 @@ impl AbsClustering {
                 else {
                     continue;
                 };
-                if neighbor_x >= ctx.grid_w {
-                    continue; // would wrap into the next row
-                }
                 let gidx = neighbor_y * ctx.grid_w + neighbor_x;
                 if let Some(cell) = state.grid.get(gidx) {
                     for &bidx in cell {
