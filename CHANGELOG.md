@@ -76,8 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - GUI: a failed HDF5 export deleted the file chosen as destination even when
   the export never wrote to it (for example a read-only or locked file).
-  Exports now write to a temporary file beside the destination and replace
-  it only on success. The replaced file keeps its permissions; a symbolic link chosen as
+  Exports now write to a temporary file in an owner-only directory beside
+  the destination and replace it only on success. The replaced file keeps its permissions; a symbolic link chosen as
   the destination is replaced by the file, not followed.
 - GUI: cancelling a TPX3 load could leave the loader threads blocked for the
   rest of the session, holding the mapped file and partial data.

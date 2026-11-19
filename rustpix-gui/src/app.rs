@@ -2633,15 +2633,17 @@ fn ensure_deflate_available() -> Result<()> {
 
 /// An export written beside its destination and renamed onto it by [`PartialFile::commit`].
 ///
-/// Dropping it uncommitted removes only the file this export created.
+/// The file lives in an owner-only directory, so writers that open it by name cannot be
+/// redirected. Dropping it uncommitted removes only what this export created.
 struct PartialFile {
+    dir: PathBuf,
     temp: PathBuf,
     dest: PathBuf,
     committed: bool,
 }
 
 impl PartialFile {
-    /// Reserves a fresh staging file beside `dest`, created exclusively.
+    /// Reserves a fresh staging directory beside `dest`, created exclusively.
     fn beside(dest: &Path) -> Result<Self> {
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dest = std::path::absolute(dest)?;
@@ -2650,18 +2652,18 @@ impl PartialFile {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos());
             let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let temp = dest.with_file_name(format!(
+            let dir = dest.with_file_name(format!(
                 ".rustpix-{}-{sequence}-{nanos:08x}.partial",
                 std::process::id()
             ));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)
-            {
-                Ok(_) => {
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            match builder.create(&dir) {
+                Ok(()) => {
                     return Ok(Self {
-                        temp,
+                        temp: dir.join("export"),
+                        dir,
                         dest,
                         committed: false,
                     })
@@ -2670,7 +2672,7 @@ impl PartialFile {
                 Err(e) => return Err(e.into()),
             }
         }
-        Err(anyhow!("could not reserve a temporary export file"))
+        Err(anyhow!("could not reserve a temporary export directory"))
     }
 
     fn path(&self) -> &Path {
@@ -2696,6 +2698,7 @@ impl Drop for PartialFile {
         if !self.committed {
             let _ = std::fs::remove_file(&self.temp);
         }
+        let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
@@ -3169,6 +3172,19 @@ mod export_tests {
 
         let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(leftovers, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_file_is_staged_in_an_owner_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("run.nxs.h5");
+        let partial = PartialFile::beside(&dest).unwrap();
+        let staging = partial.path().parent().unwrap();
+        assert_eq!(staging.parent().unwrap(), dir.path());
+        let mode = std::fs::metadata(staging).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]
