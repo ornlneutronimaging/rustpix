@@ -1,8 +1,11 @@
 //!
 //! This binary will provide a CLI for processing pixel detector data.
 
+mod output;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
+use output::{has_extension, same_file, PendingOutput};
 use rustpix_algorithms::{cluster_and_extract_batch, AlgorithmParams, ClusteringAlgorithm};
 use rustpix_algorithms::{
     AbsClustering, AbsState, DbscanClustering, DbscanState, GridClustering, GridState,
@@ -15,7 +18,7 @@ use rustpix_io::hdf5::{Hdf5NeutronSink, NeutronEventBatch, NeutronWriteOptions};
 use rustpix_io::hdf5_sns::{SnsEventSink, SnsRunMetadata, SnsWriteOptions};
 use rustpix_io::{out_of_core_neutron_stream, OutOfCoreConfig, Tpx3FileReader};
 use std::fs::File as StdFile;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use thiserror::Error;
@@ -188,9 +191,9 @@ enum Commands {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         out_of_core: bool,
 
-        /// Fraction of available memory to target for out-of-core processing
-        #[arg(long, default_value = "0.5")]
-        memory_fraction: f64,
+        /// Fraction of available memory to target for out-of-core processing [default: 0.5]
+        #[arg(long)]
+        memory_fraction: Option<f64>,
 
         /// Explicit memory budget in bytes (overrides `memory_fraction`)
         #[arg(long)]
@@ -200,13 +203,13 @@ enum Commands {
         #[arg(long)]
         parallelism: Option<usize>,
 
-        /// Bounded queue depth for out-of-core pipeline stages
-        #[arg(long, default_value = "2")]
-        queue_depth: usize,
+        /// Bounded queue depth for out-of-core pipeline stages [default: 2]
+        #[arg(long)]
+        queue_depth: Option<usize>,
 
-        /// Enable async reader/worker pipeline
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
-        async_io: bool,
+        /// Enable async reader/worker pipeline [default: false]
+        #[arg(long, action = clap::ArgAction::Set)]
+        async_io: Option<bool>,
 
         /// Run number for SNS HDF5 export
         #[arg(long)]
@@ -389,18 +392,18 @@ fn main() -> Result<()> {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_process(
     input: &[PathBuf],
-    output: &PathBuf,
+    output: &Path,
     format_override: Option<Format>,
     algorithm: Algorithm,
     radius: f64,
     temporal_window_ns: f64,
     min_cluster_size: u16,
     out_of_core: bool,
-    memory_fraction: f64,
+    memory_fraction: Option<f64>,
     memory_budget_bytes: Option<usize>,
     parallelism: Option<usize>,
-    queue_depth: usize,
-    async_io: bool,
+    queue_depth: Option<usize>,
+    async_io: Option<bool>,
     run_number: Option<u32>,
     ipts: Option<&str>,
     instrument: Instrument,
@@ -416,17 +419,6 @@ fn run_process(
         eprintln!("Temporal window: {temporal_window_ns} ns");
         eprintln!("Min cluster size: {min_cluster_size}");
         eprintln!("Out-of-core: {out_of_core}");
-        if out_of_core {
-            eprintln!("Memory fraction: {memory_fraction}");
-            if let Some(bytes) = memory_budget_bytes {
-                eprintln!("Memory budget override: {bytes} bytes");
-            }
-            if let Some(threads) = parallelism {
-                eprintln!("Parallelism: {threads} threads");
-            }
-            eprintln!("Queue depth: {queue_depth}");
-            eprintln!("Async IO: {async_io}");
-        }
     }
 
     let start = Instant::now();
@@ -453,7 +445,20 @@ fn run_process(
         parallelism,
         queue_depth,
         async_io,
-    );
+    )?;
+    if verbose && out_of_core {
+        eprintln!("Memory fraction: {}", ooc_config.memory_fraction);
+        if let Some(bytes) = ooc_config.memory_budget_bytes {
+            eprintln!("Memory budget override: {bytes} bytes");
+        }
+        if let Some(threads) = ooc_config.parallelism {
+            eprintln!("Parallelism: {threads} threads");
+        }
+        eprintln!("Queue depth: {}", ooc_config.queue_depth);
+        eprintln!("Async IO: {}", ooc_config.async_io);
+    }
+
+    check_paths(input, output, format)?;
 
     let (total_hits, total_neutrons) = match format {
         OutputFormat::Csv | OutputFormat::Binary => run_process_flat(
@@ -522,30 +527,128 @@ fn run_process(
 
 fn build_ooc_config(
     out_of_core: bool,
-    memory_fraction: f64,
+    memory_fraction: Option<f64>,
     memory_budget_bytes: Option<usize>,
     parallelism: Option<usize>,
-    queue_depth: usize,
-    async_io: bool,
-) -> OutOfCoreConfig {
+    queue_depth: Option<usize>,
+    async_io: Option<bool>,
+) -> Result<OutOfCoreConfig> {
+    let mut config = OutOfCoreConfig::default();
     if !out_of_core {
-        return OutOfCoreConfig::default();
+        let given: Vec<&str> = [
+            ("--memory-fraction", memory_fraction.is_some()),
+            ("--memory-budget-bytes", memory_budget_bytes.is_some()),
+            ("--parallelism", parallelism.is_some()),
+            ("--queue-depth", queue_depth.is_some()),
+            ("--async-io", async_io.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect();
+        if !given.is_empty() {
+            return Err(CliError::Other(format!(
+                "{} only apply with --out-of-core true",
+                given.join(", ")
+            )));
+        }
+        return Ok(config);
     }
-    let mut config = OutOfCoreConfig::default().with_memory_fraction(memory_fraction);
+    if let Some(fraction) = memory_fraction {
+        config = config.with_memory_fraction(fraction);
+    }
     if let Some(bytes) = memory_budget_bytes {
         config = config.with_memory_budget_bytes(bytes);
     }
     if let Some(threads) = parallelism {
         config = config.with_parallelism(threads);
     }
-    config.with_queue_depth(queue_depth).with_async_io(async_io)
+    if let Some(depth) = queue_depth {
+        config = config.with_queue_depth(depth);
+    }
+    if let Some(enabled) = async_io {
+        config = config.with_async_io(enabled);
+    }
+    Ok(config)
+}
+
+/// Opens a TPX3 input, rejecting files that hold no TPX3 section header.
+fn open_input(path: &Path) -> Result<Tpx3FileReader> {
+    let reader = Tpx3FileReader::open(path)
+        .map_err(|e| CliError::Other(format!("cannot open {}: {e}", path.display())))?;
+    if !reader.iter_packets().any(|packet| packet.is_header()) {
+        return Err(CliError::Other(format!(
+            "{}: no TPX3 section header found; not a TPX3 file",
+            path.display()
+        )));
+    }
+    Ok(reader)
+}
+
+/// Checks every input and refuses outputs that would overwrite raw data or an unrelated file.
+fn check_paths(input: &[PathBuf], output: &Path, format: OutputFormat) -> Result<()> {
+    if has_extension(output, "tpx3") {
+        return Err(CliError::Other(format!(
+            "refusing to write output to {}: .tpx3 is the raw-data extension",
+            output.display()
+        )));
+    }
+    let sidecar = if format == OutputFormat::Tiff {
+        spectrum_sidecar_path(output)
+    } else {
+        None
+    };
+    for path in input {
+        open_input(path)?;
+        for target in std::iter::once(output).chain(sidecar.as_deref()) {
+            if same_file(path, target) {
+                return Err(CliError::Other(format!(
+                    "output {} is the input file {}",
+                    target.display(),
+                    path.display()
+                )));
+            }
+        }
+    }
+    if let Some(sidecar) = &sidecar {
+        ensure_spectrum_replaceable(sidecar)?;
+    }
+    Ok(())
+}
+
+const SPECTRUM_HEADER: &str = "shutter_time,counts";
+
+/// Spectrum CSV path beside a TIFF output, or `None` when it would be the TIFF itself.
+fn spectrum_sidecar_path(output: &Path) -> Option<PathBuf> {
+    (!has_extension(output, "csv")).then(|| output.with_extension("csv"))
+}
+
+/// Errors when `path` holds anything other than a spectrum this tool wrote.
+fn ensure_spectrum_replaceable(path: &Path) -> Result<()> {
+    let file = match StdFile::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut first_line = String::new();
+    let readable = BufReader::new(file.take(256))
+        .read_line(&mut first_line)
+        .is_ok();
+    let first_line = first_line.trim_end();
+    if readable && (first_line.is_empty() || first_line == SPECTRUM_HEADER) {
+        return Ok(());
+    }
+    Err(CliError::Other(format!(
+        "refusing to overwrite {}: it is not a spectrum file written by rustpix; \
+         move it or choose another output name",
+        path.display()
+    )))
 }
 
 /// Process files and write output as CSV or binary.
 #[allow(clippy::too_many_arguments)]
 fn run_process_flat(
     input: &[PathBuf],
-    output: &PathBuf,
+    output: &Path,
     format: OutputFormat,
     algo: ClusteringAlgorithm,
     clustering: &ClusteringConfig,
@@ -555,7 +658,8 @@ fn run_process_flat(
     ooc_config: &OutOfCoreConfig,
     verbose: bool,
 ) -> Result<(usize, usize)> {
-    let mut writer = rustpix_io::DataFileWriter::create(output)?;
+    let pending = PendingOutput::new(output);
+    let mut writer = rustpix_io::DataFileWriter::create(pending.path())?;
     let mut wrote_header = false;
     let mut total_hits = 0usize;
     let mut total_neutrons = 0usize;
@@ -564,7 +668,7 @@ fn run_process_flat(
         if verbose {
             eprintln!("Reading: {}", path.display());
         }
-        let reader = Tpx3FileReader::open(path)?;
+        let reader = open_input(path)?;
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -592,6 +696,8 @@ fn run_process_flat(
         }
     }
 
+    drop(writer);
+    pending.commit()?;
     Ok((total_hits, total_neutrons))
 }
 
@@ -617,7 +723,7 @@ fn write_neutrons_flat(
 #[allow(clippy::too_many_arguments)]
 fn run_process_hdf5(
     input: &[PathBuf],
-    output: &PathBuf,
+    output: &Path,
     algo: ClusteringAlgorithm,
     clustering: &ClusteringConfig,
     extraction: &ExtractionConfig,
@@ -641,7 +747,8 @@ fn run_process_hdf5(
         include_chip_id: true,
         include_n_hits: true,
     };
-    let mut sink = Hdf5NeutronSink::create(output, options)?;
+    let pending = PendingOutput::new(output);
+    let mut sink = Hdf5NeutronSink::create(pending.path(), options)?;
     let mut total_hits = 0usize;
     let mut total_neutrons = 0usize;
 
@@ -664,7 +771,7 @@ fn run_process_hdf5(
 
         let mut file_base_tdc: Option<u64> = None;
 
-        let reader = Tpx3FileReader::open(path)?;
+        let reader = open_input(path)?;
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -714,6 +821,7 @@ fn run_process_hdf5(
     }
 
     drop(sink);
+    pending.commit()?;
     Ok((total_hits, total_neutrons))
 }
 
@@ -721,7 +829,7 @@ fn run_process_hdf5(
 #[allow(clippy::too_many_arguments)]
 fn run_process_sns_hdf5(
     input: &[PathBuf],
-    output: &PathBuf,
+    output: &Path,
     algo: ClusteringAlgorithm,
     clustering: &ClusteringConfig,
     extraction: &ExtractionConfig,
@@ -747,7 +855,8 @@ fn run_process_sns_hdf5(
         Instrument::Venus => SnsWriteOptions::venus_defaults(run_meta),
     };
     write_options.super_resolution_factor = extraction.super_resolution_factor;
-    let mut sink = SnsEventSink::create(output, write_options)
+    let pending = PendingOutput::new(output);
+    let mut sink = SnsEventSink::create(pending.path(), write_options)
         .map_err(|e| CliError::Other(format!("Failed to create SNS HDF5: {e}")))?;
 
     let mut total_hits = 0usize;
@@ -780,7 +889,7 @@ fn run_process_sns_hdf5(
         // all timestamps in the file are relative to its own start.
         let mut file_base_tdc: Option<u64> = None;
 
-        let reader = Tpx3FileReader::open(path)?;
+        let reader = open_input(path)?;
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -833,6 +942,8 @@ fn run_process_sns_hdf5(
 
     sink.finalize()
         .map_err(|e| CliError::Other(format!("Failed to finalize SNS HDF5: {e}")))?;
+    drop(sink);
+    pending.commit()?;
     Ok((total_hits, total_neutrons))
 }
 
@@ -863,11 +974,10 @@ fn run_process_tiff(
         return Err(CliError::Other("--tof-max must be >= 1".to_string()));
     }
 
-    let width: usize = 514;
-    let height: usize = 514;
+    let mut stack = TofStack::new(tof_bins, 514, 514)?;
 
     // Determine tof_max.  If not provided, scan once to find it.
-    let tof_max = if let Some(v) = tof_max_override {
+    stack.tof_max = if let Some(v) = tof_max_override {
         v
     } else {
         if verbose {
@@ -875,7 +985,7 @@ fn run_process_tiff(
         }
         let mut observed: u32 = 0;
         for path in input {
-            let reader = Tpx3FileReader::open(path)?;
+            let reader = open_input(path)?;
             if out_of_core {
                 let stream = out_of_core_neutron_stream(
                     &reader, algo, clustering, extraction, params, ooc_config,
@@ -902,14 +1012,10 @@ fn run_process_tiff(
     };
 
     if verbose {
-        eprintln!("TOF max: {tof_max} (25ns ticks)");
+        eprintln!("TOF max: {} (25ns ticks)", stack.tof_max);
         eprintln!("TOF bins: {tof_bins}");
     }
 
-    // Streaming accumulation pass — histogram only, no batch storage.
-    #[allow(clippy::cast_precision_loss)]
-    let bin_width = f64::from(tof_max) / tof_bins as f64;
-    let mut data = vec![0u64; tof_bins * height * width];
     let mut total_hits = 0usize;
     let mut total_neutrons = 0usize;
 
@@ -917,7 +1023,7 @@ fn run_process_tiff(
         if verbose {
             eprintln!("Reading: {}", path.display());
         }
-        let reader = Tpx3FileReader::open(path)?;
+        let reader = open_input(path)?;
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -927,15 +1033,7 @@ fn run_process_tiff(
                 let batch = batch?;
                 total_hits = total_hits.saturating_add(batch.hits_processed);
                 total_neutrons = total_neutrons.saturating_add(batch.neutrons.len());
-                accumulate_neutrons_into_histogram(
-                    &mut data,
-                    &batch.neutrons,
-                    tof_bins,
-                    width,
-                    height,
-                    bin_width,
-                    extraction.super_resolution_factor,
-                );
+                stack.add(&batch.neutrons, extraction.super_resolution_factor);
             }
         } else {
             let stream = reader.stream_time_ordered()?;
@@ -944,15 +1042,7 @@ fn run_process_tiff(
                 let neutrons =
                     cluster_and_extract_batch(&mut batch, algo, clustering, extraction, params)?;
                 total_neutrons = total_neutrons.saturating_add(neutrons.len());
-                accumulate_neutrons_into_histogram(
-                    &mut data,
-                    &neutrons,
-                    tof_bins,
-                    width,
-                    height,
-                    bin_width,
-                    extraction.super_resolution_factor,
-                );
+                stack.add(&neutrons, extraction.super_resolution_factor);
             }
         }
 
@@ -961,60 +1051,119 @@ fn run_process_tiff(
         }
     }
 
+    if stack.above_range > 0 {
+        eprintln!(
+            "Warning: {} neutron(s) with TOF above {} ticks were left out of the histogram",
+            stack.above_range, stack.tof_max
+        );
+    }
+
     if verbose {
         eprintln!("Writing TIFF stack to: {}", output.display());
     }
 
-    // Write TIFF stack.
-    write_tiff_stack_file(output, &data, tof_bins, width, height, bit_depth)?;
+    let tiff = PendingOutput::new(output);
+    write_tiff_stack_file(
+        tiff.path(),
+        &stack.data,
+        stack.bins,
+        stack.width,
+        stack.height,
+        bit_depth,
+    )?;
 
-    // Write spectrum CSV alongside the TIFF, unless the CSV path collides
-    // with the TIFF output (e.g. user passed `-o foo.csv -f tiff`).
-    let spectrum_path = output.with_extension("csv");
-    if spectrum_path == output {
-        eprintln!("Warning: skipping spectrum CSV — output path already has .csv extension");
+    if let Some(spectrum_path) = spectrum_sidecar_path(output) {
+        let spectrum = PendingOutput::new(&spectrum_path);
+        write_spectrum_csv(
+            spectrum.path(),
+            &stack.data,
+            stack.bins,
+            stack.width,
+            stack.height,
+            stack.bin_width(),
+        )?;
+        tiff.commit()?;
+        spectrum.commit()?;
+        if verbose {
+            eprintln!("Wrote spectrum to: {}", spectrum_path.display());
+        }
     } else {
-        write_spectrum_csv(&spectrum_path, &data, tof_bins, width, height, bin_width)?;
-    }
-    if verbose {
-        eprintln!("Wrote spectrum to: {}", spectrum_path.display());
+        eprintln!("Warning: skipping spectrum CSV — output path already has .csv extension");
+        tiff.commit()?;
     }
 
     Ok((total_hits, total_neutrons))
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn accumulate_neutrons_into_histogram(
-    data: &mut [u64],
-    batch: &NeutronBatch,
-    n_tof_bins: usize,
+/// TOF-binned image stack accumulated from neutron batches.
+struct TofStack {
+    /// Counts indexed `[tof_bin][y][x]`.
+    data: Vec<u64>,
+    bins: usize,
     width: usize,
     height: usize,
-    bin_width: f64,
-    super_resolution_factor: f64,
-) {
-    let inv = 1.0 / super_resolution_factor;
-    for i in 0..batch.len() {
-        let x = (batch.x[i] * inv).round();
-        let y = (batch.y[i] * inv).round();
-        let tof = batch.tof[i];
+    /// Inclusive upper edge of the last bin (25 ns ticks).
+    tof_max: u32,
+    /// Neutrons left out because their TOF exceeds `tof_max`.
+    above_range: usize,
+}
 
-        if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
-            continue;
-        }
-        let x = x as usize;
-        let y = y as usize;
-
-        let tof_bin = if bin_width > 0.0 {
-            let bin = (f64::from(tof) / bin_width) as usize;
-            bin.min(n_tof_bins.saturating_sub(1))
-        } else {
-            0
+impl TofStack {
+    fn new(bins: usize, width: usize, height: usize) -> Result<Self> {
+        let too_large = || {
+            CliError::Other(format!(
+                "cannot allocate a {bins} x {height} x {width} histogram; reduce --tof-bins"
+            ))
         };
+        let cells = bins.checked_mul(height * width).ok_or_else(too_large)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(cells).map_err(|_| too_large())?;
+        data.resize(cells, 0);
+        Ok(Self {
+            data,
+            bins,
+            width,
+            height,
+            tof_max: 0,
+            above_range: 0,
+        })
+    }
 
-        if x < width && y < height && tof_bin < n_tof_bins {
-            let idx = tof_bin * height * width + y * width + x;
-            data[idx] += 1;
+    /// Bin width in 25 ns ticks.
+    #[allow(clippy::cast_precision_loss)]
+    fn bin_width(&self) -> f64 {
+        f64::from(self.tof_max) / self.bins as f64
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn add(&mut self, batch: &NeutronBatch, super_resolution_factor: f64) {
+        let inv = 1.0 / super_resolution_factor;
+        let bin_width = self.bin_width();
+        for i in 0..batch.len() {
+            let x = (batch.x[i] * inv).round();
+            let y = (batch.y[i] * inv).round();
+            let tof = batch.tof[i];
+
+            if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+                continue;
+            }
+            if tof > self.tof_max {
+                self.above_range += 1;
+                continue;
+            }
+            let x = x as usize;
+            let y = y as usize;
+
+            let tof_bin = if bin_width > 0.0 {
+                // A neutron exactly at `tof_max` belongs to the last bin.
+                ((f64::from(tof) / bin_width) as usize).min(self.bins - 1)
+            } else {
+                0
+            };
+
+            if x < self.width && y < self.height {
+                self.data[tof_bin * self.height * self.width + y * self.width + x] += 1;
+            }
         }
     }
 }
@@ -1112,7 +1261,7 @@ fn write_spectrum_csv(
 ) -> Result<()> {
     let xy_size = width * height;
     let mut file = BufWriter::new(StdFile::create(path)?);
-    writeln!(file, "shutter_time,counts")?;
+    writeln!(file, "{SPECTRUM_HEADER}")?;
     for tof_bin in 0..n_bins {
         let start = tof_bin * xy_size;
         let end = start + xy_size;
@@ -1123,6 +1272,7 @@ fn write_spectrum_csv(
         let time_seconds = time_ns * 1.0e-9;
         writeln!(file, "{time_seconds:.6e},{count}")?;
     }
+    file.flush()?;
     Ok(())
 }
 
@@ -1189,8 +1339,8 @@ fn resolve_algorithm(algorithm: Algorithm) -> ClusteringAlgorithm {
     }
 }
 
-fn run_info(input: &PathBuf) -> Result<()> {
-    let reader = Tpx3FileReader::open(input)?;
+fn run_info(input: &Path) -> Result<()> {
+    let reader = open_input(input)?;
     let file_size = reader.file_size();
     let packet_count = reader.packet_count();
 
@@ -1202,33 +1352,49 @@ fn run_info(input: &PathBuf) -> Result<()> {
     );
     println!("Packets: {packet_count}");
 
-    let batch = reader.read_batch()?;
-    println!("Hits: {}", batch.len());
+    let mut hits = 0usize;
+    let mut tof = (u32::MAX, 0u32);
+    let mut x = (u16::MAX, 0u16);
+    let mut y = (u16::MAX, 0u16);
+    for batch in reader.stream_time_ordered()? {
+        hits += batch.len();
+        for &v in &batch.tof {
+            tof = (tof.0.min(v), tof.1.max(v));
+        }
+        for &v in &batch.x {
+            x = (x.0.min(v), x.1.max(v));
+        }
+        for &v in &batch.y {
+            y = (y.0.min(v), y.1.max(v));
+        }
+    }
+    println!("Hits: {hits}");
 
-    if !batch.is_empty() {
-        let min_tof = batch.tof.iter().copied().min().unwrap();
-        let max_tof = batch.tof.iter().copied().max().unwrap();
-        println!("TOF range: {min_tof} - {max_tof}");
-
-        let min_x = batch.x.iter().copied().min().unwrap();
-        let max_x = batch.x.iter().copied().max().unwrap();
-        let min_y = batch.y.iter().copied().min().unwrap();
-        let max_y = batch.y.iter().copied().max().unwrap();
-        println!("X range: {min_x} - {max_x}");
-        println!("Y range: {min_y} - {max_y}");
+    if hits > 0 {
+        println!("TOF range: {} - {}", tof.0, tof.1);
+        println!("X range: {} - {}", x.0, x.1);
+        println!("Y range: {} - {}", y.0, y.1);
     }
 
     Ok(())
 }
 
-fn run_benchmark(input: &PathBuf, iterations: usize) -> Result<()> {
-    let reader = Tpx3FileReader::open(input)?;
-    let base_batch = reader.read_batch()?;
+fn require_iterations(iterations: usize) -> Result<()> {
+    if iterations == 0 {
+        return Err(CliError::Other("--iterations must be >= 1".to_string()));
+    }
+    Ok(())
+}
+
+fn run_benchmark(input: &Path, iterations: usize) -> Result<()> {
+    require_iterations(iterations)?;
+    let reader = open_input(input)?;
+    let pulses: Vec<HitBatch> = reader.stream_time_ordered()?.collect();
+    let hits: usize = pulses.iter().map(HitBatch::len).sum();
 
     println!(
-        "Benchmarking with {} hits, {} iterations",
-        base_batch.len(),
-        iterations
+        "Benchmarking with {hits} hits in {} pulses, {iterations} iterations",
+        pulses.len()
     );
 
     let algorithms = [
@@ -1244,8 +1410,8 @@ fn run_benchmark(input: &PathBuf, iterations: usize) -> Result<()> {
     println!("{:-<65}", "");
 
     for (algo_enum, name) in algorithms {
-        warmup_algorithm(algo_enum, &base_batch);
-        let times = benchmark_algorithm(algo_enum, &base_batch, iterations)?;
+        warmup_algorithm(algo_enum, &pulses);
+        let times = benchmark_algorithm(algo_enum, &pulses, iterations)?;
 
         let min_time = times.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_time = times.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
@@ -1259,7 +1425,7 @@ fn run_benchmark(input: &PathBuf, iterations: usize) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_out_of_core_benchmark(
-    input: &PathBuf,
+    input: &Path,
     algorithm: Algorithm,
     radius: f64,
     temporal_window_ns: f64,
@@ -1271,6 +1437,7 @@ fn run_out_of_core_benchmark(
     queue_depth: usize,
     async_io: bool,
 ) -> Result<()> {
+    require_iterations(iterations)?;
     let algo = resolve_algorithm(algorithm);
     let clustering = ClusteringConfig {
         radius,
@@ -1341,14 +1508,14 @@ fn run_out_of_core_benchmark(
 }
 
 fn bench_out_of_core(
-    input: &PathBuf,
+    input: &Path,
     algo: ClusteringAlgorithm,
     clustering: &ClusteringConfig,
     extraction: &ExtractionConfig,
     params: &AlgorithmParams,
     config: &OutOfCoreConfig,
 ) -> Result<(usize, usize, std::time::Duration)> {
-    let reader = Tpx3FileReader::open(input)?;
+    let reader = open_input(input)?;
     let start = Instant::now();
     let stream = out_of_core_neutron_stream(&reader, algo, clustering, extraction, params, config)?;
     let mut total_hits = 0usize;
@@ -1361,22 +1528,26 @@ fn bench_out_of_core(
     Ok((total_hits, total_neutrons, start.elapsed()))
 }
 
-fn warmup_algorithm(algo_enum: Algorithm, base_batch: &HitBatch) {
-    let mut batch = base_batch.clone();
-    let _ = run_cluster_once(algo_enum, &mut batch);
+fn warmup_algorithm(algo_enum: Algorithm, pulses: &[HitBatch]) {
+    for pulse in pulses {
+        let _ = run_cluster_once(algo_enum, &mut pulse.clone());
+    }
 }
 
+/// Times clustering of every pulse in turn; the copy of the input is not timed.
 fn benchmark_algorithm(
     algo_enum: Algorithm,
-    base_batch: &HitBatch,
+    pulses: &[HitBatch],
     iterations: usize,
 ) -> Result<Vec<f64>> {
     let mut times = Vec::with_capacity(iterations);
 
     for _ in 0..iterations {
+        let mut work = pulses.to_vec();
         let start = Instant::now();
-        let mut batch = base_batch.clone();
-        run_cluster_once(algo_enum, &mut batch)?;
+        for pulse in &mut work {
+            run_cluster_once(algo_enum, pulse)?;
+        }
         times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
 
