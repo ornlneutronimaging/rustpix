@@ -42,6 +42,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `benchmark --iterations 0` and `out-of-core-benchmark --iterations 0`
   printed NaN and infinities; zero iterations is now an error.
 - An error while writing the TIFF spectrum CSV could be lost.
+- The one-shot HDF5 writers (`write_hits_hdf5`, `write_neutrons_hdf5`,
+  `write_combined_hdf5[_batches]`, `write_histogram_hdf5`, `write_hits_sns`,
+  `write_neutrons_sns`) write to a temporary file and rename it into place on
+  success. A failed export used to leave a truncated file that read back as
+  valid, and could destroy an existing file before failing.
+- The SNS reader read `event_time_zero` and `event_index` whole for every
+  call; a file declaring huge arrays aborted the process. It now reads only
+  the pulses covering the requested events, requires the whole `event_index`
+  to be sorted, and rejects banks with more than 2^26 pulses (about 12 days at
+  60 Hz).
+- The SNS reader ignored `units`, `offset_seconds` and `offset_nanoseconds`
+  attributes stored as 1-element arrays and silently used defaults (TOF could
+  come back 1000x too large; pulse times run-relative instead of absolute).
+- String metadata with invalid UTF-8 produced a `String` violating Rust's
+  UTF-8 guarantee; such values are now treated as missing (SNS) or an error
+  (generic attributes).
+- File values that used to wrap or panic are errors: a non-finite TOF, a
+  pulse time beyond `u64` nanoseconds, an oversized bank, and out-of-range
+  pulse timestamps given to the SNS writer.
+- The generic hit writer accepted coordinates outside `x_size` x `y_size`,
+  giving two pixels the same `event_id`. Both event writers reject batches
+  whose columns differ in length, as does the SNS writer.
+- The generic readers check that per-event columns agree, that
+  `event_index` is ordered and in range, and that histogram axes match the
+  counts shape.
+- `Hdf5HistogramSink` lost every cached chunk after one failed chunk write.
+- `SnsEventSink::finalize` reported success on a second call after a failed
+  first one.
+- `SnsEventSink` overwrote a caller-supplied `end_time` and `duration`.
+- ISO 8601 offsets without a colon (`+0530`) were read as whole hours, and
+  out-of-range dates and times were accepted; both are now rejected.
 
 ### Changed
 
@@ -65,6 +96,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rustpix benchmark` clusters each pulse separately, as `process` does, and
   no longer times the copy of the input. Its first output line now also
   reports the pulse count.
+- The SNS writer assigns a neutron whose centroid rounds onto a chip-gap
+  pixel to the nearer real pixel inside the bank instead of dropping it.
+- One-shot HDF5 exports keep an existing destination's permissions; a
+  symbolic link at the destination is replaced by the new file, not followed.
+  The file is written in an owner-only directory beside the destination, so
+  other users can neither read it nor redirect the write.
+- `SnsEventSink::create` rejects bank geometries whose pixel IDs or
+  coordinates do not fit, and a run duration that is not between 0 and 1e10 s.
+- The SNS reader returns an error for an unparseable ISO `offset` on
+  `event_time_zero` when there is no EPICS offset to fall back on.
+- `docs/hdf5_schema.md` and the book describe the pixel-mask group, neutron
+  `f64` coordinates and `super_resolution_factor`, the SNS `title` and the
+  `(1,)` shape of a bank's `total_counts`.
 
 
 ## [1.4.1] - 2026-10-09

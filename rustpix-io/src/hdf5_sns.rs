@@ -18,19 +18,47 @@
 )]
 
 use crate::hdf5::{
-    append_slice, create_extendable_dataset, set_attr_str_group, set_dataset_units,
+    append_slice, check_columns, create_extendable_dataset, set_attr_str_group, set_dataset_units,
     to_var_len_unicode, NeutronEventBatch,
 };
 use crate::reader::EventBatch;
+use crate::replace::write_then_replace;
 use crate::{Error, Result};
+use hdf5::types::H5Type;
 use hdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
-use hdf5::{Dataset, File, Group};
+use hdf5::{Attribute, Dataset, File, Group};
 use ndarray::s;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 
 const NS_PER_TICK: u64 = 25;
 const US_PER_TICK: f64 = 25.0 / 1000.0;
+
+/// Moves a centroid that rounds onto a gap pixel to the nearer real pixel beside the gap.
+///
+/// `exact` is the unrounded coordinate and `rounded` its rounding; the pixel
+/// returned is `rounded` itself when that is not a gap pixel.
+fn step_off_gap(exact: f64, rounded: u32, gaps: &[u32], bank_size: u32) -> u32 {
+    if !gaps.contains(&rounded) {
+        return rounded;
+    }
+    let in_bank = |c: u32| remap_gap(c, gaps).is_some_and(|v| v < bank_size);
+    let mut low = rounded;
+    while low > 0 && gaps.contains(&low) {
+        low -= 1;
+    }
+    let mut high = rounded;
+    while high < u32::MAX && gaps.contains(&high) {
+        high += 1;
+    }
+    match (in_bank(low), in_bank(high)) {
+        (true, true) if f64::from(high) - exact < exact - f64::from(low) => high,
+        (true, _) => low,
+        (false, true) => high,
+        (false, false) => rounded, // dropped by the caller's gap check
+    }
+}
 
 /// Remap a coordinate from the source grid (which may contain chip-gap pixels)
 /// to the target grid (which does not).
@@ -334,8 +362,18 @@ impl SnsBankEventWriter {
             if !fx.is_finite() || !fy.is_finite() || fx < 0.0 || fy < 0.0 {
                 continue;
             }
-            let raw_x = fx as u32;
-            let raw_y = fy as u32;
+            let raw_x = step_off_gap(
+                batch.neutrons.x[i] * inv,
+                fx as u32,
+                &bank.gap_columns,
+                bank.width,
+            );
+            let raw_y = step_off_gap(
+                batch.neutrons.y[i] * inv,
+                fy as u32,
+                &bank.gap_rows,
+                bank.height,
+            );
             let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
                 continue;
             };
@@ -402,7 +440,7 @@ impl SnsBankEventWriter {
 /// Writes event data in bank-based format with pulse-indexed structure.
 /// Call [`Self::write_hits`] or [`Self::write_neutrons`] per pulse, then [`Self::finalize`].
 pub struct SnsEventSink {
-    _file: File,
+    file: File,
     entry: Group,
     writers: Vec<(SnsBankConfig, SnsBankEventWriter)>,
     options: SnsWriteOptions,
@@ -439,6 +477,16 @@ impl SnsEventSink {
             return Err(crate::Error::InvalidFormat(format!(
                 "super_resolution_factor must be finite and positive, got {srf}"
             )));
+        }
+        if let Some(duration) = options.run.duration {
+            if !(duration.is_finite() && (0.0..=MAX_DURATION_S).contains(&duration)) {
+                return Err(crate::Error::InvalidFormat(format!(
+                    "run duration must be between 0 and {MAX_DURATION_S} s, got {duration}"
+                )));
+            }
+        }
+        for bank in &options.banks {
+            check_bank_geometry(bank)?;
         }
 
         let file = File::create(path)?;
@@ -523,7 +571,7 @@ impl SnsEventSink {
 
         let num_banks = writers.len();
         Ok(Self {
-            _file: file,
+            file,
             entry,
             writers,
             options,
@@ -556,7 +604,13 @@ impl SnsEventSink {
             )));
         }
 
-        let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
+        let hits = &batch.hits;
+        check_columns(
+            "hit batch",
+            hits.x.len(),
+            &[("y", hits.y.len()), ("tof", hits.tof.len())],
+        )?;
+        let pulse_ns = pulse_ns_from_ticks(batch.tdc_timestamp_25ns)?;
         self.validate_pulse_monotonicity(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
@@ -591,7 +645,13 @@ impl SnsEventSink {
             )));
         }
 
-        let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
+        let neutrons = &batch.neutrons;
+        check_columns(
+            "neutron batch",
+            neutrons.x.len(),
+            &[("y", neutrons.y.len()), ("tof", neutrons.tof.len())],
+        )?;
+        let pulse_ns = pulse_ns_from_ticks(batch.tdc_timestamp_25ns)?;
         self.validate_pulse_monotonicity(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
@@ -664,7 +724,6 @@ impl SnsEventSink {
         if self.finalized {
             return Ok(());
         }
-        self.finalized = true;
 
         // Compute the global minimum pulse timestamp across all banks.
         // This is the time origin for event_time_zero.
@@ -683,21 +742,29 @@ impl SnsEventSink {
         // Compute and write end_time and duration from pulse timestamps.
         // `min_pulse_ns` and `max_pulse_ns` are *relative* detector tick counts,
         // not Unix-epoch nanoseconds — the delta gives the measurement duration.
+        // Duration and end time are derived only where the caller supplied none.
         if self.min_pulse_ns.is_some() {
-            let duration_s =
+            let measured_s =
                 (self.max_pulse_ns.saturating_sub(min_start_ns)) as f64 / 1_000_000_000.0;
-            overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
+            let duration_s = if let Some(given) = self.options.run.duration {
+                given
+            } else {
+                overwrite_f64_dataset(&self.entry, "duration", measured_s)?;
+                measured_s
+            };
 
-            // Derive end_time by adding duration to the human-supplied start_time.
-            // Truncate to whole seconds — the exact duration is already stored
-            // as an f64 in the `duration` dataset.
-            if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
-                let end_epoch = start_epoch + duration_s as u64;
-                let end_time = epoch_secs_to_iso8601(end_epoch);
-                overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+            // Whole seconds; the exact duration is in the `duration` dataset.
+            if self.options.run.end_time.is_none() {
+                if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
+                    let end_epoch = start_epoch.saturating_add(duration_s.max(0.0) as u64);
+                    let end_time = epoch_secs_to_iso8601(end_epoch);
+                    overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+                }
             }
         }
 
+        self.file.flush()?;
+        self.finalized = true;
         Ok(())
     }
 
@@ -747,7 +814,8 @@ impl Drop for SnsEventSink {
 
 /// Write hit events in SNS `NXsnsevent` format (one-shot).
 ///
-/// All batches are written to bank index 0.
+/// All batches go to bank index 0. An existing file at `path` is replaced
+/// only when the write succeeds.
 ///
 /// # Errors
 /// Returns an error if the file cannot be created or data cannot be written.
@@ -756,17 +824,19 @@ where
     P: AsRef<Path>,
     I: IntoIterator<Item = EventBatch>,
 {
-    let mut sink = SnsEventSink::create(path, options.clone())?;
-    for batch in batches {
-        sink.write_hits(0, &batch)?;
-    }
-    sink.finalize()?;
-    Ok(())
+    write_then_replace(path.as_ref(), |temp| {
+        let mut sink = SnsEventSink::create(temp, options.clone())?;
+        for batch in batches {
+            sink.write_hits(0, &batch)?;
+        }
+        sink.finalize()
+    })
 }
 
 /// Write neutron events in SNS `NXsnsevent` format (one-shot).
 ///
-/// All batches are written to bank index 0.
+/// All batches go to bank index 0. An existing file at `path` is replaced
+/// only when the write succeeds.
 ///
 /// # Errors
 /// Returns an error if the file cannot be created or data cannot be written.
@@ -775,12 +845,13 @@ where
     P: AsRef<Path>,
     I: IntoIterator<Item = NeutronEventBatch>,
 {
-    let mut sink = SnsEventSink::create(path, options.clone())?;
-    for batch in batches {
-        sink.write_neutrons(0, &batch)?;
-    }
-    sink.finalize()?;
-    Ok(())
+    write_then_replace(path.as_ref(), |temp| {
+        let mut sink = SnsEventSink::create(temp, options.clone())?;
+        for batch in batches {
+            sink.write_neutrons(0, &batch)?;
+        }
+        sink.finalize()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -882,6 +953,33 @@ fn epoch_secs_to_iso8601(secs: u64) -> String {
     )
 }
 
+/// Longest run duration accepted from the caller, in seconds (about 317 years).
+const MAX_DURATION_S: f64 = 1e10;
+
+/// Errors unless every pixel ID of the bank fits `u32` and coordinates fit `u16`.
+fn check_bank_geometry(bank: &SnsBankConfig) -> Result<()> {
+    let last_id = u64::from(bank.width) * u64::from(bank.height) + u64::from(bank.pixel_id_offset);
+    if bank.width == 0
+        || bank.height == 0
+        || bank.width > 65_536
+        || bank.height > 65_536
+        || last_id > u64::from(u32::MAX) + 1
+    {
+        return Err(Error::InvalidFormat(format!(
+            "bank {}: {} x {} pixels from ID {} do not fit 16-bit coordinates and 32-bit IDs",
+            bank.name, bank.width, bank.height, bank.pixel_id_offset
+        )));
+    }
+    Ok(())
+}
+
+/// Pulse time in ns from a timestamp in 25 ns ticks.
+fn pulse_ns_from_ticks(ticks: u64) -> Result<u64> {
+    ticks.checked_mul(NS_PER_TICK).ok_or_else(|| {
+        Error::InvalidFormat(format!("pulse timestamp {ticks} overflows u64 nanoseconds"))
+    })
+}
+
 /// Parse a subset of ISO 8601 strings into Unix epoch seconds (UTC).
 ///
 /// Accepted formats: `YYYY-MM-DDThh:mm:ssZ`, `YYYY-MM-DDThh:mm:ss±hh:mm`.
@@ -891,12 +989,32 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
     if s.len() < 19 {
         return None;
     }
-    let year: i64 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
-    let hour: i64 = s.get(11..13)?.parse().ok()?;
-    let min: i64 = s.get(14..16)?.parse().ok()?;
-    let sec: i64 = s.get(17..19)?.parse().ok()?;
+    let digits = |range: std::ops::Range<usize>| -> Option<i64> {
+        let field = s.get(range)?;
+        if field.bytes().all(|b| b.is_ascii_digit()) {
+            field.parse().ok()
+        } else {
+            None
+        }
+    };
+    let bytes = s.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let year = digits(0..4)?;
+    let month = u32::try_from(digits(5..7)?).ok()?;
+    let day = u32::try_from(digits(8..10)?).ok()?;
+    let hour = digits(11..13)?;
+    let min = digits(14..16)?;
+    let sec = digits(17..19)?;
+    if year < 1970 || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
 
     // Timezone offset (after position 19): 'Z', ±hh:mm, or absent.
     // Reject any other suffix (e.g. fractional seconds like ".123Z",
@@ -907,9 +1025,21 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
             0
         } else if tz.starts_with('+') || tz.starts_with('-') {
             let sign: i64 = if tz.starts_with('+') { 1 } else { -1 };
-            let tz = &tz[1..];
-            let oh: i64 = tz.get(0..2).and_then(|v| v.parse().ok())?;
-            let om: i64 = tz.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let tz = &tz.as_bytes()[1..];
+            if tz.len() != 5
+                || tz[2] != b':'
+                || !tz
+                    .iter()
+                    .enumerate()
+                    .all(|(i, b)| i == 2 || b.is_ascii_digit())
+            {
+                return None;
+            }
+            let oh = i64::from(tz[0] - b'0') * 10 + i64::from(tz[1] - b'0');
+            let om = i64::from(tz[3] - b'0') * 10 + i64::from(tz[4] - b'0');
+            if oh > 23 || om > 59 {
+                return None;
+            }
             sign * (oh * 3600 + om * 60)
         } else {
             return None; // unsupported suffix
@@ -940,7 +1070,7 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
         30,
         31,
     ];
-    if month == 0 || month > 12 || day == 0 {
+    if month == 0 || month > 12 || day == 0 || day > month_days[month as usize - 1] {
         return None;
     }
     for &md in &month_days[..(month as usize - 1)] {
@@ -1048,6 +1178,8 @@ pub struct SnsEventReader {
     _file: File,
     entry: Group,
     banks: Vec<SnsBankInfo>,
+    /// Banks whose whole `event_index` has been checked to be sorted.
+    sorted_banks: Mutex<HashSet<String>>,
 }
 
 impl SnsEventReader {
@@ -1081,6 +1213,7 @@ impl SnsEventReader {
             _file: file,
             entry,
             banks,
+            sorted_banks: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1146,17 +1279,20 @@ impl SnsEventReader {
             .to_vec();
 
         // Decode pixel IDs to x/y on the bank grid.
-        let area = config.width * config.height;
+        check_bank_geometry(config)?;
+        let area = u64::from(config.width) * u64::from(config.height);
         events.x.reserve(events.event_id.len());
         events.y.reserve(events.event_id.len());
         for &id in &events.event_id {
-            let rel = id.checked_sub(config.pixel_id_offset).filter(|&r| r < area);
+            let rel = id
+                .checked_sub(config.pixel_id_offset)
+                .filter(|&r| u64::from(r) < area);
             let Some(rel) = rel else {
                 return Err(Error::InvalidFormat(format!(
                     "pixel ID {id} outside bank {} range [{}, {})",
                     config.name,
                     config.pixel_id_offset,
-                    config.pixel_id_offset + area,
+                    u64::from(config.pixel_id_offset) + area,
                 )));
             };
             events.x.push((rel % config.width) as u16);
@@ -1166,38 +1302,47 @@ impl SnsEventReader {
         // TOF, converted to nanoseconds from the units recorded in the file.
         let tof_ds = group.dataset("event_time_offset")?;
         let tof_scale_ns = units_scale_ns(&tof_ds, "microsecond")?;
-        events.tof_ns = tof_ds
-            .read_slice_1d::<f32, _>(s![start_us..end_us])?
+        let tof = tof_ds.read_slice_1d::<f32, _>(s![start_us..end_us])?;
+        if let Some(bad) = tof.iter().find(|v| !v.is_finite()) {
+            return Err(Error::InvalidFormat(format!(
+                "bank {}: event_time_offset contains {bad}",
+                config.name
+            )));
+        }
+        events.tof_ns = tof
             .iter()
             .map(|&v| (f64::from(v) * tof_scale_ns).max(0.0).round() as u64)
             .collect();
 
-        // Pulse times: the per-pulse arrays are small (one entry per pulse),
-        // so read them fully and expand to one timestamp per event.
+        // Pulse times: read only the pulses that cover events [start, end).
         let tz_ds = group.dataset("event_time_zero")?;
-        let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
-        let base_ns = pulse_offset_ns(&tz_ds);
-        let pulse_ns: Vec<u64> = tz_ds
-            .read_raw::<f64>()?
-            .iter()
-            .map(|&v| base_ns + (v * pulse_scale_ns).max(0.0).round() as u64)
-            .collect();
-        let event_index: Vec<u64> = group.dataset("event_index")?.read_raw()?;
-        if pulse_ns.is_empty() || event_index.len() != pulse_ns.len() {
+        let index_ds = group.dataset("event_index")?;
+        let n_pulses = tz_ds.size();
+        if n_pulses == 0 || index_ds.size() != n_pulses {
             return Err(Error::InvalidFormat(format!(
                 "bank {}: event_index has {} entries but event_time_zero has {}",
                 config.name,
-                event_index.len(),
-                pulse_ns.len(),
+                index_ds.size(),
+                n_pulses,
             )));
         }
+        self.check_event_index_sorted(&config.name, &index_ds, n_pulses)?;
+        let index_at =
+            |p: usize| -> Result<u64> { Ok(index_ds.read_slice_1d::<u64, _>(s![p..=p])?[0]) };
+        // The pulse holding event i is the last one whose first-event index is <= i.
+        let first = last_pulse_at_or_before(n_pulses, start, &index_at)?;
+        let last = last_pulse_at_or_before(n_pulses, end - 1, &index_at)?.max(first);
+        let event_index = index_ds.read_slice_1d::<u64, _>(s![first..=last])?.to_vec();
+        let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
+        let base_ns = pulse_offset_ns(&tz_ds)?;
+        let pulse_ns = tz_ds
+            .read_slice_1d::<f64, _>(s![first..=last])?
+            .iter()
+            .map(|&v| pulse_time_ns(base_ns, v, pulse_scale_ns))
+            .collect::<Result<Vec<u64>>>()?;
 
         events.pulse_time_ns.reserve(events.event_id.len());
-        // Index of the pulse the first event of the slice belongs to:
-        // the last pulse whose first-event index is <= start.
-        let mut p = event_index
-            .partition_point(|&v| v <= start)
-            .saturating_sub(1);
+        let mut p = 0;
         for i in start..end {
             while p + 1 < event_index.len() && event_index[p + 1] <= i {
                 p += 1;
@@ -1208,6 +1353,52 @@ impl SnsEventReader {
         Ok(events)
     }
 }
+
+impl SnsEventReader {
+    /// Checks once per bank that the whole `event_index` is non-decreasing.
+    ///
+    /// The pulse search assumes sorted input, so an unsorted index would assign
+    /// events to the wrong pulse without any local sign of it.
+    fn check_event_index_sorted(
+        &self,
+        bank: &str,
+        index_ds: &Dataset,
+        n_pulses: usize,
+    ) -> Result<()> {
+        let mut sorted_banks = self
+            .sorted_banks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if sorted_banks.contains(bank) {
+            return Ok(());
+        }
+        if n_pulses > MAX_PULSES {
+            return Err(Error::InvalidFormat(format!(
+                "bank {bank}: {n_pulses} pulses exceed the supported {MAX_PULSES}"
+            )));
+        }
+        let mut previous = 0u64;
+        let mut chunk_start = 0;
+        while chunk_start < n_pulses {
+            let chunk_end = n_pulses.min(chunk_start + EVENT_INDEX_CHUNK);
+            let chunk = index_ds.read_slice_1d::<u64, _>(s![chunk_start..chunk_end])?;
+            for &value in &chunk {
+                if value < previous {
+                    return Err(Error::InvalidFormat(format!(
+                        "bank {bank}: event_index is not sorted"
+                    )));
+                }
+                previous = value;
+            }
+            chunk_start = chunk_end;
+        }
+        sorted_banks.insert(bank.to_string());
+        Ok(())
+    }
+}
+
+/// Pulses read per chunk when checking `event_index` order (8 MiB of `u64`).
+const EVENT_INDEX_CHUNK: usize = 1 << 20;
 
 /// Read events from `bank100` of a VENUS SNS `NeXus` file (one-shot).
 ///
@@ -1240,6 +1431,59 @@ fn units_scale_ns(dataset: &Dataset, default_units: &str) -> Result<f64> {
     }
 }
 
+/// Upper bound on pulses in one bank (about 12 days at 60 Hz).
+const MAX_PULSES: usize = 1 << 26;
+
+/// Index of the last pulse whose first-event index is <= `event`, or 0 if none is.
+fn last_pulse_at_or_before(
+    n_pulses: usize,
+    event: u64,
+    index_at: &impl Fn(usize) -> Result<u64>,
+) -> Result<usize> {
+    let (mut lo, mut hi) = (0, n_pulses);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if index_at(mid)? <= event {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo.saturating_sub(1))
+}
+
+/// Absolute pulse time in ns from the origin and one `event_time_zero` value.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn pulse_time_ns(base_ns: u64, value: f64, scale_ns: f64) -> Result<u64> {
+    let relative = value * scale_ns;
+    if !relative.is_finite() || relative >= u64::MAX as f64 {
+        return Err(Error::InvalidFormat(format!(
+            "event_time_zero value {value} is out of range"
+        )));
+    }
+    base_ns
+        .checked_add(relative.max(0.0).round() as u64)
+        .ok_or_else(|| Error::InvalidFormat("pulse time overflows u64 nanoseconds".to_string()))
+}
+
+/// Reads an attribute stored either as a scalar or as a 1-element array.
+fn read_scalar_or_single<T: H5Type + Clone>(attr: &Attribute) -> Option<T> {
+    if let Ok(value) = attr.read_scalar::<T>() {
+        return Some(value);
+    }
+    if attr.size() != 1 {
+        return None;
+    }
+    match attr.read_raw::<T>() {
+        Ok(values) if values.len() == 1 => values.into_iter().next(),
+        _ => None,
+    }
+}
+
+fn utf8(bytes: &[u8]) -> Option<String> {
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
 /// Seconds between the Unix epoch (1970-01-01) and the EPICS epoch
 /// (1990-01-01) that ADARA's `offset_seconds` attribute counts from.
 const EPICS_EPOCH_UNIX_S: u64 = 631_152_000;
@@ -1251,25 +1495,39 @@ const EPICS_EPOCH_UNIX_S: u64 = 631_152_000;
 /// The ISO string is preferred (its epoch is unambiguous); the EPICS pair is
 /// the fallback.  Returns 0 when neither is present (e.g. rustpix-written
 /// files, whose pulse times are run-relative).
-fn pulse_offset_ns(dataset: &Dataset) -> u64 {
+fn pulse_offset_ns(dataset: &Dataset) -> Result<u64> {
     let attr_u32 = |name: &str| -> Option<u32> {
         dataset
             .attr(name)
             .ok()
-            .and_then(|a| a.read_scalar::<u32>().ok())
+            .and_then(|a| read_scalar_or_single::<u32>(&a))
+    };
+    let to_ns = |secs: u64, frac: u32| {
+        secs.checked_mul(1_000_000_000)
+            .and_then(|ns| ns.checked_add(u64::from(frac)))
+            .ok_or_else(|| {
+                Error::InvalidFormat(format!(
+                    "pulse time origin of {secs} s overflows u64 nanoseconds"
+                ))
+            })
     };
     let frac_attr = attr_u32("offset_nanoseconds");
-    if let Some(iso) = read_string_attr(dataset, "offset") {
-        if let Some((secs, frac_iso)) = iso8601_to_epoch_secs_frac(&iso) {
-            return secs * 1_000_000_000 + u64::from(frac_attr.unwrap_or(frac_iso));
+    let iso = read_string_attr(dataset, "offset");
+    if let Some(iso) = &iso {
+        if let Some((secs, frac_iso)) = iso8601_to_epoch_secs_frac(iso) {
+            return to_ns(secs, frac_attr.unwrap_or(frac_iso));
         }
     }
     match attr_u32("offset_seconds") {
         Some(secs) if secs != 0 => {
-            (u64::from(secs) + EPICS_EPOCH_UNIX_S) * 1_000_000_000
-                + u64::from(frac_attr.unwrap_or(0))
+            to_ns(u64::from(secs) + EPICS_EPOCH_UNIX_S, frac_attr.unwrap_or(0))
         }
-        _ => 0,
+        _ => match iso {
+            Some(iso) => Err(Error::InvalidFormat(format!(
+                "event_time_zero offset {iso:?} is not a supported ISO 8601 time"
+            ))),
+            None => Ok(0),
+        },
     }
 }
 
@@ -1302,17 +1560,17 @@ fn iso8601_to_epoch_secs_frac(s: &str) -> Option<(u64, u32)> {
 /// (variable/fixed length, ASCII/UTF-8, scalar or 1-element array).
 fn read_string_attr(dataset: &Dataset, name: &str) -> Option<String> {
     let attr = dataset.attr(name).ok()?;
-    if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {
-        return Some(v.to_string());
+    if let Some(v) = read_scalar_or_single::<VarLenUnicode>(&attr) {
+        return utf8(v.as_bytes());
     }
-    if let Ok(v) = attr.read_scalar::<VarLenAscii>() {
-        return Some(v.to_string());
+    if let Some(v) = read_scalar_or_single::<VarLenAscii>(&attr) {
+        return utf8(v.as_bytes());
     }
-    if let Ok(v) = attr.read_scalar::<FixedAscii<256>>() {
-        return Some(v.as_str().to_string());
+    if let Some(v) = read_scalar_or_single::<FixedAscii<256>>(&attr) {
+        return utf8(v.as_bytes());
     }
-    if let Ok(v) = attr.read_scalar::<FixedUnicode<256>>() {
-        return Some(v.as_str().to_string());
+    if let Some(v) = read_scalar_or_single::<FixedUnicode<256>>(&attr) {
+        return utf8(v.as_bytes());
     }
     None
 }
@@ -1322,16 +1580,16 @@ fn read_string_attr(dataset: &Dataset, name: &str) -> Option<String> {
 fn read_string_dataset(group: &Group, name: &str) -> Option<String> {
     let dataset = group.dataset(name).ok()?;
     if let Ok(v) = dataset.read_raw::<VarLenUnicode>() {
-        return v.first().map(ToString::to_string);
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     if let Ok(v) = dataset.read_raw::<VarLenAscii>() {
-        return v.first().map(ToString::to_string);
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     if let Ok(v) = dataset.read_raw::<FixedAscii<256>>() {
-        return v.first().map(|s| s.as_str().to_string());
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     if let Ok(v) = dataset.read_raw::<FixedUnicode<256>>() {
-        return v.first().map(|s| s.as_str().to_string());
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     None
 }
@@ -1837,6 +2095,166 @@ mod tests {
         assert_eq!(ids, vec![1_000_000 + 511 * 512 + 511]);
     }
 
+    fn written_ids(path: &Path) -> Vec<u32> {
+        File::open(path)
+            .unwrap()
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_neutron_on_gap_moves_to_the_nearer_pixel() {
+        // Source columns 256 and 257 are the gap; 255 and 258 lie either side.
+        let mut opts = make_test_options();
+        opts.super_resolution_factor = 1.0;
+        let xs = [255.4, 255.5, 256.4, 256.6, 257.5, 257.6, 100.0];
+        let batch = make_neutron_batch(1000, &xs, &[10.0; 7], &[100; 7]);
+        let file = NamedTempFile::new().unwrap();
+
+        let mut sink = SnsEventSink::create(file.path(), opts).unwrap();
+        sink.write_neutrons(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let columns: Vec<u32> = written_ids(file.path())
+            .iter()
+            .map(|id| (id - 1_000_000) % 512)
+            .collect();
+        // Source 258 becomes bank column 256 once the two gap columns are removed.
+        assert_eq!(columns, vec![255, 255, 255, 256, 256, 256, 100]);
+    }
+
+    #[test]
+    fn test_mismatched_batch_columns_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let mut sink = SnsEventSink::create(file.path(), make_test_options()).unwrap();
+
+        let mut hits = make_hit_batch(1000, &[1, 2], &[1, 2], &[100, 200]);
+        hits.hits.tof.pop();
+        assert!(sink.write_hits(0, &hits).is_err());
+
+        let mut neutrons = make_neutron_batch(2000, &[8.0], &[8.0], &[100]);
+        neutrons.neutrons.tof.clear();
+        assert!(sink.write_neutrons(0, &neutrons).is_err());
+    }
+
+    #[test]
+    fn test_pulse_timestamp_overflow_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let mut sink = SnsEventSink::create(file.path(), make_test_options()).unwrap();
+        let batch = make_hit_batch(u64::MAX / 2, &[1], &[1], &[100]);
+        assert!(sink.write_hits(0, &batch).is_err());
+    }
+
+    #[test]
+    fn test_supplied_end_time_and_duration_are_kept() {
+        let mut opts = make_test_options();
+        opts.run.end_time = Some("2025-01-01T01:00:00-05:00".to_string());
+        opts.run.duration = Some(3600.0);
+        let file = NamedTempFile::new().unwrap();
+
+        let mut sink = SnsEventSink::create(file.path(), opts).unwrap();
+        sink.write_hits(0, &make_hit_batch(1000, &[1], &[1], &[100]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(41_000_000, &[1], &[1], &[100]))
+            .unwrap();
+        sink.finalize().unwrap();
+
+        let meta = SnsEventReader::open(file.path()).unwrap().metadata();
+        assert_eq!(meta.end_time.as_deref(), Some("2025-01-01T01:00:00-05:00"));
+        assert_eq!(meta.duration_s, Some(3600.0));
+    }
+
+    #[test]
+    fn test_iso8601_rejects_malformed_fields() {
+        assert_eq!(
+            iso8601_to_epoch_secs("2025-01-01T05:30:00+05:30"),
+            iso8601_to_epoch_secs("2025-01-01T00:00:00Z")
+        );
+        for bad in [
+            "2025-01-01T00:00:00+0530",
+            "2025-02-30T00:00:00Z",
+            "2025-13-01T00:00:00Z",
+            "2025-01-01T24:00:00Z",
+            "2025-01-01T00:61:00Z",
+            "2025-01-01 00:00:00Z",
+            "2025-01-01T00:00:00+05",
+            "2025-1-001T00:00:00Z",
+        ] {
+            assert_eq!(iso8601_to_epoch_secs(bad), None, "{bad}");
+        }
+        assert!(iso8601_to_epoch_secs("2024-02-29T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn test_gap_snapping_stays_inside_the_bank() {
+        // Columns 0 and 1 are real, column 2 is a trailing gap.
+        assert_eq!(step_off_gap(2.25, 2, &[2], 2), 1);
+        // An interior gap still picks the nearer side.
+        assert_eq!(step_off_gap(256.6, 257, &[256, 257], 512), 258);
+        assert_eq!(step_off_gap(256.4, 256, &[256, 257], 512), 255);
+    }
+
+    #[test]
+    fn test_invalid_bank_geometry_and_duration_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let mut opts = make_test_options();
+        opts.banks[0].pixel_id_offset = u32::MAX;
+        assert!(SnsEventSink::create(file.path(), opts).is_err());
+
+        let mut opts = make_test_options();
+        opts.banks[0].width = 65_537;
+        assert!(SnsEventSink::create(file.path(), opts).is_err());
+
+        for duration in [1e18, -1.0, f64::NAN] {
+            let mut opts = make_test_options();
+            opts.run.duration = Some(duration);
+            assert!(
+                SnsEventSink::create(file.path(), opts).is_err(),
+                "{duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_one_shot_staging_never_reuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        let decoy = dir.path().join(format!(
+            ".rustpix-{}-0-00000000.partial",
+            std::process::id()
+        ));
+        std::fs::write(&decoy, b"not ours").unwrap();
+        write_hits_sns(
+            &path,
+            vec![make_hit_batch(1000, &[1], &[1], &[100])],
+            &make_test_options(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"not ours");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_one_shot_keeps_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_hits_sns(
+            &path,
+            vec![make_hit_batch(1000, &[1], &[1], &[100])],
+            &make_test_options(),
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     #[test]
     fn test_neutron_pixel_id_remapped_through_gap() {
         // Neutron at super-res (4104.0, 4104.0) with factor 8.0 -> pixel (513, 513)
@@ -1972,6 +2390,56 @@ mod tests {
             err_msg.contains("non-monotonic"),
             "Expected non-monotonic error, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn test_one_shot_failure_keeps_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        std::fs::write(&path, b"previous export").unwrap();
+
+        let batches = vec![
+            make_hit_batch(1000, &[0], &[0], &[100]),
+            make_hit_batch(2000, &[1], &[1], &[200]),
+            make_hit_batch(1500, &[2], &[2], &[300]),
+        ];
+        let err = write_hits_sns(&path, batches, &make_test_options()).unwrap_err();
+        assert!(err.to_string().contains("non-monotonic"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+
+        let fresh = dir.path().join("fresh.nxs.h5");
+        let batches = vec![
+            make_neutron_batch(2000, &[8.0], &[8.0], &[100]),
+            make_neutron_batch(1000, &[16.0], &[16.0], &[200]),
+        ];
+        assert!(write_neutrons_sns(&fresh, batches, &make_test_options()).is_err());
+        assert!(!fresh.exists());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".partial"))
+            .collect();
+        assert_eq!(leftovers, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_one_shot_success_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        std::fs::write(&path, b"previous export").unwrap();
+
+        let batches = vec![
+            make_hit_batch(1000, &[0], &[0], &[100]),
+            make_hit_batch(2000, &[1], &[1], &[200]),
+        ];
+        write_hits_sns(&path, batches, &make_test_options()).unwrap();
+
+        let events = SnsEventReader::open(&path)
+            .unwrap()
+            .read_events(&venus_bank100_config(), 0, None)
+            .unwrap();
+        assert_eq!(events.event_id.len(), 2);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use crate::out_of_core::OutOfCoreConfig;
 use crate::reader::EventBatch;
+use crate::replace::write_then_replace;
 use crate::{Error, Result};
 use hdf5::types::{H5Type, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
@@ -14,6 +15,32 @@ use std::path::Path;
 use std::str::FromStr;
 
 const NS_PER_TICK: u64 = 25;
+
+fn check_neutron_columns(neutrons: &NeutronBatch, options: &NeutronWriteOptions) -> Result<()> {
+    let mut columns = vec![("y", neutrons.y.len()), ("tof", neutrons.tof.len())];
+    if options.include_tot {
+        columns.push(("tot", neutrons.tot.len()));
+    }
+    if options.include_chip_id {
+        columns.push(("chip_id", neutrons.chip_id.len()));
+    }
+    if options.include_n_hits {
+        columns.push(("n_hits", neutrons.n_hits.len()));
+    }
+    check_columns("neutron batch", neutrons.x.len(), &columns)
+}
+
+/// Errors unless every named column has `len` entries.
+pub(crate) fn check_columns(what: &str, len: usize, columns: &[(&str, usize)]) -> Result<()> {
+    for &(name, column_len) in columns {
+        if column_len != len {
+            return Err(Error::InvalidFormat(format!(
+                "{what}: column {name} has {column_len} entries, expected {len}"
+            )));
+        }
+    }
+    Ok(())
+}
 const HISTOGRAM_AXES: [&str; 4] = ["rot_angle", "y", "x", "time_of_flight"];
 
 /// Streaming writer for hit events in `NXevent_data`.
@@ -512,11 +539,22 @@ fn create_histogram_group(entry: &Group, options: &HistogramWriteOptions) -> Res
 
 /// Writes hit events to an HDF5/NeXus file.
 ///
+/// An existing file at `path` is replaced only when the write succeeds.
+///
 /// # Errors
 /// Returns an error if HDF5 I/O fails or indices overflow i32.
 pub fn write_hits_hdf5<P, I>(path: P, batches: I, options: &HitWriteOptions) -> Result<()>
 where
     P: AsRef<Path>,
+    I: IntoIterator<Item = EventBatch>,
+{
+    write_then_replace(path.as_ref(), |temp| {
+        write_hits_file(temp, batches, options)
+    })
+}
+
+fn write_hits_file<I>(path: &Path, batches: I, options: &HitWriteOptions) -> Result<()>
+where
     I: IntoIterator<Item = EventBatch>,
 {
     let file = File::create(path)?;
@@ -542,16 +580,28 @@ where
     for batch in batches {
         writer.append_batch(&batch, options)?;
     }
+    file.flush()?;
     Ok(())
 }
 
 /// Writes neutron events to an HDF5/NeXus file.
+///
+/// An existing file at `path` is replaced only when the write succeeds.
 ///
 /// # Errors
 /// Returns an error if HDF5 I/O fails or indices overflow i32.
 pub fn write_neutrons_hdf5<P, I>(path: P, batches: I, options: &NeutronWriteOptions) -> Result<()>
 where
     P: AsRef<Path>,
+    I: IntoIterator<Item = NeutronEventBatch>,
+{
+    write_then_replace(path.as_ref(), |temp| {
+        write_neutrons_file(temp, batches, options)
+    })
+}
+
+fn write_neutrons_file<I>(path: &Path, batches: I, options: &NeutronWriteOptions) -> Result<()>
+where
     I: IntoIterator<Item = NeutronEventBatch>,
 {
     let file = File::create(path)?;
@@ -577,10 +627,13 @@ where
     for batch in batches {
         writer.append_batch(&batch, options)?;
     }
+    file.flush()?;
     Ok(())
 }
 
 /// Writes the given payloads to one HDF5/NeXus file.
+///
+/// An existing file at `path` is replaced only when the write succeeds.
 ///
 /// # Errors
 /// Fails on no payload, conflicting metadata, invalid data, or I/O.
@@ -601,7 +654,23 @@ pub fn write_combined_hdf5_batches<P: AsRef<Path>>(
         neutrons.map(|(_, opts)| opts),
         histogram.map(|(_, opts)| opts),
     )?;
+    if let Some((data, _)) = histogram {
+        validate_histogram_data(data)?;
+    }
 
+    write_then_replace(path.as_ref(), |temp| {
+        write_combined_file(temp, &meta, hits, neutrons, histogram, pixel_masks)
+    })
+}
+
+fn write_combined_file(
+    path: &Path,
+    meta: &EntryMeta,
+    hits: Option<(&[EventBatch], &HitWriteOptions)>,
+    neutrons: Option<(&[NeutronEventBatch], &NeutronWriteOptions)>,
+    histogram: Option<(&HistogramWriteData, &HistogramWriteOptions)>,
+    pixel_masks: Option<(&PixelMaskWriteData, &PixelMaskWriteOptions)>,
+) -> Result<()> {
     let file = File::create(path)?;
     set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
     let entry = create_entry(
@@ -652,6 +721,7 @@ pub fn write_combined_hdf5_batches<P: AsRef<Path>>(
         write_pixel_masks(&entry, data, options)?;
     }
 
+    file.flush()?;
     Ok(())
 }
 
@@ -709,6 +779,24 @@ fn read_hit_event_group(entry: &Group, group: &Group) -> Result<HitEventData> {
     let x = read_dataset_vec_opt::<u16>(group, "x")?;
     let y = read_dataset_vec_opt::<u16>(group, "y")?;
 
+    let optional = [
+        (
+            "time_over_threshold",
+            time_over_threshold_ns.as_ref().map(Vec::len),
+        ),
+        ("chip_id", chip_id.as_ref().map(Vec::len)),
+        ("cluster_id", cluster_id.as_ref().map(Vec::len)),
+        ("x", x.as_ref().map(Vec::len)),
+        ("y", y.as_ref().map(Vec::len)),
+    ];
+    check_event_layout(
+        event_id.len(),
+        event_time_offset_ns.len(),
+        &event_time_zero_ns,
+        &event_index,
+        &optional,
+    )?;
+
     let attrs = read_event_attrs(entry, group)?;
 
     Ok(HitEventData {
@@ -737,6 +825,24 @@ fn read_neutron_event_group(entry: &Group, group: &Group) -> Result<NeutronEvent
     let x = read_dataset_vec_opt_f64(group, "x")?;
     let y = read_dataset_vec_opt_f64(group, "y")?;
 
+    let optional = [
+        (
+            "time_over_threshold",
+            time_over_threshold_ns.as_ref().map(Vec::len),
+        ),
+        ("chip_id", chip_id.as_ref().map(Vec::len)),
+        ("n_hits", n_hits.as_ref().map(Vec::len)),
+        ("x", x.as_ref().map(Vec::len)),
+        ("y", y.as_ref().map(Vec::len)),
+    ];
+    check_event_layout(
+        event_id.len(),
+        event_time_offset_ns.len(),
+        &event_time_zero_ns,
+        &event_index,
+        &optional,
+    )?;
+
     let attrs = read_event_attrs(entry, group)?;
 
     Ok(NeutronEventData {
@@ -751,6 +857,38 @@ fn read_neutron_event_group(entry: &Group, group: &Group) -> Result<NeutronEvent
         y,
         attrs,
     })
+}
+
+/// Checks that per-event columns agree and that `event_index` addresses them in order.
+fn check_event_layout(
+    events: usize,
+    offsets: usize,
+    pulse_times: &[u64],
+    event_index: &[i32],
+    optional: &[(&str, Option<usize>)],
+) -> Result<()> {
+    let mut columns = vec![("event_time_offset", offsets)];
+    columns.extend(
+        optional
+            .iter()
+            .filter_map(|&(name, len)| len.map(|len| (name, len))),
+    );
+    check_columns("event group", events, &columns)?;
+    check_columns(
+        "event group pulses",
+        pulse_times.len(),
+        &[("event_index", event_index.len())],
+    )?;
+    let in_order = event_index.windows(2).all(|w| w[0] <= w[1]);
+    let in_range = event_index
+        .iter()
+        .all(|&i| usize::try_from(i).is_ok_and(|i| i <= events));
+    if !in_order || !in_range {
+        return Err(Error::InvalidFormat(
+            "event_index must be non-decreasing and within the event count".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn read_event_attrs(entry: &Group, group: &Group) -> Result<EventAttributes> {
@@ -922,6 +1060,18 @@ impl HitEventWriter {
 
     fn append_batch(&mut self, batch: &EventBatch, options: &HitWriteOptions) -> Result<()> {
         let count = batch.hits.len();
+        let hits = &batch.hits;
+        let mut columns = vec![("y", hits.y.len()), ("tof", hits.tof.len())];
+        if options.include_tot {
+            columns.push(("tot", hits.tot.len()));
+        }
+        if options.include_chip_id {
+            columns.push(("chip_id", hits.chip_id.len()));
+        }
+        if options.include_cluster_id {
+            columns.push(("cluster_id", hits.cluster_id.len()));
+        }
+        check_columns("hit batch", count, &columns)?;
         if count == 0 {
             return Ok(());
         }
@@ -939,10 +1089,22 @@ impl HitEventWriter {
 
         let mut event_id = Vec::with_capacity(count);
         for (&x, &y) in batch.hits.x.iter().zip(batch.hits.y.iter()) {
-            let id = u32::from(y) * options.x_size + u32::from(x);
-            let id = i32::try_from(id).map_err(|_| {
-                Error::InvalidFormat("event_id exceeds i32 range; adjust x_size/y_size".to_string())
-            })?;
+            let (x, y) = (u32::from(x), u32::from(y));
+            if x >= options.x_size || y >= options.y_size {
+                return Err(Error::InvalidFormat(format!(
+                    "hit ({x}, {y}) outside the {} x {} detector",
+                    options.x_size, options.y_size
+                )));
+            }
+            let id = y
+                .checked_mul(options.x_size)
+                .and_then(|row| row.checked_add(x))
+                .and_then(|id| i32::try_from(id).ok())
+                .ok_or_else(|| {
+                    Error::InvalidFormat(
+                        "event_id exceeds i32 range; adjust x_size/y_size".to_string(),
+                    )
+                })?;
             event_id.push(id);
         }
 
@@ -1147,6 +1309,7 @@ impl NeutronEventWriter {
         options: &NeutronWriteOptions,
     ) -> Result<()> {
         let count = batch.neutrons.len();
+        check_neutron_columns(&batch.neutrons, options)?;
         if count == 0 {
             return Ok(());
         }
@@ -1208,10 +1371,15 @@ impl NeutronEventWriter {
                 ));
             }
 
-            let id = y_u32 * options.x_size + x_u32;
-            let id = i32::try_from(id).map_err(|_| {
-                Error::InvalidFormat("event_id exceeds i32 range; adjust x_size/y_size".to_string())
-            })?;
+            let id = y_u32
+                .checked_mul(options.x_size)
+                .and_then(|row| row.checked_add(x_u32))
+                .and_then(|id| i32::try_from(id).ok())
+                .ok_or_else(|| {
+                    Error::InvalidFormat(
+                        "event_id exceeds i32 range; adjust x_size/y_size".to_string(),
+                    )
+                })?;
 
             x_values.push(x);
             y_values.push(y);
@@ -1481,6 +1649,9 @@ impl Hdf5HistogramSink {
 
     /// Increment histogram bins.
     ///
+    /// After an error, bins already accepted stay cached and are written by
+    /// the next successful flush; resubmitting them counts them twice.
+    ///
     /// # Errors
     /// Returns an error if indices are out of bounds or HDF5 writes fail.
     pub fn add_bins<I>(&mut self, bins: I) -> Result<()>
@@ -1562,10 +1733,20 @@ impl Hdf5HistogramSink {
         Ok(())
     }
 
+    /// Writes every cached chunk; on failure the unwritten chunks stay cached.
     fn flush_all(&mut self) -> Result<()> {
-        let cache = std::mem::take(&mut self.cache);
-        for (key, buffer) in cache {
-            self.flush_chunk(key, &buffer)?;
+        let keys: Vec<HistogramChunkKey> = self.cache.keys().copied().collect();
+        for key in keys {
+            let Some(buffer) = self.cache.remove(&key) else {
+                continue;
+            };
+            if let Err(err) = self.flush_chunk(key, &buffer) {
+                self.cache.insert(key, buffer);
+                return Err(err);
+            }
+            self.cache_bytes = self
+                .cache_bytes
+                .saturating_sub(buffer.len() * size_of::<u64>());
         }
         self.cache_bytes = 0;
         Ok(())
@@ -1625,6 +1806,8 @@ impl Drop for Hdf5HistogramSink {
 
 /// Writes histogram/hyperspectra data to an HDF5/NeXus file.
 ///
+/// An existing file at `path` is replaced only when the write succeeds.
+///
 /// # Errors
 /// Returns an error if HDF5 I/O fails or shapes are inconsistent.
 pub fn write_histogram_hdf5<P: AsRef<Path>>(
@@ -1633,7 +1816,16 @@ pub fn write_histogram_hdf5<P: AsRef<Path>>(
     options: &HistogramWriteOptions,
 ) -> Result<()> {
     validate_histogram_data(data)?;
+    write_then_replace(path.as_ref(), |temp| {
+        write_histogram_file(temp, data, options)
+    })
+}
 
+fn write_histogram_file(
+    path: &Path,
+    data: &HistogramWriteData,
+    options: &HistogramWriteOptions,
+) -> Result<()> {
     let file = File::create(path)?;
     set_attr_str_file(&file, "rustpix_format_version", "0.1")?;
 
@@ -1649,6 +1841,7 @@ pub fn write_histogram_hdf5<P: AsRef<Path>>(
     let histogram = create_histogram_group(&entry, options)?;
 
     write_histogram_datasets(&histogram, data, options)?;
+    file.flush()?;
     Ok(())
 }
 
@@ -1688,6 +1881,16 @@ pub fn read_histogram_hdf5<P: AsRef<Path>>(path: P) -> Result<HistogramData> {
     let x = read_dataset_vec::<f64>(&histogram, "x")?;
     let time_of_flight_ns = read_dataset_vec::<f64>(&histogram, "time_of_flight")?;
     let energy_ev = read_dataset_vec_opt::<f64>(&histogram, "energy_eV")?;
+    validate_histogram_axes(
+        shape,
+        rot_angle.len(),
+        y.len(),
+        x.len(),
+        time_of_flight_ns.len(),
+    )?;
+    if let Some(energy) = &energy_ev {
+        validate_axis_len("energy_eV", shape.time_of_flight, energy.len())?;
+    }
 
     let attrs = read_histogram_attrs(&entry, &histogram)?;
 
@@ -2235,7 +2438,9 @@ fn read_attr_opt_string(group: &Group, name: &str) -> Result<Option<String>> {
     match group.attr(name) {
         Ok(attr) => {
             let value: VarLenUnicode = attr.read_scalar()?;
-            Ok(Some(value.to_string()))
+            std::str::from_utf8(value.as_bytes())
+                .map(|text| Some(text.to_owned()))
+                .map_err(|e| Error::InvalidFormat(format!("attribute {name} is not UTF-8: {e}")))
         }
         Err(_) => Ok(None),
     }
@@ -2788,6 +2993,215 @@ mod tests {
 
         let err = write_neutrons_hdf5(file.path(), vec![event_batch], &options).unwrap_err();
         assert!(matches!(err, Error::InvalidFormat(_)));
+    }
+
+    fn partial_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".partial"))
+            .collect()
+    }
+
+    fn one_hit_batch() -> EventBatch {
+        let mut hits = HitBatch::with_capacity(1);
+        hits.push((1, 3, 10, 5, 100, 0));
+        EventBatch {
+            tdc_timestamp_25ns: 7,
+            hits,
+        }
+    }
+
+    fn histogram_with_tof_axis(tof_axis_len: usize) -> HistogramWriteData {
+        HistogramWriteData {
+            counts: vec![1, 2],
+            shape: HistogramShape {
+                rot_angle: 1,
+                y: 1,
+                x: 1,
+                time_of_flight: 2,
+            },
+            rot_angle: vec![0.0],
+            y: vec![0.0],
+            x: vec![0.0],
+            time_of_flight_ns: vec![10.0; tof_axis_len],
+        }
+    }
+
+    #[test]
+    fn test_hit_outside_detector_rejected() {
+        let mut hits = HitBatch::with_capacity(2);
+        hits.push((600, 3, 10, 5, 100, 0));
+        hits.push((88, 4, 10, 5, 100, 0));
+        let batch = EventBatch {
+            tdc_timestamp_25ns: 7,
+            hits,
+        };
+        let mut options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        options.x_size = 512;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hits.h5");
+
+        let err = write_hits_hdf5(&path, [batch], &options).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_mismatched_event_columns_rejected() {
+        let mut batch = one_hit_batch();
+        batch.hits.tof.clear();
+        let options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_hits_hdf5(dir.path().join("hits.h5"), [batch], &options).is_err());
+
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.push(8.0);
+        neutrons.y.push(8.0);
+        let batch = NeutronEventBatch {
+            tdc_timestamp_25ns: 1,
+            neutrons,
+        };
+        let options = NeutronWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        assert!(write_neutrons_hdf5(dir.path().join("n.h5"), [batch], &options).is_err());
+    }
+
+    #[test]
+    fn test_empty_x_column_with_other_data_is_rejected() {
+        let mut hits = HitBatch::default();
+        hits.y.push(1);
+        hits.tof.push(1);
+        let batch = EventBatch {
+            tdc_timestamp_25ns: 1,
+            hits,
+        };
+        let options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_hits_hdf5(dir.path().join("hits.h5"), [batch], &options).is_err());
+    }
+
+    #[test]
+    fn test_reader_rejects_inconsistent_event_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hits.h5");
+        let options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        write_hits_hdf5(&path, [one_hit_batch()], &options).unwrap();
+        assert!(read_hits_hdf5(&path).is_ok());
+
+        let file = File::open_rw(&path).unwrap();
+        let group = file.group("entry/hits").unwrap();
+        group.unlink("event_time_offset").unwrap();
+        group
+            .new_dataset_builder()
+            .with_data(&[1u64, 2])
+            .create("event_time_offset")
+            .unwrap();
+        drop(file);
+        assert!(read_hits_hdf5(&path).is_err());
+    }
+
+    #[test]
+    fn test_reader_rejects_histogram_axis_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("histogram.h5");
+        write_histogram_hdf5(
+            &path,
+            &histogram_with_tof_axis(2),
+            &HistogramWriteOptions::default(),
+        )
+        .unwrap();
+
+        let file = File::open_rw(&path).unwrap();
+        let group = file.group("entry/histogram").unwrap();
+        group.unlink("x").unwrap();
+        group
+            .new_dataset_builder()
+            .with_data(&[0.0f64, 1.0, 2.0])
+            .create("x")
+            .unwrap();
+        drop(file);
+        assert!(read_histogram_hdf5(&path).is_err());
+    }
+
+    #[test]
+    fn test_combined_write_failure_keeps_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.h5");
+        std::fs::write(&path, b"previous export").unwrap();
+
+        let hits = [one_hit_batch()];
+        let hit_options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        let histogram = histogram_with_tof_axis(5);
+        let histogram_options = HistogramWriteOptions::default();
+
+        let err = write_combined_hdf5_batches(
+            &path,
+            Some((&hits, &hit_options)),
+            None,
+            Some((&histogram, &histogram_options)),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidFormat(_)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+        assert_eq!(partial_files(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_failed_write_creates_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.h5");
+        let histogram = histogram_with_tof_axis(5);
+
+        assert!(
+            write_histogram_hdf5(&path, &histogram, &HistogramWriteOptions::default()).is_err()
+        );
+        assert!(!path.exists());
+
+        // A negative coordinate is rejected only once the file exists.
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.push(-5.0);
+        neutrons.y.push(1.0);
+        neutrons.tof.push(1);
+        neutrons.tot.push(1);
+        neutrons.n_hits.push(1);
+        neutrons.chip_id.push(0);
+        let batch = NeutronEventBatch {
+            tdc_timestamp_25ns: 1,
+            neutrons,
+        };
+        assert!(write_neutrons_hdf5(
+            &path,
+            [batch],
+            &NeutronWriteOptions::from_detector_config(&DetectorConfig::venus_defaults())
+        )
+        .is_err());
+        assert!(!path.exists());
+        assert_eq!(partial_files(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_successful_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.h5");
+        std::fs::write(&path, b"previous export").unwrap();
+
+        let hits = [one_hit_batch()];
+        let hit_options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        let histogram = histogram_with_tof_axis(2);
+        let histogram_options = HistogramWriteOptions::default();
+        write_combined_hdf5_batches(
+            &path,
+            Some((&hits, &hit_options)),
+            None,
+            Some((&histogram, &histogram_options)),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(read_hits_hdf5(&path).unwrap().event_id.len(), 1);
+        assert_eq!(read_histogram_hdf5(&path).unwrap().counts.len(), 2);
+        assert_eq!(partial_files(dir.path()), Vec::<String>::new());
     }
 
     #[test]

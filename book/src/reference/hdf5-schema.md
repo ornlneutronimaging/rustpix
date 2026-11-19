@@ -18,6 +18,7 @@ This document defines the on-disk HDF5 layout for rustpix event data and histogr
     hits/                    (NXevent_data) [optional]
     neutrons/                (NXevent_data) [optional]
     histogram/               (NXdata)       [optional]
+    pixel_masks/             (NXdata)       [optional]
     metadata/                (group)        [optional]
 ```
 
@@ -54,8 +55,8 @@ Event groups follow the NeXus **NXevent_data** base class, used by SNS/ISIS even
 | `chip_id` | u8 | (N) | id | Chip identifier |
 | `cluster_id` | i32 | (N) | id | Cluster assignment |
 | `n_hits` | u16 | (N) | count | Hits per neutron |
-| `x` | u16 | (N) | pixel | Global pixel X |
-| `y` | u16 | (N) | pixel | Global pixel Y |
+| `x` | u16 (hits), f64 (neutrons) | (N) | pixel | Global pixel X |
+| `y` | u16 (hits), f64 (neutrons) | (N) | pixel | Global pixel Y |
 
 ### Cluster ID Convention
 
@@ -71,6 +72,20 @@ event_id = y * x_size + x
 ```
 
 Group attributes `x_size` and `y_size` define the detector dimensions.
+
+For `neutrons`, `x` and `y` are `f64` centroids in super-resolution units, and
+the group attribute `super_resolution_factor` (f64) gives the scale. The
+`event_id` uses the pixel `round(x / super_resolution_factor)` (likewise for
+`y`). Writers reject events outside `x_size` x `y_size`.
+
+A pulse in which no event survives is not listed in `event_time_zero` /
+`event_index`, so the pulse count is that of pulses with events.
+
+### Pixel masks (optional)
+
+`entry/pixel_masks` (`NX_class = "NXdata"`) holds `dead` and `hot` masks of
+shape (`y_size`, `x_size`), with attributes `x_size`, `y_size`, `hot_sigma`,
+`hot_threshold`, `mean` and `std_dev` describing how they were computed.
 
 ## Histogram Data (NXdata)
 
@@ -161,14 +176,15 @@ rustpix also supports export in the ORNL SNS/HFIR `NXsnsevent` schema used by in
     end_time                       (string, ISO 8601)
     duration                       (f64, seconds)
     proton_charge                  (f64, picoCoulombs)
+    title                          (string, optional)
     total_counts                   (u64)
     total_pulses                   (u64)
     bank{N}_events/                (NXevent_data)
-      event_id                     (u32, N) [units=""]
+      event_id                     (u32, N)
       event_time_offset            (f32, N) [units="microsecond"]
       event_time_zero              (f64, P) [units="second"]
       event_index                  (u64, P)
-      total_counts                 (u64, scalar)
+      total_counts                 (u64, shape (1,))
     instrument/                    (NXinstrument)
       name                         (string, e.g. "VENUS")
       beamline                     (string, e.g. "BL10")
@@ -196,7 +212,7 @@ event_id = 1,000,000 + row * 512 + col
 Range: 1,000,000 to 1,262,143
 ```
 
-Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps), whereas the SNS schema uses a 512x512 pixel grid. The SNS writer handles the 514x514→512x512 gap-pixel remapping automatically via `SnsBankConfig.gap_columns`/`gap_rows`, so callers should provide logical detector coordinates and must not pre-remap them.
+Note: rustpix internally uses 514x514 coordinates (with 2-pixel chip gaps), whereas the SNS schema uses a 512x512 pixel grid. The SNS writer handles the 514x514→512x512 gap-pixel remapping automatically via `SnsBankConfig.gap_columns`/`gap_rows`, so callers should provide logical detector coordinates and must not pre-remap them. Hits on a gap pixel are dropped. A neutron whose centroid rounds onto a gap pixel is assigned to the nearer real pixel beside the gap.
 
 ### Reading SNS Files
 

@@ -35,6 +35,7 @@ This is a **format contract** for issues #47 and #48.
     hits/                    (NXevent_data) [optional]
     neutrons/                (NXevent_data) [optional]
     histogram/               (NXdata)       [optional]
+    pixel_masks/             (NXdata)       [optional]
     metadata/                (group)        [optional]
 ```
 
@@ -72,8 +73,8 @@ sources.
 | `chip_id`             | u8   | (N)   | id    | chip identifier |
 | `cluster_id`          | i32  | (N)   | id    | cluster assignment |
 | `n_hits`              | u16  | (N)   | count | hits per neutron (neutrons only) |
-| `x`                   | u16  | (N)   | pixel | global pixel X (auxiliary) |
-| `y`                   | u16  | (N)   | pixel | global pixel Y (auxiliary) |
+| `x`                   | u16 (hits), f64 (neutrons) | (N) | pixel | global pixel X (auxiliary) |
+| `y`                   | u16 (hits), f64 (neutrons) | (N) | pixel | global pixel Y (auxiliary) |
 
 Cluster assignment convention:
 
@@ -92,6 +93,20 @@ event_id = y * x_size + x
 
 with group attributes `x_size` and `y_size`. The auxiliary `x` and `y` datasets
 may also be provided for direct access and visualization.
+
+For `neutrons`, `x` and `y` are `f64` centroids in super-resolution units, and
+the group attribute `super_resolution_factor` (f64) gives the scale. The
+`event_id` uses the pixel `round(x / super_resolution_factor)` (likewise for
+`y`). Writers reject events outside `x_size` x `y_size`.
+
+A pulse in which no event survives is not listed in `event_time_zero` /
+`event_index`, so the pulse count is that of pulses with events.
+
+### Pixel masks (optional)
+
+`entry/pixel_masks` (`NX_class = "NXdata"`) holds `dead` and `hot` masks of
+shape (`y_size`, `x_size`), with attributes `x_size`, `y_size`, `hot_sigma`,
+`hot_threshold`, `mean` and `std_dev` describing how they were computed.
 
 ### Conversion metadata (attributes)
 
@@ -212,14 +227,15 @@ The SNS schema differs from the generic rustpix NeXus schema in several key ways
     end_time                       (string, ISO 8601)
     duration                       (f64, seconds)
     proton_charge                  (f64, picoCoulombs)
+    title                          (string, optional)
     total_counts                   (u64)
     total_pulses                   (u64)
     bank{N}_events/                (NXevent_data)
-      event_id                     (u32, N) [units=""]
+      event_id                     (u32, N)
       event_time_offset            (f32, N) [units="microsecond"]
       event_time_zero              (f64, P) [units="second"]
       event_index                  (u64, P)
-      total_counts                 (u64, scalar)
+      total_counts                 (u64, shape (1,))
     instrument/                    (NXinstrument)
       name                         (string, e.g. "VENUS")
       beamline                     (string, e.g. "BL10")
