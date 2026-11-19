@@ -18,7 +18,7 @@
 )]
 
 use crate::hdf5::{
-    append_slice, create_extendable_dataset, set_attr_str_group, set_dataset_units,
+    append_slice, check_columns, create_extendable_dataset, set_attr_str_group, set_dataset_units,
     to_var_len_unicode, NeutronEventBatch,
 };
 use crate::reader::EventBatch;
@@ -33,6 +33,29 @@ use std::path::Path;
 
 const NS_PER_TICK: u64 = 25;
 const US_PER_TICK: f64 = 25.0 / 1000.0;
+
+/// Moves a centroid that rounds onto a gap pixel to the nearer real pixel beside the gap.
+///
+/// `exact` is the unrounded coordinate and `rounded` its rounding; the pixel
+/// returned is `rounded` itself when that is not a gap pixel.
+fn step_off_gap(exact: f64, rounded: u32, gaps: &[u32]) -> u32 {
+    if !gaps.contains(&rounded) {
+        return rounded;
+    }
+    let mut low = rounded;
+    while low > 0 && gaps.contains(&low) {
+        low -= 1;
+    }
+    let mut high = rounded;
+    while gaps.contains(&high) {
+        high += 1;
+    }
+    if gaps.contains(&low) || f64::from(high) - exact < exact - f64::from(low) {
+        high
+    } else {
+        low
+    }
+}
 
 /// Remap a coordinate from the source grid (which may contain chip-gap pixels)
 /// to the target grid (which does not).
@@ -336,8 +359,8 @@ impl SnsBankEventWriter {
             if !fx.is_finite() || !fy.is_finite() || fx < 0.0 || fy < 0.0 {
                 continue;
             }
-            let raw_x = fx as u32;
-            let raw_y = fy as u32;
+            let raw_x = step_off_gap(batch.neutrons.x[i] * inv, fx as u32, &bank.gap_columns);
+            let raw_y = step_off_gap(batch.neutrons.y[i] * inv, fy as u32, &bank.gap_rows);
             let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
                 continue;
             };
@@ -558,7 +581,13 @@ impl SnsEventSink {
             )));
         }
 
-        let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
+        let hits = &batch.hits;
+        check_columns(
+            "hit batch",
+            hits.x.len(),
+            &[("y", hits.y.len()), ("tof", hits.tof.len())],
+        )?;
+        let pulse_ns = pulse_ns_from_ticks(batch.tdc_timestamp_25ns)?;
         self.validate_pulse_monotonicity(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
@@ -593,7 +622,13 @@ impl SnsEventSink {
             )));
         }
 
-        let pulse_ns = batch.tdc_timestamp_25ns * NS_PER_TICK;
+        let neutrons = &batch.neutrons;
+        check_columns(
+            "neutron batch",
+            neutrons.x.len(),
+            &[("y", neutrons.y.len()), ("tof", neutrons.tof.len())],
+        )?;
+        let pulse_ns = pulse_ns_from_ticks(batch.tdc_timestamp_25ns)?;
         self.validate_pulse_monotonicity(pulse_ns, bank_index)?;
 
         let (ref bank, ref mut writer) = self.writers[bank_index];
@@ -666,7 +701,6 @@ impl SnsEventSink {
         if self.finalized {
             return Ok(());
         }
-        self.finalized = true;
 
         // Compute the global minimum pulse timestamp across all banks.
         // This is the time origin for event_time_zero.
@@ -685,21 +719,28 @@ impl SnsEventSink {
         // Compute and write end_time and duration from pulse timestamps.
         // `min_pulse_ns` and `max_pulse_ns` are *relative* detector tick counts,
         // not Unix-epoch nanoseconds — the delta gives the measurement duration.
+        // Duration and end time are derived only where the caller supplied none.
         if self.min_pulse_ns.is_some() {
-            let duration_s =
+            let measured_s =
                 (self.max_pulse_ns.saturating_sub(min_start_ns)) as f64 / 1_000_000_000.0;
-            overwrite_f64_dataset(&self.entry, "duration", duration_s)?;
+            let duration_s = if let Some(given) = self.options.run.duration {
+                given
+            } else {
+                overwrite_f64_dataset(&self.entry, "duration", measured_s)?;
+                measured_s
+            };
 
-            // Derive end_time by adding duration to the human-supplied start_time.
-            // Truncate to whole seconds — the exact duration is already stored
-            // as an f64 in the `duration` dataset.
-            if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
-                let end_epoch = start_epoch + duration_s as u64;
-                let end_time = epoch_secs_to_iso8601(end_epoch);
-                overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+            // Whole seconds; the exact duration is in the `duration` dataset.
+            if self.options.run.end_time.is_none() {
+                if let Some(start_epoch) = iso8601_to_epoch_secs(&self.options.run.start_time) {
+                    let end_epoch = start_epoch.saturating_add(duration_s.max(0.0) as u64);
+                    let end_time = epoch_secs_to_iso8601(end_epoch);
+                    overwrite_str_dataset(&self.entry, "end_time", &end_time)?;
+                }
             }
         }
 
+        self.finalized = true;
         Ok(())
     }
 
@@ -888,6 +929,13 @@ fn epoch_secs_to_iso8601(secs: u64) -> String {
     )
 }
 
+/// Pulse time in ns from a timestamp in 25 ns ticks.
+fn pulse_ns_from_ticks(ticks: u64) -> Result<u64> {
+    ticks.checked_mul(NS_PER_TICK).ok_or_else(|| {
+        Error::InvalidFormat(format!("pulse timestamp {ticks} overflows u64 nanoseconds"))
+    })
+}
+
 /// Parse a subset of ISO 8601 strings into Unix epoch seconds (UTC).
 ///
 /// Accepted formats: `YYYY-MM-DDThh:mm:ssZ`, `YYYY-MM-DDThh:mm:ss±hh:mm`.
@@ -897,12 +945,32 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
     if s.len() < 19 {
         return None;
     }
-    let year: i64 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
-    let hour: i64 = s.get(11..13)?.parse().ok()?;
-    let min: i64 = s.get(14..16)?.parse().ok()?;
-    let sec: i64 = s.get(17..19)?.parse().ok()?;
+    let digits = |range: std::ops::Range<usize>| -> Option<i64> {
+        let field = s.get(range)?;
+        if field.bytes().all(|b| b.is_ascii_digit()) {
+            field.parse().ok()
+        } else {
+            None
+        }
+    };
+    let bytes = s.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let year = digits(0..4)?;
+    let month = u32::try_from(digits(5..7)?).ok()?;
+    let day = u32::try_from(digits(8..10)?).ok()?;
+    let hour = digits(11..13)?;
+    let min = digits(14..16)?;
+    let sec = digits(17..19)?;
+    if year < 1970 || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
 
     // Timezone offset (after position 19): 'Z', ±hh:mm, or absent.
     // Reject any other suffix (e.g. fractional seconds like ".123Z",
@@ -913,9 +981,21 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
             0
         } else if tz.starts_with('+') || tz.starts_with('-') {
             let sign: i64 = if tz.starts_with('+') { 1 } else { -1 };
-            let tz = &tz[1..];
-            let oh: i64 = tz.get(0..2).and_then(|v| v.parse().ok())?;
-            let om: i64 = tz.get(3..5).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let tz = &tz.as_bytes()[1..];
+            if tz.len() != 5
+                || tz[2] != b':'
+                || !tz
+                    .iter()
+                    .enumerate()
+                    .all(|(i, b)| i == 2 || b.is_ascii_digit())
+            {
+                return None;
+            }
+            let oh = i64::from(tz[0] - b'0') * 10 + i64::from(tz[1] - b'0');
+            let om = i64::from(tz[3] - b'0') * 10 + i64::from(tz[4] - b'0');
+            if oh > 23 || om > 59 {
+                return None;
+            }
             sign * (oh * 3600 + om * 60)
         } else {
             return None; // unsupported suffix
@@ -946,7 +1026,7 @@ fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
         30,
         31,
     ];
-    if month == 0 || month > 12 || day == 0 {
+    if month == 0 || month > 12 || day == 0 || day > month_days[month as usize - 1] {
         return None;
     }
     for &md in &month_days[..(month as usize - 1)] {
@@ -1925,6 +2005,100 @@ mod tests {
             .read_raw()
             .unwrap();
         assert_eq!(ids, vec![1_000_000 + 511 * 512 + 511]);
+    }
+
+    fn written_ids(path: &Path) -> Vec<u32> {
+        File::open(path)
+            .unwrap()
+            .group("entry/bank100_events")
+            .unwrap()
+            .dataset("event_id")
+            .unwrap()
+            .read_raw()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_neutron_on_gap_moves_to_the_nearer_pixel() {
+        // Source columns 256 and 257 are the gap; 255 and 258 lie either side.
+        let mut opts = make_test_options();
+        opts.super_resolution_factor = 1.0;
+        let xs = [255.4, 255.5, 256.4, 256.6, 257.5, 257.6, 100.0];
+        let batch = make_neutron_batch(1000, &xs, &[10.0; 7], &[100; 7]);
+        let file = NamedTempFile::new().unwrap();
+
+        let mut sink = SnsEventSink::create(file.path(), opts).unwrap();
+        sink.write_neutrons(0, &batch).unwrap();
+        sink.finalize().unwrap();
+
+        let columns: Vec<u32> = written_ids(file.path())
+            .iter()
+            .map(|id| (id - 1_000_000) % 512)
+            .collect();
+        // Source 258 becomes bank column 256 once the two gap columns are removed.
+        assert_eq!(columns, vec![255, 255, 255, 256, 256, 256, 100]);
+    }
+
+    #[test]
+    fn test_mismatched_batch_columns_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let mut sink = SnsEventSink::create(file.path(), make_test_options()).unwrap();
+
+        let mut hits = make_hit_batch(1000, &[1, 2], &[1, 2], &[100, 200]);
+        hits.hits.tof.pop();
+        assert!(sink.write_hits(0, &hits).is_err());
+
+        let mut neutrons = make_neutron_batch(2000, &[8.0], &[8.0], &[100]);
+        neutrons.neutrons.tof.clear();
+        assert!(sink.write_neutrons(0, &neutrons).is_err());
+    }
+
+    #[test]
+    fn test_pulse_timestamp_overflow_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let mut sink = SnsEventSink::create(file.path(), make_test_options()).unwrap();
+        let batch = make_hit_batch(u64::MAX / 2, &[1], &[1], &[100]);
+        assert!(sink.write_hits(0, &batch).is_err());
+    }
+
+    #[test]
+    fn test_supplied_end_time_and_duration_are_kept() {
+        let mut opts = make_test_options();
+        opts.run.end_time = Some("2025-01-01T01:00:00-05:00".to_string());
+        opts.run.duration = Some(3600.0);
+        let file = NamedTempFile::new().unwrap();
+
+        let mut sink = SnsEventSink::create(file.path(), opts).unwrap();
+        sink.write_hits(0, &make_hit_batch(1000, &[1], &[1], &[100]))
+            .unwrap();
+        sink.write_hits(0, &make_hit_batch(41_000_000, &[1], &[1], &[100]))
+            .unwrap();
+        sink.finalize().unwrap();
+
+        let meta = SnsEventReader::open(file.path()).unwrap().metadata();
+        assert_eq!(meta.end_time.as_deref(), Some("2025-01-01T01:00:00-05:00"));
+        assert_eq!(meta.duration_s, Some(3600.0));
+    }
+
+    #[test]
+    fn test_iso8601_rejects_malformed_fields() {
+        assert_eq!(
+            iso8601_to_epoch_secs("2025-01-01T05:30:00+05:30"),
+            iso8601_to_epoch_secs("2025-01-01T00:00:00Z")
+        );
+        for bad in [
+            "2025-01-01T00:00:00+0530",
+            "2025-02-30T00:00:00Z",
+            "2025-13-01T00:00:00Z",
+            "2025-01-01T24:00:00Z",
+            "2025-01-01T00:61:00Z",
+            "2025-01-01 00:00:00Z",
+            "2025-01-01T00:00:00+05",
+            "2025-1-001T00:00:00Z",
+        ] {
+            assert_eq!(iso8601_to_epoch_secs(bad), None, "{bad}");
+        }
+        assert!(iso8601_to_epoch_secs("2024-02-29T00:00:00Z").is_some());
     }
 
     #[test]

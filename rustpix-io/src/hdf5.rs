@@ -15,6 +15,32 @@ use std::path::Path;
 use std::str::FromStr;
 
 const NS_PER_TICK: u64 = 25;
+
+fn check_neutron_columns(neutrons: &NeutronBatch, options: &NeutronWriteOptions) -> Result<()> {
+    let mut columns = vec![("y", neutrons.y.len()), ("tof", neutrons.tof.len())];
+    if options.include_tot {
+        columns.push(("tot", neutrons.tot.len()));
+    }
+    if options.include_chip_id {
+        columns.push(("chip_id", neutrons.chip_id.len()));
+    }
+    if options.include_n_hits {
+        columns.push(("n_hits", neutrons.n_hits.len()));
+    }
+    check_columns("neutron batch", neutrons.x.len(), &columns)
+}
+
+/// Errors unless every named column has `len` entries.
+pub(crate) fn check_columns(what: &str, len: usize, columns: &[(&str, usize)]) -> Result<()> {
+    for &(name, column_len) in columns {
+        if column_len != len {
+            return Err(Error::InvalidFormat(format!(
+                "{what}: column {name} has {column_len} entries, expected {len}"
+            )));
+        }
+    }
+    Ok(())
+}
 const HISTOGRAM_AXES: [&str; 4] = ["rot_angle", "y", "x", "time_of_flight"];
 
 /// Streaming writer for hit events in `NXevent_data`.
@@ -750,6 +776,24 @@ fn read_hit_event_group(entry: &Group, group: &Group) -> Result<HitEventData> {
     let x = read_dataset_vec_opt::<u16>(group, "x")?;
     let y = read_dataset_vec_opt::<u16>(group, "y")?;
 
+    let optional = [
+        (
+            "time_over_threshold",
+            time_over_threshold_ns.as_ref().map(Vec::len),
+        ),
+        ("chip_id", chip_id.as_ref().map(Vec::len)),
+        ("cluster_id", cluster_id.as_ref().map(Vec::len)),
+        ("x", x.as_ref().map(Vec::len)),
+        ("y", y.as_ref().map(Vec::len)),
+    ];
+    check_event_layout(
+        event_id.len(),
+        event_time_offset_ns.len(),
+        &event_time_zero_ns,
+        &event_index,
+        &optional,
+    )?;
+
     let attrs = read_event_attrs(entry, group)?;
 
     Ok(HitEventData {
@@ -778,6 +822,24 @@ fn read_neutron_event_group(entry: &Group, group: &Group) -> Result<NeutronEvent
     let x = read_dataset_vec_opt_f64(group, "x")?;
     let y = read_dataset_vec_opt_f64(group, "y")?;
 
+    let optional = [
+        (
+            "time_over_threshold",
+            time_over_threshold_ns.as_ref().map(Vec::len),
+        ),
+        ("chip_id", chip_id.as_ref().map(Vec::len)),
+        ("n_hits", n_hits.as_ref().map(Vec::len)),
+        ("x", x.as_ref().map(Vec::len)),
+        ("y", y.as_ref().map(Vec::len)),
+    ];
+    check_event_layout(
+        event_id.len(),
+        event_time_offset_ns.len(),
+        &event_time_zero_ns,
+        &event_index,
+        &optional,
+    )?;
+
     let attrs = read_event_attrs(entry, group)?;
 
     Ok(NeutronEventData {
@@ -792,6 +854,38 @@ fn read_neutron_event_group(entry: &Group, group: &Group) -> Result<NeutronEvent
         y,
         attrs,
     })
+}
+
+/// Checks that per-event columns agree and that `event_index` addresses them in order.
+fn check_event_layout(
+    events: usize,
+    offsets: usize,
+    pulse_times: &[u64],
+    event_index: &[i32],
+    optional: &[(&str, Option<usize>)],
+) -> Result<()> {
+    let mut columns = vec![("event_time_offset", offsets)];
+    columns.extend(
+        optional
+            .iter()
+            .filter_map(|&(name, len)| len.map(|len| (name, len))),
+    );
+    check_columns("event group", events, &columns)?;
+    check_columns(
+        "event group pulses",
+        pulse_times.len(),
+        &[("event_index", event_index.len())],
+    )?;
+    let in_order = event_index.windows(2).all(|w| w[0] <= w[1]);
+    let in_range = event_index
+        .iter()
+        .all(|&i| usize::try_from(i).is_ok_and(|i| i <= events));
+    if !in_order || !in_range {
+        return Err(Error::InvalidFormat(
+            "event_index must be non-decreasing and within the event count".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn read_event_attrs(entry: &Group, group: &Group) -> Result<EventAttributes> {
@@ -966,6 +1060,18 @@ impl HitEventWriter {
         if count == 0 {
             return Ok(());
         }
+        let hits = &batch.hits;
+        let mut columns = vec![("y", hits.y.len()), ("tof", hits.tof.len())];
+        if options.include_tot {
+            columns.push(("tot", hits.tot.len()));
+        }
+        if options.include_chip_id {
+            columns.push(("chip_id", hits.chip_id.len()));
+        }
+        if options.include_cluster_id {
+            columns.push(("cluster_id", hits.cluster_id.len()));
+        }
+        check_columns("hit batch", count, &columns)?;
 
         let event_start = self.event_count;
         let event_end = event_start + count;
@@ -980,10 +1086,22 @@ impl HitEventWriter {
 
         let mut event_id = Vec::with_capacity(count);
         for (&x, &y) in batch.hits.x.iter().zip(batch.hits.y.iter()) {
-            let id = u32::from(y) * options.x_size + u32::from(x);
-            let id = i32::try_from(id).map_err(|_| {
-                Error::InvalidFormat("event_id exceeds i32 range; adjust x_size/y_size".to_string())
-            })?;
+            let (x, y) = (u32::from(x), u32::from(y));
+            if x >= options.x_size || y >= options.y_size {
+                return Err(Error::InvalidFormat(format!(
+                    "hit ({x}, {y}) outside the {} x {} detector",
+                    options.x_size, options.y_size
+                )));
+            }
+            let id = y
+                .checked_mul(options.x_size)
+                .and_then(|row| row.checked_add(x))
+                .and_then(|id| i32::try_from(id).ok())
+                .ok_or_else(|| {
+                    Error::InvalidFormat(
+                        "event_id exceeds i32 range; adjust x_size/y_size".to_string(),
+                    )
+                })?;
             event_id.push(id);
         }
 
@@ -1191,6 +1309,7 @@ impl NeutronEventWriter {
         if count == 0 {
             return Ok(());
         }
+        check_neutron_columns(&batch.neutrons, options)?;
 
         let event_start = self.event_count;
         let event_end = event_start + count;
@@ -1249,10 +1368,15 @@ impl NeutronEventWriter {
                 ));
             }
 
-            let id = y_u32 * options.x_size + x_u32;
-            let id = i32::try_from(id).map_err(|_| {
-                Error::InvalidFormat("event_id exceeds i32 range; adjust x_size/y_size".to_string())
-            })?;
+            let id = y_u32
+                .checked_mul(options.x_size)
+                .and_then(|row| row.checked_add(x_u32))
+                .and_then(|id| i32::try_from(id).ok())
+                .ok_or_else(|| {
+                    Error::InvalidFormat(
+                        "event_id exceeds i32 range; adjust x_size/y_size".to_string(),
+                    )
+                })?;
 
             x_values.push(x);
             y_values.push(y);
@@ -1603,10 +1727,20 @@ impl Hdf5HistogramSink {
         Ok(())
     }
 
+    /// Writes every cached chunk; on failure the unwritten chunks stay cached.
     fn flush_all(&mut self) -> Result<()> {
-        let cache = std::mem::take(&mut self.cache);
-        for (key, buffer) in cache {
-            self.flush_chunk(key, &buffer)?;
+        let keys: Vec<HistogramChunkKey> = self.cache.keys().copied().collect();
+        for key in keys {
+            let Some(buffer) = self.cache.remove(&key) else {
+                continue;
+            };
+            if let Err(err) = self.flush_chunk(key, &buffer) {
+                self.cache.insert(key, buffer);
+                return Err(err);
+            }
+            self.cache_bytes = self
+                .cache_bytes
+                .saturating_sub(buffer.len() * size_of::<u64>());
         }
         self.cache_bytes = 0;
         Ok(())
@@ -1740,6 +1874,16 @@ pub fn read_histogram_hdf5<P: AsRef<Path>>(path: P) -> Result<HistogramData> {
     let x = read_dataset_vec::<f64>(&histogram, "x")?;
     let time_of_flight_ns = read_dataset_vec::<f64>(&histogram, "time_of_flight")?;
     let energy_ev = read_dataset_vec_opt::<f64>(&histogram, "energy_eV")?;
+    validate_histogram_axes(
+        shape,
+        rot_angle.len(),
+        y.len(),
+        x.len(),
+        time_of_flight_ns.len(),
+    )?;
+    if let Some(energy) = &energy_ev {
+        validate_axis_len("energy_eV", shape.time_of_flight, energy.len())?;
+    }
 
     let attrs = read_histogram_attrs(&entry, &histogram)?;
 
@@ -2875,6 +3019,87 @@ mod tests {
             x: vec![0.0],
             time_of_flight_ns: vec![10.0; tof_axis_len],
         }
+    }
+
+    #[test]
+    fn test_hit_outside_detector_rejected() {
+        let mut hits = HitBatch::with_capacity(2);
+        hits.push((600, 3, 10, 5, 100, 0));
+        hits.push((88, 4, 10, 5, 100, 0));
+        let batch = EventBatch {
+            tdc_timestamp_25ns: 7,
+            hits,
+        };
+        let mut options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        options.x_size = 512;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hits.h5");
+
+        let err = write_hits_hdf5(&path, [batch], &options).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_mismatched_event_columns_rejected() {
+        let mut batch = one_hit_batch();
+        batch.hits.tof.clear();
+        let options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_hits_hdf5(dir.path().join("hits.h5"), [batch], &options).is_err());
+
+        let mut neutrons = NeutronBatch::with_capacity(1);
+        neutrons.x.push(8.0);
+        neutrons.y.push(8.0);
+        let batch = NeutronEventBatch {
+            tdc_timestamp_25ns: 1,
+            neutrons,
+        };
+        let options = NeutronWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        assert!(write_neutrons_hdf5(dir.path().join("n.h5"), [batch], &options).is_err());
+    }
+
+    #[test]
+    fn test_reader_rejects_inconsistent_event_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hits.h5");
+        let options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        write_hits_hdf5(&path, [one_hit_batch()], &options).unwrap();
+        assert!(read_hits_hdf5(&path).is_ok());
+
+        let file = File::open_rw(&path).unwrap();
+        let group = file.group("entry/hits").unwrap();
+        group.unlink("event_time_offset").unwrap();
+        group
+            .new_dataset_builder()
+            .with_data(&[1u64, 2])
+            .create("event_time_offset")
+            .unwrap();
+        drop(file);
+        assert!(read_hits_hdf5(&path).is_err());
+    }
+
+    #[test]
+    fn test_reader_rejects_histogram_axis_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("histogram.h5");
+        write_histogram_hdf5(
+            &path,
+            &histogram_with_tof_axis(2),
+            &HistogramWriteOptions::default(),
+        )
+        .unwrap();
+
+        let file = File::open_rw(&path).unwrap();
+        let group = file.group("entry/histogram").unwrap();
+        group.unlink("x").unwrap();
+        group
+            .new_dataset_builder()
+            .with_data(&[0.0f64, 1.0, 2.0])
+            .create("x")
+            .unwrap();
+        drop(file);
+        assert!(read_histogram_hdf5(&path).is_err());
     }
 
     #[test]
