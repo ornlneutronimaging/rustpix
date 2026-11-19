@@ -96,7 +96,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer times the copy of the input. Its first output line now also
   reports the pulse count.
 - The SNS writer assigns a neutron whose centroid rounds onto a chip-gap
-  pixel to the nearer real pixel instead of dropping it.
+  pixel to the nearer real pixel inside the bank instead of dropping it.
+- One-shot HDF5 exports keep an existing destination's permissions; a
+  symbolic link at the destination is replaced by the new file, not followed.
+- `SnsEventSink::create` rejects bank geometries whose pixel IDs or
+  coordinates do not fit, and a run duration that is not between 0 and 1e10 s.
+- The SNS reader returns an error for an unparseable ISO `offset` on
+  `event_time_zero` when there is no EPICS offset to fall back on.
 - `docs/hdf5_schema.md` and the book describe the pixel-mask group, neutron
   `f64` coordinates and `super_resolution_factor`, the SNS `title` and the
   `(1,)` shape of a bank's `total_counts`.

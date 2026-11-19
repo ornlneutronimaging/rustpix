@@ -38,22 +38,24 @@ const US_PER_TICK: f64 = 25.0 / 1000.0;
 ///
 /// `exact` is the unrounded coordinate and `rounded` its rounding; the pixel
 /// returned is `rounded` itself when that is not a gap pixel.
-fn step_off_gap(exact: f64, rounded: u32, gaps: &[u32]) -> u32 {
+fn step_off_gap(exact: f64, rounded: u32, gaps: &[u32], bank_size: u32) -> u32 {
     if !gaps.contains(&rounded) {
         return rounded;
     }
+    let in_bank = |c: u32| remap_gap(c, gaps).is_some_and(|v| v < bank_size);
     let mut low = rounded;
     while low > 0 && gaps.contains(&low) {
         low -= 1;
     }
     let mut high = rounded;
-    while gaps.contains(&high) {
+    while high < u32::MAX && gaps.contains(&high) {
         high += 1;
     }
-    if gaps.contains(&low) || f64::from(high) - exact < exact - f64::from(low) {
-        high
-    } else {
-        low
+    match (in_bank(low), in_bank(high)) {
+        (true, true) if f64::from(high) - exact < exact - f64::from(low) => high,
+        (true, _) => low,
+        (false, true) => high,
+        (false, false) => rounded, // dropped by the caller's gap check
     }
 }
 
@@ -359,8 +361,18 @@ impl SnsBankEventWriter {
             if !fx.is_finite() || !fy.is_finite() || fx < 0.0 || fy < 0.0 {
                 continue;
             }
-            let raw_x = step_off_gap(batch.neutrons.x[i] * inv, fx as u32, &bank.gap_columns);
-            let raw_y = step_off_gap(batch.neutrons.y[i] * inv, fy as u32, &bank.gap_rows);
+            let raw_x = step_off_gap(
+                batch.neutrons.x[i] * inv,
+                fx as u32,
+                &bank.gap_columns,
+                bank.width,
+            );
+            let raw_y = step_off_gap(
+                batch.neutrons.y[i] * inv,
+                fy as u32,
+                &bank.gap_rows,
+                bank.height,
+            );
             let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
                 continue;
             };
@@ -427,7 +439,7 @@ impl SnsBankEventWriter {
 /// Writes event data in bank-based format with pulse-indexed structure.
 /// Call [`Self::write_hits`] or [`Self::write_neutrons`] per pulse, then [`Self::finalize`].
 pub struct SnsEventSink {
-    _file: File,
+    file: File,
     entry: Group,
     writers: Vec<(SnsBankConfig, SnsBankEventWriter)>,
     options: SnsWriteOptions,
@@ -464,6 +476,16 @@ impl SnsEventSink {
             return Err(crate::Error::InvalidFormat(format!(
                 "super_resolution_factor must be finite and positive, got {srf}"
             )));
+        }
+        if let Some(duration) = options.run.duration {
+            if !(duration.is_finite() && (0.0..=MAX_DURATION_S).contains(&duration)) {
+                return Err(crate::Error::InvalidFormat(format!(
+                    "run duration must be between 0 and {MAX_DURATION_S} s, got {duration}"
+                )));
+            }
+        }
+        for bank in &options.banks {
+            check_bank_geometry(bank)?;
         }
 
         let file = File::create(path)?;
@@ -548,7 +570,7 @@ impl SnsEventSink {
 
         let num_banks = writers.len();
         Ok(Self {
-            _file: file,
+            file,
             entry,
             writers,
             options,
@@ -740,6 +762,7 @@ impl SnsEventSink {
             }
         }
 
+        self.file.flush()?;
         self.finalized = true;
         Ok(())
     }
@@ -927,6 +950,26 @@ fn epoch_secs_to_iso8601(secs: u64) -> String {
         m + 1,
         d + 1,
     )
+}
+
+/// Longest run duration accepted from the caller, in seconds (about 317 years).
+const MAX_DURATION_S: f64 = 1e10;
+
+/// Errors unless every pixel ID of the bank fits `u32` and coordinates fit `u16`.
+fn check_bank_geometry(bank: &SnsBankConfig) -> Result<()> {
+    let last_id = u64::from(bank.width) * u64::from(bank.height) + u64::from(bank.pixel_id_offset);
+    if bank.width == 0
+        || bank.height == 0
+        || bank.width > 65_536
+        || bank.height > 65_536
+        || last_id > u64::from(u32::MAX) + 1
+    {
+        return Err(Error::InvalidFormat(format!(
+            "bank {}: {} x {} pixels from ID {} do not fit 16-bit coordinates and 32-bit IDs",
+            bank.name, bank.width, bank.height, bank.pixel_id_offset
+        )));
+    }
+    Ok(())
 }
 
 /// Pulse time in ns from a timestamp in 25 ns ticks.
@@ -1232,12 +1275,8 @@ impl SnsEventReader {
             .to_vec();
 
         // Decode pixel IDs to x/y on the bank grid.
-        let area = config.width.checked_mul(config.height).ok_or_else(|| {
-            Error::InvalidFormat(format!(
-                "bank {} size {} x {} overflows u32",
-                config.name, config.width, config.height
-            ))
-        })?;
+        check_bank_geometry(config)?;
+        let area = config.width * config.height;
         events.x.reserve(events.event_id.len());
         events.y.reserve(events.event_id.len());
         for &id in &events.event_id {
@@ -1392,6 +1431,9 @@ fn read_scalar_or_single<T: H5Type + Clone>(attr: &Attribute) -> Option<T> {
     if let Ok(value) = attr.read_scalar::<T>() {
         return Some(value);
     }
+    if attr.size() != 1 {
+        return None;
+    }
     match attr.read_raw::<T>() {
         Ok(values) if values.len() == 1 => values.into_iter().next(),
         _ => None,
@@ -1430,8 +1472,9 @@ fn pulse_offset_ns(dataset: &Dataset) -> Result<u64> {
             })
     };
     let frac_attr = attr_u32("offset_nanoseconds");
-    if let Some(iso) = read_string_attr(dataset, "offset") {
-        if let Some((secs, frac_iso)) = iso8601_to_epoch_secs_frac(&iso) {
+    let iso = read_string_attr(dataset, "offset");
+    if let Some(iso) = &iso {
+        if let Some((secs, frac_iso)) = iso8601_to_epoch_secs_frac(iso) {
             return to_ns(secs, frac_attr.unwrap_or(frac_iso));
         }
     }
@@ -1439,7 +1482,12 @@ fn pulse_offset_ns(dataset: &Dataset) -> Result<u64> {
         Some(secs) if secs != 0 => {
             to_ns(u64::from(secs) + EPICS_EPOCH_UNIX_S, frac_attr.unwrap_or(0))
         }
-        _ => Ok(0),
+        _ => match iso {
+            Some(iso) => Err(Error::InvalidFormat(format!(
+                "event_time_zero offset {iso:?} is not a supported ISO 8601 time"
+            ))),
+            None => Ok(0),
+        },
     }
 }
 
@@ -2099,6 +2147,72 @@ mod tests {
             assert_eq!(iso8601_to_epoch_secs(bad), None, "{bad}");
         }
         assert!(iso8601_to_epoch_secs("2024-02-29T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn test_gap_snapping_stays_inside_the_bank() {
+        // Columns 0 and 1 are real, column 2 is a trailing gap.
+        assert_eq!(step_off_gap(2.25, 2, &[2], 2), 1);
+        // An interior gap still picks the nearer side.
+        assert_eq!(step_off_gap(256.6, 257, &[256, 257], 512), 258);
+        assert_eq!(step_off_gap(256.4, 256, &[256, 257], 512), 255);
+    }
+
+    #[test]
+    fn test_invalid_bank_geometry_and_duration_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let mut opts = make_test_options();
+        opts.banks[0].pixel_id_offset = u32::MAX;
+        assert!(SnsEventSink::create(file.path(), opts).is_err());
+
+        let mut opts = make_test_options();
+        opts.banks[0].width = 65_537;
+        assert!(SnsEventSink::create(file.path(), opts).is_err());
+
+        for duration in [1e18, -1.0, f64::NAN] {
+            let mut opts = make_test_options();
+            opts.run.duration = Some(duration);
+            assert!(
+                SnsEventSink::create(file.path(), opts).is_err(),
+                "{duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_one_shot_staging_never_reuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        let decoy = dir.path().join(format!(
+            ".rustpix-{}-0-00000000.partial",
+            std::process::id()
+        ));
+        std::fs::write(&decoy, b"not ours").unwrap();
+        write_hits_sns(
+            &path,
+            vec![make_hit_batch(1000, &[1], &[1], &[100])],
+            &make_test_options(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"not ours");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_one_shot_keeps_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_hits_sns(
+            &path,
+            vec![make_hit_batch(1000, &[1], &[1], &[100])],
+            &make_test_options(),
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

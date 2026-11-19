@@ -311,3 +311,54 @@ fn invalid_utf8_metadata_is_not_returned() {
 
     assert_eq!(reader(&path).metadata().title, None);
 }
+
+#[test]
+fn malformed_offset_without_fallback_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("run.nxs.h5");
+    let (file, group) = single_event_file(&path, 0.0);
+    group
+        .dataset("event_time_zero")
+        .unwrap()
+        .new_attr::<VarLenUnicode>()
+        .shape(())
+        .create("offset")
+        .unwrap()
+        .write_scalar(&VarLenUnicode::from_str("2025-01-01T00:00:00+0530").unwrap())
+        .unwrap();
+    drop(file);
+    assert!(reader(&path)
+        .read_events(&venus_bank100_config(), 0, None)
+        .is_err());
+}
+
+#[test]
+fn many_element_units_attribute_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("run.nxs.h5");
+    let file = File::create(&path).unwrap();
+    let group = write_bank(
+        &file,
+        &Bank {
+            tof_us: &[100.0],
+            pulse_s: &[0.0],
+            event_index: &[0],
+        },
+    );
+    let units = vec![VarLenUnicode::from_str("nanosecond").unwrap(); 3];
+    group
+        .dataset("event_time_offset")
+        .unwrap()
+        .new_attr::<VarLenUnicode>()
+        .shape(3)
+        .create("units")
+        .unwrap()
+        .write(&units)
+        .unwrap();
+    drop(file);
+    // Not one value, so the default (microseconds) applies.
+    let events = reader(&path)
+        .read_events(&venus_bank100_config(), 0, None)
+        .unwrap();
+    assert_eq!(events.tof_ns, vec![100_000]);
+}

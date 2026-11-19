@@ -580,6 +580,7 @@ where
     for batch in batches {
         writer.append_batch(&batch, options)?;
     }
+    file.flush()?;
     Ok(())
 }
 
@@ -626,6 +627,7 @@ where
     for batch in batches {
         writer.append_batch(&batch, options)?;
     }
+    file.flush()?;
     Ok(())
 }
 
@@ -719,6 +721,7 @@ fn write_combined_file(
         write_pixel_masks(&entry, data, options)?;
     }
 
+    file.flush()?;
     Ok(())
 }
 
@@ -1057,9 +1060,6 @@ impl HitEventWriter {
 
     fn append_batch(&mut self, batch: &EventBatch, options: &HitWriteOptions) -> Result<()> {
         let count = batch.hits.len();
-        if count == 0 {
-            return Ok(());
-        }
         let hits = &batch.hits;
         let mut columns = vec![("y", hits.y.len()), ("tof", hits.tof.len())];
         if options.include_tot {
@@ -1072,6 +1072,9 @@ impl HitEventWriter {
             columns.push(("cluster_id", hits.cluster_id.len()));
         }
         check_columns("hit batch", count, &columns)?;
+        if count == 0 {
+            return Ok(());
+        }
 
         let event_start = self.event_count;
         let event_end = event_start + count;
@@ -1306,10 +1309,10 @@ impl NeutronEventWriter {
         options: &NeutronWriteOptions,
     ) -> Result<()> {
         let count = batch.neutrons.len();
+        check_neutron_columns(&batch.neutrons, options)?;
         if count == 0 {
             return Ok(());
         }
-        check_neutron_columns(&batch.neutrons, options)?;
 
         let event_start = self.event_count;
         let event_end = event_start + count;
@@ -1646,6 +1649,9 @@ impl Hdf5HistogramSink {
 
     /// Increment histogram bins.
     ///
+    /// After an error, bins already accepted stay cached and are written by
+    /// the next successful flush; resubmitting them counts them twice.
+    ///
     /// # Errors
     /// Returns an error if indices are out of bounds or HDF5 writes fail.
     pub fn add_bins<I>(&mut self, bins: I) -> Result<()>
@@ -1835,6 +1841,7 @@ fn write_histogram_file(
     let histogram = create_histogram_group(&entry, options)?;
 
     write_histogram_datasets(&histogram, data, options)?;
+    file.flush()?;
     Ok(())
 }
 
@@ -3057,6 +3064,20 @@ mod tests {
         };
         let options = NeutronWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
         assert!(write_neutrons_hdf5(dir.path().join("n.h5"), [batch], &options).is_err());
+    }
+
+    #[test]
+    fn test_empty_x_column_with_other_data_is_rejected() {
+        let mut hits = HitBatch::default();
+        hits.y.push(1);
+        hits.tof.push(1);
+        let batch = EventBatch {
+            tdc_timestamp_25ns: 1,
+            hits,
+        };
+        let options = HitWriteOptions::from_detector_config(&DetectorConfig::venus_defaults());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write_hits_hdf5(dir.path().join("hits.h5"), [batch], &options).is_err());
     }
 
     #[test]
