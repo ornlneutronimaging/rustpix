@@ -15,7 +15,7 @@
 //! 3. `TimeOrderedStream` uses a Min-Heap to merge these pulse batches based on
 //!    their TDC timestamp.
 
-use crate::hit::{calculate_tof, correct_timestamp_rollover};
+use crate::hit::{apply_missing_tdc_correction, correct_timestamp_rollover, ticks_after};
 use crate::packet::Tpx3Packet;
 use crate::section::Tpx3Section;
 use crate::DetectorConfig;
@@ -24,6 +24,9 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+/// Half the 30-bit TDC range, in 25 ns ticks.
+const HALF_WRAP: u32 = 1 << 29;
 
 /// A batch of hits belonging to a single pulse (TDC period) from one chip.
 #[derive(Debug, Clone)]
@@ -139,6 +142,17 @@ where
         }
     }
 
+    /// Adds `by` to the rollover epoch of every pulse not yet returned.
+    fn shift_epoch(&mut self, by: u64) {
+        self.tdc_epoch += by;
+        if let Some(prev) = self.prev_batch.as_mut() {
+            prev.tdc_epoch += by;
+        }
+        for batch in &mut self.ready_queue {
+            batch.tdc_epoch += by;
+        }
+    }
+
     /// Return the next pulse batch from this chip, if available.
     pub fn next_pulse(&mut self) -> Option<PulseBatch> {
         const PACKET_SIZE: usize = 8;
@@ -205,88 +219,30 @@ where
                         return self.ready_queue.pop_front();
                     }
                 } else if packet.is_hit() {
-                    // Decide where this hit belongs.
-                    // Candidates:
-                    // 1. `curr_tdc` (the active pulse we just saw start)
-                    // 2. `prev_batch` (the pulse before that, for late hits)
-
                     let (local_x, local_y) = packet.pixel_coordinates();
                     let (gx, gy) = (self.chip_transform)(section.chip_id, local_x, local_y);
                     let raw_ts = packet.timestamp_coarse();
                     let tot = packet.tot();
                     let chip = section.chip_id;
+                    let Some(curr_tdc) = self.curr_tdc else {
+                        continue; // no TDC reference yet
+                    };
 
-                    // Logic to assign hit
-                    let mut assigned_to_prev = false;
-
-                    if let Some(ref mut prev) = self.prev_batch {
-                        // Check fit with prev
+                    // A hit stamped before the current TDC is a late hit of the
+                    // previous pulse; compared modulo 2^30 so it holds across a rollover.
+                    if let Some(tof) = ticks_after(raw_ts, curr_tdc) {
+                        let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
+                        let tof = apply_missing_tdc_correction(tof, self.tdc_correction);
+                        self.curr_batch.push((gx, gy, tof, tot, ts_curr, chip));
+                    } else if let Some(prev) = self.prev_batch.as_mut() {
                         let prev_tdc = prev.tdc_timestamp;
-                        let ts_prev = correct_timestamp_rollover(raw_ts, prev_tdc);
-
-                        // If we assume a pulse is ~16ms (666666 units).
-                        // Late margin ~14ms.
-                        // If `ts_prev - prev_tdc` is reasonable (< 1.5 * period?),
-                        // AND it fits better than current?
-
-                        // Simple check from empirical findings:
-                        // "A hit arriving AFTER TDC1 with TOF > 14ms ... likely belongs to TDC0".
-                        // Note: The hit arrives after TDC1 (which started `curr`).
-                        // So checking against `curr` would yield a very small TOF (or wrapped large if hit < tdc).
-                        // Checking against `prev` yields a large TOF (~16ms).
-
-                        // Wait, if hit < curr_tdc, it DEFINITELY belongs to prev (or earlier).
-                        // If hit >= curr_tdc, but only by a little?
-                        // Causality: Hit cannot happen before it is read out.
-                        // But timestamps reflect physical event time.
-
-                        // Rule:
-                        // 1. Calculate TS relative to Prev.
-                        let _tof_prev = ts_prev.wrapping_sub(prev_tdc);
-
-                        // 2. If valid late hit:
-                        //    valid if tof_prev < tdc_correction + margin?
-                        //    Actually, tdc_correction is "period".
-                        //    Let's allow late hits up to 2 * period for safety?
-                        //    Or just check if it is "before" current pulse start?
-
-                        if let Some(curr_tdc) = self.curr_tdc {
-                            let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
-                            // If timestamp is strictly before current pulse start
-                            // (allow for some jitter/rollover logic)
-                            if ts_curr < curr_tdc {
-                                // Definitely prev
-                                // Calculate correct TOF relative to prev
-                                let tof = calculate_tof(ts_prev, prev_tdc, self.tdc_correction);
-                                prev.hits.push((gx, gy, tof, tot, ts_prev, chip));
-                                assigned_to_prev = true;
-                            } else {
-                                // It is >= curr_tdc.
-                                // Does it belong to prev anyway? (Very late hit?)
-                                // "TOF > 14ms" means event happened 14ms after Prev TDC.
-                                // Current TDC is at 16.6ms.
-                                // So hit is at Prev + 14ms.
-                                // Current is at Prev + 16.6ms.
-                                // Hit is BEFORE Current.
-                                // So `ts_curr < curr_tdc` covers this!
-
-                                // Is there a case where Hit > Curr but belongs to Prev? NO.
-                                // That would mean Hit happened AFTER Curr start, meaning it belongs to Curr (or Next).
-
-                                // So the simple check `ts_curr < curr_tdc` correctly identifies late hits
-                                // provided `correct_timestamp_rollover` works.
-                            }
+                        if let Some(tof) = ticks_after(raw_ts, prev_tdc) {
+                            let ts_prev = correct_timestamp_rollover(raw_ts, prev_tdc);
+                            let tof = apply_missing_tdc_correction(tof, self.tdc_correction);
+                            prev.hits.push((gx, gy, tof, tot, ts_prev, chip));
                         }
                     }
-
-                    if !assigned_to_prev {
-                        // Assign to current
-                        if let Some(curr_tdc) = self.curr_tdc {
-                            let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
-                            let tof = calculate_tof(ts_curr, curr_tdc, self.tdc_correction);
-                            self.curr_batch.push((gx, gy, tof, tot, ts_curr, chip));
-                        }
-                    }
+                    // Otherwise the hit precedes every pulse this reader has seen.
                 }
             }
 
@@ -335,13 +291,14 @@ where
     pub fn new(data: D, sections: &[Tpx3Section], config: &DetectorConfig) -> Self {
         // Group sections by chip
         let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0);
-        let mut sections_by_chip: Vec<Vec<Tpx3Section>> = vec![Vec::new(); (max_chip + 1) as usize];
+        let mut sections_by_chip: Vec<Vec<Tpx3Section>> =
+            vec![Vec::new(); usize::from(max_chip) + 1];
 
         for section in sections {
-            sections_by_chip[section.chip_id as usize].push(section.clone());
+            sections_by_chip[usize::from(section.chip_id)].push(section.clone());
         }
 
-        let tdc_correction = config.tdc_correction_25ns();
+        let tdc_correction = config.missing_tdc_threshold_25ns();
         let mut readers = Vec::new();
         let mut heap = BinaryHeap::new();
 
@@ -365,12 +322,31 @@ where
                 transform_closure,
             );
 
-            if let Some(batch) = reader.next_pulse() {
-                heap.push(batch);
-            }
-
-            readers.push(reader);
+            let first = reader.next_pulse();
+            readers.push((reader, first));
         }
+
+        // Each reader counts rollovers from its own first TDC. A chip whose
+        // first TDC is more than half a wrap below the latest chip's started
+        // after a rollover the others have not seen yet.
+        let latest = readers
+            .iter()
+            .filter_map(|(_, first)| first.as_ref().map(|b| b.tdc_timestamp))
+            .max()
+            .unwrap_or(0);
+        let readers = readers
+            .into_iter()
+            .map(|(mut reader, first)| {
+                if let Some(mut batch) = first {
+                    if latest - batch.tdc_timestamp > HALF_WRAP {
+                        reader.shift_epoch(1);
+                        batch.tdc_epoch += 1;
+                    }
+                    heap.push(batch);
+                }
+                reader
+            })
+            .collect();
 
         Self { readers, heap }
     }

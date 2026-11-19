@@ -114,7 +114,7 @@ pub fn process_section_into_batch(
     chip_transform: impl Fn(u8, u16, u16) -> (u16, u16),
     batch: &mut rustpix_core::soa::HitBatch,
 ) -> Option<u32> {
-    use super::hit::{calculate_tof, correct_timestamp_rollover};
+    use super::hit::{apply_missing_tdc_correction, correct_timestamp_rollover, ticks_after};
 
     let section_data = &data[section.start_offset..section.end_offset];
     let num_packets = section_data.len() / PACKET_SIZE;
@@ -136,14 +136,17 @@ pub fn process_section_into_batch(
         } else if packet.is_hit() {
             // Skip hits until we have a TDC reference
             let Some(tdc_ts) = current_tdc else { continue };
+            // A hit stamped before the TDC belongs to a pulse this function does not track.
+            let raw_timestamp = packet.timestamp_coarse();
+            let Some(tof) = ticks_after(raw_timestamp, tdc_ts) else {
+                continue;
+            };
 
             let (local_x, local_y) = packet.pixel_coordinates();
             let (global_x, global_y) = chip_transform(section.chip_id, local_x, local_y);
 
-            // Calculate timestamp with rollover correction
-            let raw_timestamp = packet.timestamp_coarse();
             let timestamp = correct_timestamp_rollover(raw_timestamp, tdc_ts);
-            let tof = calculate_tof(timestamp, tdc_ts, tdc_correction_25ns);
+            let tof = apply_missing_tdc_correction(tof, tdc_correction_25ns);
 
             batch.push((
                 global_x,

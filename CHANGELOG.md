@@ -103,6 +103,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept with an empty energy cell. A non-numeric SNS run number is refused
   instead of being written as 0.
 
+- TPX3: a section header with chip ID 255, or a detector config naming chip
+  255, panicked.
+- TPX3: a late hit stamped just before the 30-bit timestamp rollover and read
+  out after the next TDC got a TOF of about 26.8 s in the wrong pulse. Hit and
+  TDC times are now compared modulo the counter, so the hit stays in its pulse.
+- TPX3: hits stamped before a chip's first TDC got a TOF near 2^32; they are
+  dropped.
+- TPX3: chips whose first TDC fell on different sides of a rollover numbered
+  the same pulse differently, splitting it in the time-ordered stream.
+- TPX3: `enable_missing_tdc_correction` had no effect; turning it off now
+  stops the one-period subtraction for TOFs longer than a period.
+- TPX3: transform validation used 32-bit arithmetic that could overflow and
+  pass invalid transforms; `from_json` also rejects a TDC frequency that is
+  not finite and positive. `DetectorConfig::validate` checks both.
+
 ### Changed
 
 - Clustering rejects invalid parameters with `ClusteringError::InvalidConfig`

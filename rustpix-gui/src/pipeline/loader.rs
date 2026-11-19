@@ -506,7 +506,7 @@ fn process_sections_to_batch(
     let total_packets: usize = sections.iter().map(Tpx3Section::packet_count).sum();
     let mut full_batch = cache_hits.then(|| HitBatch::with_capacity(total_packets));
     let mut pulse_bounds = cache_hits.then(Vec::new);
-    let tdc_correction = det_config.tdc_correction_25ns();
+    let missing_tdc = det_config.missing_tdc_threshold_25ns();
 
     let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0) as usize;
     let mut sections_by_chip = vec![Vec::new(); max_chip + 1];
@@ -542,7 +542,7 @@ fn process_sections_to_batch(
             scope.spawn(move || {
                 let transform_closure = move |_cid, x, y| transform.apply(x, y);
                 let mut reader =
-                    PulseReader::new(mmap, &chip_sections, tdc_correction, transform_closure);
+                    PulseReader::new(mmap, &chip_sections, missing_tdc, transform_closure);
                 while let Some(batch) = reader.next_pulse() {
                     if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                         break;

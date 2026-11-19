@@ -20,6 +20,31 @@ pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32
     }
 }
 
+/// Mask of the 30-bit hit and TDC timestamp counters.
+const TIMESTAMP_MASK: u32 = 0x3FFF_FFFF;
+
+/// Ticks from `tdc` forward to `hit` on the 30-bit counter, or `None` when the hit is earlier.
+///
+/// "Earlier" means more than zero and less than half a wrap behind, so the
+/// comparison holds across a counter rollover.
+#[inline]
+#[must_use]
+pub(crate) fn ticks_after(hit: u32, tdc: u32) -> Option<u32> {
+    let forward = hit.wrapping_sub(tdc) & TIMESTAMP_MASK;
+    (forward < 1 << 29).then_some(forward)
+}
+
+/// Subtracts one TDC period from a TOF longer than it (a missed TDC packet).
+#[inline]
+#[must_use]
+pub(crate) fn apply_missing_tdc_correction(tof: u32, period_25ns: u32) -> u32 {
+    if tof > period_25ns {
+        tof - period_25ns
+    } else {
+        tof
+    }
+}
+
 /// Calculate TOF with TDC correction.
 ///
 /// If the raw TOF exceeds the TDC period, subtract one period.
@@ -55,6 +80,18 @@ mod tests {
         let tdc_ts = 0x0050_0000;
         let corrected = correct_timestamp_rollover(hit_ts, tdc_ts);
         assert_eq!(corrected, hit_ts + 0x4000_0000);
+    }
+
+    #[test]
+    fn ticks_after_holds_across_rollover() {
+        assert_eq!(ticks_after(1100, 1000), Some(100));
+        assert_eq!(ticks_after(999, 1000), None);
+        // Hit 0xFF00 ticks after a TDC just before the wrap.
+        assert_eq!(ticks_after(0x3FFF_FF00, 0x3FFF_0000), Some(0xFF00));
+        // Hit just before the wrap, TDC just after it: the hit is earlier.
+        assert_eq!(ticks_after(0x3FFF_FF00, 0x10), None);
+        // Hit just after the wrap, TDC just before it.
+        assert_eq!(ticks_after(0x20, 0x3FFF_FFF0), Some(0x30));
     }
 
     #[test]

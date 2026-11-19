@@ -72,11 +72,7 @@ impl ChipTransform {
     #[inline]
     #[must_use]
     pub fn apply(&self, x: u16, y: u16) -> (u16, u16) {
-        let x = i32::from(x);
-        let y = i32::from(y);
-
-        let gx = self.a * x + self.b * y + self.tx;
-        let gy = self.c * x + self.d * y + self.ty;
+        let (gx, gy) = self.map_wide(i64::from(x), i64::from(y));
 
         debug_assert!(
             u16::try_from(gx).is_ok(),
@@ -102,23 +98,22 @@ impl ChipTransform {
     /// # Errors
     /// Returns an error if the transform maps any corner outside the valid output range.
     pub fn validate_bounds(&self, chip_size_x: u16, chip_size_y: u16) -> Result<(), String> {
-        let max_x = i32::from(chip_size_x.saturating_sub(1));
-        let max_y = i32::from(chip_size_y.saturating_sub(1));
+        let max_x = i64::from(chip_size_x.saturating_sub(1));
+        let max_y = i64::from(chip_size_y.saturating_sub(1));
 
         // Check all 4 corners of the input space
         let corners = [(0, 0), (max_x, 0), (0, max_y), (max_x, max_y)];
 
         for (x, y) in corners {
-            let gx = self.a * x + self.b * y + self.tx;
-            let gy = self.c * x + self.d * y + self.ty;
+            let (gx, gy) = self.map_wide(x, y);
 
-            if gx < 0 || gx > i32::from(u16::MAX) {
+            if gx < 0 || gx > i64::from(u16::MAX) {
                 return Err(format!(
                     "Transform produces out-of-bounds x={gx} for input ({x}, {y}). \
                      Valid range is [0, 65535].",
                 ));
             }
-            if gy < 0 || gy > i32::from(u16::MAX) {
+            if gy < 0 || gy > i64::from(u16::MAX) {
                 return Err(format!(
                     "Transform produces out-of-bounds y={gy} for input ({x}, {y}). \
                      Valid range is [0, 65535].",
@@ -127,6 +122,16 @@ impl ChipTransform {
         }
 
         Ok(())
+    }
+}
+
+impl ChipTransform {
+    /// The affine map in 64-bit arithmetic, which cannot overflow for `i32` coefficients.
+    fn map_wide(&self, x: i64, y: i64) -> (i64, i64) {
+        (
+            i64::from(self.a) * x + i64::from(self.b) * y + i64::from(self.tx),
+            i64::from(self.c) * x + i64::from(self.d) * y + i64::from(self.ty),
+        )
     }
 }
 
@@ -357,12 +362,12 @@ impl DetectorConfig {
                     // Find max chip ID to size the vector
                     let max_chip_id = transforms.iter().map(|t| t.chip_id).max().unwrap_or(0);
 
-                    let mut t_vec = vec![ChipTransform::identity(); (max_chip_id + 1) as usize];
+                    let mut t_vec = vec![ChipTransform::identity(); usize::from(max_chip_id) + 1];
 
                     for t in transforms {
                         let matrix = t.matrix;
                         // C++ matrix: [[a, b, tx], [c, d, ty]]
-                        t_vec[t.chip_id as usize] = ChipTransform {
+                        t_vec[usize::from(t.chip_id)] = ChipTransform {
                             a: matrix[0][0],
                             b: matrix[0][1],
                             tx: matrix[0][2],
@@ -388,10 +393,27 @@ impl DetectorConfig {
             chip_transforms: transforms,
         };
 
-        // Validate transforms once at load time (not per-hit)
-        config.validate_transforms()?;
+        // Validate once at load time (not per hit).
+        config.validate()?;
 
         Ok(config)
+    }
+
+    /// Validates the TDC frequency and every chip transform.
+    ///
+    /// Called when loading from JSON; call it for programmatically built configs.
+    ///
+    /// # Errors
+    /// Returns an error for a frequency that is not finite and positive, or an invalid transform.
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !(self.tdc_frequency_hz.is_finite() && self.tdc_frequency_hz > 0.0) {
+            return Err(format!(
+                "tdc_frequency_hz must be finite and positive, got {}",
+                self.tdc_frequency_hz
+            )
+            .into());
+        }
+        self.validate_transforms()
     }
 
     /// Validate all chip transforms produce valid u16 coordinates.
@@ -431,6 +453,19 @@ impl DetectorConfig {
             .unwrap_or(u32::MAX)
     }
 
+    /// TOF above which one TDC period is subtracted, in 25 ns ticks.
+    ///
+    /// The period when `enable_missing_tdc_correction` is set; otherwise
+    /// `u32::MAX`, so no TOF is corrected.
+    #[must_use]
+    pub fn missing_tdc_threshold_25ns(&self) -> u32 {
+        if self.enable_missing_tdc_correction {
+            self.tdc_correction_25ns()
+        } else {
+            u32::MAX
+        }
+    }
+
     /// Map local chip coordinates to global detector coordinates.
     ///
     /// Uses the configured affine transform for the given chip ID.
@@ -454,17 +489,16 @@ impl DetectorConfig {
             return (usize::from(self.chip_size_x), usize::from(self.chip_size_y));
         }
 
-        let max_x = i32::from(self.chip_size_x.saturating_sub(1));
-        let max_y = i32::from(self.chip_size_y.saturating_sub(1));
+        let max_x = i64::from(self.chip_size_x.saturating_sub(1));
+        let max_y = i64::from(self.chip_size_y.saturating_sub(1));
         let corners = [(0, 0), (max_x, 0), (0, max_y), (max_x, max_y)];
 
-        let mut max_global_x = 0i32;
-        let mut max_global_y = 0i32;
+        let mut max_global_x = 0i64;
+        let mut max_global_y = 0i64;
 
         for transform in &self.chip_transforms {
             for (x, y) in corners {
-                let gx = transform.a * x + transform.b * y + transform.tx;
-                let gy = transform.c * x + transform.d * y + transform.ty;
+                let (gx, gy) = transform.map_wide(x, y);
                 if gx > max_global_x {
                     max_global_x = gx;
                 }
