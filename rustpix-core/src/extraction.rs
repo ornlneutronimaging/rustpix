@@ -94,6 +94,7 @@ struct ClusterAccumulator {
     raw_sum_x: f64,
     raw_sum_y: f64,
     sum_tot: u64,
+    sum_weight: f64,
     count: u32,
     max_tot: u16,
     rep_tof: u32,
@@ -254,6 +255,7 @@ fn accumulate_weighted(
             acc.sum_tot += u64::from(tot);
             acc.raw_sum_x += x;
             acc.raw_sum_y += y;
+            acc.sum_weight += weight;
             acc.sum_x += x * weight;
             acc.sum_y += y * weight;
 
@@ -278,6 +280,7 @@ fn accumulate_weighted(
             acc.sum_tot += u64::from(tot);
             acc.raw_sum_x += x;
             acc.raw_sum_y += y;
+            acc.sum_weight += weight;
             acc.sum_x += x * weight;
             acc.sum_y += y * weight;
 
@@ -353,11 +356,6 @@ fn accumulate_unweighted(
     }
 }
 
-fn sum_tot_as_f64(sum_tot: u64) -> f64 {
-    let clamped = sum_tot.min(u64::from(u32::MAX));
-    f64::from(u32::try_from(clamped).unwrap_or(u32::MAX))
-}
-
 fn build_neutrons_weighted(accumulators: Vec<ClusterAccumulator>, scale: f64) -> Vec<Neutron> {
     let mut neutrons = Vec::with_capacity(accumulators.len());
     for acc in accumulators {
@@ -366,8 +364,7 @@ fn build_neutrons_weighted(accumulators: Vec<ClusterAccumulator>, scale: f64) ->
         }
 
         let (centroid_x, centroid_y) = if acc.sum_tot > 0 {
-            let sum_weight = sum_tot_as_f64(acc.sum_tot);
-            (acc.sum_x / sum_weight, acc.sum_y / sum_weight)
+            (acc.sum_x / acc.sum_weight, acc.sum_y / acc.sum_weight)
         } else {
             (
                 acc.raw_sum_x / f64::from(acc.count),
@@ -423,8 +420,7 @@ fn build_neutron_batch_weighted(accumulators: Vec<ClusterAccumulator>, scale: f6
         }
 
         let (centroid_x, centroid_y) = if acc.sum_tot > 0 {
-            let sum_weight = sum_tot_as_f64(acc.sum_tot);
-            (acc.sum_x / sum_weight, acc.sum_y / sum_weight)
+            (acc.sum_x / acc.sum_weight, acc.sum_y / acc.sum_weight)
         } else {
             (
                 acc.raw_sum_x / f64::from(acc.count),
@@ -631,6 +627,31 @@ mod tests {
         // Verify no NaN
         assert!(!neutrons[0].x.is_nan());
         assert!(!neutrons[0].y.is_nan());
+    }
+
+    #[test]
+    fn test_weighted_centroid_with_total_tot_above_u32() {
+        let mut batch = HitBatch::with_capacity(70_000);
+        for _ in 0..70_000 {
+            batch.push((100, 200, 1000, u16::MAX, 0, 0));
+        }
+        batch.cluster_id.fill(0);
+
+        let mut extractor = SimpleCentroidExtraction::new();
+        extractor.configure(ExtractionConfig::default().with_super_resolution(1.0));
+        let neutrons = extractor.extract_soa(&batch, 1).unwrap();
+
+        assert_eq!(neutrons.len(), 1);
+        assert!(
+            (neutrons[0].x - 100.0).abs() < 1e-6,
+            "x = {}",
+            neutrons[0].x
+        );
+        assert!(
+            (neutrons[0].y - 200.0).abs() < 1e-6,
+            "y = {}",
+            neutrons[0].y
+        );
     }
 
     #[test]
