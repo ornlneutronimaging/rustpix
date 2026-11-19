@@ -30,8 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is one of the inputs or ends in `.tpx3` is refused, and the output is
   written to a temporary file and moved into place only on success.
 - TIFF export overwrote an existing `<stem>.csv` with its spectrum, even an
-  unrelated event file. It now stops unless that file is a spectrum from an
-  earlier run. With `-f tiff -o file.csv` the verbose log no longer claims a
+  unrelated event file. It now stops unless that file is empty or a spectrum
+  from an earlier run. With `-f tiff -o file.csv` the verbose log no longer claims a
   spectrum was written.
 - TIFF export counted every neutron with a TOF above `--tof-max` in the last
   bin. Such neutrons are left out and reported in a warning.

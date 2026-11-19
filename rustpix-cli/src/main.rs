@@ -1084,8 +1084,9 @@ fn run_process_tiff(
             stack.height,
             stack.bin_width(),
         )?;
-        tiff.commit()?;
+        // Sidecar first, so a failed rename never costs the earlier TIFF.
         spectrum.commit()?;
+        tiff.commit()?;
         if verbose {
             eprintln!("Wrote spectrum to: {}", spectrum_path.display());
         }

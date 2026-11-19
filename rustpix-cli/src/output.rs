@@ -21,6 +21,10 @@ impl PendingOutput {
     pub(crate) fn new(dest: &Path) -> io::Result<Self> {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let dest = std::path::absolute(dest)?;
+        let existing = fs::symlink_metadata(&dest)
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map(|m| m.permissions());
         for _ in 0..64 {
             let nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -35,12 +39,16 @@ impl PendingOutput {
                 .create_new(true)
                 .open(&temp)
             {
-                Ok(_) => {
-                    return Ok(Self {
+                Ok(file) => {
+                    let pending = Self {
                         temp,
                         dest,
                         committed: false,
-                    })
+                    };
+                    if let Some(permissions) = &existing {
+                        restrict_staging(&file, permissions)?;
+                    }
+                    return Ok(pending);
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
@@ -80,6 +88,21 @@ impl Drop for PendingOutput {
     }
 }
 
+/// Gives the staging file the replaced file's access bits before any data is written.
+#[cfg(unix)]
+fn restrict_staging(file: &fs::File, existing: &fs::Permissions) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Owner write stays set so writers can reopen the path; commit applies the exact mode.
+    file.set_permissions(fs::Permissions::from_mode(
+        (existing.mode() & 0o777) | 0o200,
+    ))
+}
+
+#[cfg(not(unix))]
+fn restrict_staging(_: &fs::File, _: &fs::Permissions) -> io::Result<()> {
+    Ok(())
+}
+
 /// True when both paths name the same existing file, including through links.
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     let (Ok(a), Ok(b)) = (fs::canonicalize(a), fs::canonicalize(b)) else {
@@ -107,4 +130,44 @@ pub(crate) fn has_extension(path: &Path, extension: &str) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn staging_file_is_private_before_data_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.csv");
+        fs::write(&dest, b"old").unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let pending = PendingOutput::new(&dest).unwrap();
+        assert_eq!(mode(pending.path()), 0o600);
+
+        fs::write(pending.path(), b"new").unwrap();
+        pending.commit().unwrap();
+        assert_eq!(mode(&dest), 0o600);
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+    }
+
+    #[test]
+    fn read_only_destination_stays_writable_until_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.csv");
+        fs::write(&dest, b"old").unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o440)).unwrap();
+
+        let pending = PendingOutput::new(&dest).unwrap();
+        assert_eq!(mode(pending.path()), 0o640);
+        fs::write(pending.path(), b"new").unwrap();
+        pending.commit().unwrap();
+        assert_eq!(mode(&dest), 0o440);
+    }
 }
