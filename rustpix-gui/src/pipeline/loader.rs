@@ -235,7 +235,7 @@ fn load_sns_file_worker(
                 current_pulse_ns = Some(pulse_ns);
             }
             // Nearest tick: f32 microseconds are not exact multiples of 25 ns.
-            let tof_25 = u32::try_from((chunk.tof_ns[i] + 12) / 25).unwrap_or(u32::MAX);
+            let tof_25 = u32::try_from(chunk.tof_ns[i].saturating_add(12) / 25).unwrap_or(u32::MAX);
             #[allow(clippy::cast_possible_truncation)]
             let timestamp_25 = ((pulse_ns / 25).wrapping_add(u64::from(tof_25))) as u32;
             pulse_hits.push((chunk.x[i], chunk.y[i], tof_25, 0, timestamp_25, 0));

@@ -389,6 +389,8 @@ impl RustpixApp {
             self.ui_state.export.tiff.base_name.clear();
         }
         self.selected_file = Some(path.to_path_buf());
+        // A load supersedes any clustering run; its result can no longer arrive.
+        self.processing.is_processing = false;
         self.processing.is_loading = true;
         self.processing.progress = 0.0;
         self.processing.eta.reset();
@@ -1693,6 +1695,15 @@ impl RustpixApp {
         self.neutron_super_resolution_factor = super_res_factor;
         self.ui_state.current_tof_bin = 0;
         self.texture = None;
+        if let Some(above) = self
+            .neutron_hyperstack
+            .as_deref()
+            .map(Hyperstack3D::above_range)
+            .filter(|&above| above > 0)
+        {
+            self.processing.status_text =
+                format!("Ready ({above} neutrons beyond the TOF range left out)");
+        }
     }
 
     fn handle_processing_error(&mut self, error: &str) {
@@ -1846,7 +1857,7 @@ fn export_sns_hdf5_worker(
     let mut warnings = Vec::new();
 
     send_export_progress(tx, 0.10, "Creating SNS HDF5 file");
-    let partial = PartialFile::beside(&request.path);
+    let partial = PartialFile::beside(&request.path)?;
     let mut sink = SnsEventSink::create(partial.path(), request.write_options.clone())
         .map_err(|err| anyhow!("Failed to create SNS HDF5 file: {err}"))?;
 
@@ -2485,10 +2496,15 @@ fn neutron_pulses(
     neutrons: &NeutronBatch,
     bounds: Option<&[PulseBounds]>,
 ) -> Vec<NeutronEventBatch> {
+    // Bounds must tile the batch in order; otherwise fall back to one pulse.
     let Some(bounds) = bounds.filter(|bounds| {
-        bounds
-            .iter()
-            .all(|b| b.start.saturating_add(b.len) <= neutrons.len())
+        let mut next = 0usize;
+        let contiguous = bounds.iter().all(|b| {
+            let ok = b.start == next;
+            next = b.start.saturating_add(b.len);
+            ok
+        });
+        contiguous && next == neutrons.len()
     }) else {
         return vec![NeutronEventBatch {
             tdc_timestamp_25ns: 0,
@@ -2625,25 +2641,49 @@ struct PartialFile {
 }
 
 impl PartialFile {
-    fn beside(dest: &Path) -> Self {
+    /// Reserves a fresh staging file beside `dest`, created exclusively.
+    fn beside(dest: &Path) -> Result<Self> {
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let name = dest.file_name().map_or_else(
-            || "export".to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self {
-            temp: dest.with_file_name(format!(".{name}.{}-{sequence}.partial", std::process::id())),
-            dest: dest.to_path_buf(),
-            committed: false,
+        let dest = std::path::absolute(dest)?;
+        for _ in 0..64 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let temp = dest.with_file_name(format!(
+                ".rustpix-{}-{sequence}-{nanos:08x}.partial",
+                std::process::id()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(_) => {
+                    return Ok(Self {
+                        temp,
+                        dest,
+                        committed: false,
+                    })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
         }
+        Err(anyhow!("could not reserve a temporary export file"))
     }
 
     fn path(&self) -> &Path {
         &self.temp
     }
 
+    /// Renames the staging file onto the destination, keeping an existing file's permissions.
     fn commit(mut self) -> Result<()> {
+        if let Ok(existing) = std::fs::symlink_metadata(&self.dest) {
+            if existing.is_file() {
+                std::fs::set_permissions(&self.temp, existing.permissions())?;
+            }
+        }
         std::fs::rename(&self.temp, &self.dest)
             .map_err(|err| anyhow!("Failed to save {}: {err}", self.dest.display()))?;
         self.committed = true;
@@ -3117,18 +3157,54 @@ mod export_tests {
         let dest = dir.path().join("run.nxs.h5");
         std::fs::write(&dest, b"previous export").unwrap();
 
-        let abandoned = PartialFile::beside(&dest);
+        let abandoned = PartialFile::beside(&dest).unwrap();
         std::fs::write(abandoned.path(), b"partial").unwrap();
         drop(abandoned);
         assert_eq!(std::fs::read(&dest).unwrap(), b"previous export");
 
-        let finished = PartialFile::beside(&dest);
+        let finished = PartialFile::beside(&dest).unwrap();
         std::fs::write(finished.path(), b"new export").unwrap();
         finished.commit().unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new export");
 
         let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(leftovers, 1);
+    }
+
+    #[test]
+    fn partial_file_never_reuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("run.nxs.h5");
+        let decoy = dir.path().join(format!(
+            ".rustpix-{}-0-00000000.partial",
+            std::process::id()
+        ));
+        std::fs::write(&decoy, b"not ours").unwrap();
+        drop(PartialFile::beside(&dest).unwrap());
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"not ours");
+    }
+
+    #[test]
+    fn gapped_pulse_bounds_fall_back_to_one_pulse() {
+        let mut neutrons = NeutronBatch::default();
+        for tof in [10, 20, 30] {
+            neutrons.push(rustpix_core::neutron::Neutron::new(8.0, 8.0, tof, 10, 1, 0));
+        }
+        let gapped = [
+            PulseBounds {
+                tdc_timestamp_25ns: 100,
+                start: 0,
+                len: 1,
+            },
+            PulseBounds {
+                tdc_timestamp_25ns: 200,
+                start: 2,
+                len: 1,
+            },
+        ];
+        let pulses = neutron_pulses(&neutrons, Some(&gapped));
+        assert_eq!(pulses.len(), 1);
+        assert_eq!(pulses[0].neutrons.len(), 3);
     }
 
     #[test]

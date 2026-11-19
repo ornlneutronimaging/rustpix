@@ -1045,7 +1045,7 @@ impl Roi {
             return false;
         }
         let removed = vertices.remove(index);
-        if polygon_self_intersects(vertices) {
+        if polygon_self_intersects(vertices) || polygon_area2(vertices).abs() < f64::EPSILON {
             vertices.insert(index, removed);
             return false;
         }
@@ -1369,6 +1369,15 @@ mod tests {
         assert!(!state.delete_vertex_at(PlotPoint::new(5.0, 60.0), 1.0));
         assert_eq!(vertices(&state, id), shape.to_vec());
         assert_eq!(state.revision(), before);
+    }
+
+    #[test]
+    fn deleting_a_vertex_that_leaves_zero_area_is_refused() {
+        let mut state = RoiState::default();
+        let shape = [(0.0, 0.0), (10.0, 10.0), (20.0, 0.0), (10.0, 0.0)];
+        let id = polygon(&mut state, &shape);
+        assert!(!state.delete_vertex_at(PlotPoint::new(10.0, 10.0), 1.0));
+        assert_eq!(vertices(&state, id), shape.to_vec());
     }
 
     #[test]
