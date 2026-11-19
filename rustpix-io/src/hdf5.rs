@@ -2287,7 +2287,9 @@ fn read_attr_opt_string(group: &Group, name: &str) -> Result<Option<String>> {
     match group.attr(name) {
         Ok(attr) => {
             let value: VarLenUnicode = attr.read_scalar()?;
-            Ok(Some(value.to_string()))
+            std::str::from_utf8(value.as_bytes())
+                .map(|text| Some(text.to_owned()))
+                .map_err(|e| Error::InvalidFormat(format!("attribute {name} is not UTF-8: {e}")))
         }
         Err(_) => Ok(None),
     }

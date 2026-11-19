@@ -24,8 +24,9 @@ use crate::hdf5::{
 use crate::reader::EventBatch;
 use crate::replace::write_then_replace;
 use crate::{Error, Result};
+use hdf5::types::H5Type;
 use hdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
-use hdf5::{Dataset, File, Group};
+use hdf5::{Attribute, Dataset, File, Group};
 use ndarray::s;
 use std::collections::HashSet;
 use std::path::Path;
@@ -1151,7 +1152,12 @@ impl SnsEventReader {
             .to_vec();
 
         // Decode pixel IDs to x/y on the bank grid.
-        let area = config.width * config.height;
+        let area = config.width.checked_mul(config.height).ok_or_else(|| {
+            Error::InvalidFormat(format!(
+                "bank {} size {} x {} overflows u32",
+                config.name, config.width, config.height
+            ))
+        })?;
         events.x.reserve(events.event_id.len());
         events.y.reserve(events.event_id.len());
         for &id in &events.event_id {
@@ -1161,7 +1167,7 @@ impl SnsEventReader {
                     "pixel ID {id} outside bank {} range [{}, {})",
                     config.name,
                     config.pixel_id_offset,
-                    config.pixel_id_offset + area,
+                    config.pixel_id_offset.saturating_add(area),
                 )));
             };
             events.x.push((rel % config.width) as u16);
@@ -1171,38 +1177,59 @@ impl SnsEventReader {
         // TOF, converted to nanoseconds from the units recorded in the file.
         let tof_ds = group.dataset("event_time_offset")?;
         let tof_scale_ns = units_scale_ns(&tof_ds, "microsecond")?;
-        events.tof_ns = tof_ds
-            .read_slice_1d::<f32, _>(s![start_us..end_us])?
+        let tof = tof_ds.read_slice_1d::<f32, _>(s![start_us..end_us])?;
+        if let Some(bad) = tof.iter().find(|v| !v.is_finite()) {
+            return Err(Error::InvalidFormat(format!(
+                "bank {}: event_time_offset contains {bad}",
+                config.name
+            )));
+        }
+        events.tof_ns = tof
             .iter()
             .map(|&v| (f64::from(v) * tof_scale_ns).max(0.0).round() as u64)
             .collect();
 
-        // Pulse times: the per-pulse arrays are small (one entry per pulse),
-        // so read them fully and expand to one timestamp per event.
+        // Pulse times: read only the pulses that cover events [start, end).
         let tz_ds = group.dataset("event_time_zero")?;
-        let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
-        let base_ns = pulse_offset_ns(&tz_ds);
-        let pulse_ns: Vec<u64> = tz_ds
-            .read_raw::<f64>()?
-            .iter()
-            .map(|&v| base_ns + (v * pulse_scale_ns).max(0.0).round() as u64)
-            .collect();
-        let event_index: Vec<u64> = group.dataset("event_index")?.read_raw()?;
-        if pulse_ns.is_empty() || event_index.len() != pulse_ns.len() {
+        let index_ds = group.dataset("event_index")?;
+        let n_pulses = tz_ds.size();
+        if n_pulses == 0 || index_ds.size() != n_pulses {
             return Err(Error::InvalidFormat(format!(
                 "bank {}: event_index has {} entries but event_time_zero has {}",
                 config.name,
-                event_index.len(),
-                pulse_ns.len(),
+                index_ds.size(),
+                n_pulses,
             )));
         }
+        let index_at =
+            |p: usize| -> Result<u64> { Ok(index_ds.read_slice_1d::<u64, _>(s![p..=p])?[0]) };
+        // The pulse holding event i is the last one whose first-event index is <= i.
+        let first = last_pulse_at_or_before(n_pulses, start, &index_at)?;
+        let last = last_pulse_at_or_before(n_pulses, end - 1, &index_at)?.max(first);
+        if last - first >= MAX_PULSES_PER_READ {
+            return Err(Error::InvalidFormat(format!(
+                "bank {}: {} pulses span the requested events; read fewer events at a time",
+                config.name,
+                last - first + 1,
+            )));
+        }
+        let event_index = index_ds.read_slice_1d::<u64, _>(s![first..=last])?.to_vec();
+        if event_index.windows(2).any(|w| w[0] > w[1]) {
+            return Err(Error::InvalidFormat(format!(
+                "bank {}: event_index is not sorted",
+                config.name
+            )));
+        }
+        let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
+        let base_ns = pulse_offset_ns(&tz_ds)?;
+        let pulse_ns = tz_ds
+            .read_slice_1d::<f64, _>(s![first..=last])?
+            .iter()
+            .map(|&v| pulse_time_ns(base_ns, v, pulse_scale_ns))
+            .collect::<Result<Vec<u64>>>()?;
 
         events.pulse_time_ns.reserve(events.event_id.len());
-        // Index of the pulse the first event of the slice belongs to:
-        // the last pulse whose first-event index is <= start.
-        let mut p = event_index
-            .partition_point(|&v| v <= start)
-            .saturating_sub(1);
+        let mut p = 0;
         for i in start..end {
             while p + 1 < event_index.len() && event_index[p + 1] <= i {
                 p += 1;
@@ -1245,6 +1272,56 @@ fn units_scale_ns(dataset: &Dataset, default_units: &str) -> Result<f64> {
     }
 }
 
+/// Upper bound on pulses read for one event slice (about 12 days at 60 Hz).
+const MAX_PULSES_PER_READ: usize = 1 << 26;
+
+/// Index of the last pulse whose first-event index is <= `event`, or 0 if none is.
+fn last_pulse_at_or_before(
+    n_pulses: usize,
+    event: u64,
+    index_at: &impl Fn(usize) -> Result<u64>,
+) -> Result<usize> {
+    let (mut lo, mut hi) = (0, n_pulses);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if index_at(mid)? <= event {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo.saturating_sub(1))
+}
+
+/// Absolute pulse time in ns from the origin and one `event_time_zero` value.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn pulse_time_ns(base_ns: u64, value: f64, scale_ns: f64) -> Result<u64> {
+    let relative = value * scale_ns;
+    if !relative.is_finite() || relative >= u64::MAX as f64 {
+        return Err(Error::InvalidFormat(format!(
+            "event_time_zero value {value} is out of range"
+        )));
+    }
+    base_ns
+        .checked_add(relative.max(0.0).round() as u64)
+        .ok_or_else(|| Error::InvalidFormat("pulse time overflows u64 nanoseconds".to_string()))
+}
+
+/// Reads an attribute stored either as a scalar or as a 1-element array.
+fn read_scalar_or_single<T: H5Type + Clone>(attr: &Attribute) -> Option<T> {
+    if let Ok(value) = attr.read_scalar::<T>() {
+        return Some(value);
+    }
+    match attr.read_raw::<T>() {
+        Ok(values) if values.len() == 1 => values.into_iter().next(),
+        _ => None,
+    }
+}
+
+fn utf8(bytes: &[u8]) -> Option<String> {
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
+
 /// Seconds between the Unix epoch (1970-01-01) and the EPICS epoch
 /// (1990-01-01) that ADARA's `offset_seconds` attribute counts from.
 const EPICS_EPOCH_UNIX_S: u64 = 631_152_000;
@@ -1256,25 +1333,33 @@ const EPICS_EPOCH_UNIX_S: u64 = 631_152_000;
 /// The ISO string is preferred (its epoch is unambiguous); the EPICS pair is
 /// the fallback.  Returns 0 when neither is present (e.g. rustpix-written
 /// files, whose pulse times are run-relative).
-fn pulse_offset_ns(dataset: &Dataset) -> u64 {
+fn pulse_offset_ns(dataset: &Dataset) -> Result<u64> {
     let attr_u32 = |name: &str| -> Option<u32> {
         dataset
             .attr(name)
             .ok()
-            .and_then(|a| a.read_scalar::<u32>().ok())
+            .and_then(|a| read_scalar_or_single::<u32>(&a))
+    };
+    let to_ns = |secs: u64, frac: u32| {
+        secs.checked_mul(1_000_000_000)
+            .and_then(|ns| ns.checked_add(u64::from(frac)))
+            .ok_or_else(|| {
+                Error::InvalidFormat(format!(
+                    "pulse time origin of {secs} s overflows u64 nanoseconds"
+                ))
+            })
     };
     let frac_attr = attr_u32("offset_nanoseconds");
     if let Some(iso) = read_string_attr(dataset, "offset") {
         if let Some((secs, frac_iso)) = iso8601_to_epoch_secs_frac(&iso) {
-            return secs * 1_000_000_000 + u64::from(frac_attr.unwrap_or(frac_iso));
+            return to_ns(secs, frac_attr.unwrap_or(frac_iso));
         }
     }
     match attr_u32("offset_seconds") {
         Some(secs) if secs != 0 => {
-            (u64::from(secs) + EPICS_EPOCH_UNIX_S) * 1_000_000_000
-                + u64::from(frac_attr.unwrap_or(0))
+            to_ns(u64::from(secs) + EPICS_EPOCH_UNIX_S, frac_attr.unwrap_or(0))
         }
-        _ => 0,
+        _ => Ok(0),
     }
 }
 
@@ -1307,17 +1392,17 @@ fn iso8601_to_epoch_secs_frac(s: &str) -> Option<(u64, u32)> {
 /// (variable/fixed length, ASCII/UTF-8, scalar or 1-element array).
 fn read_string_attr(dataset: &Dataset, name: &str) -> Option<String> {
     let attr = dataset.attr(name).ok()?;
-    if let Ok(v) = attr.read_scalar::<VarLenUnicode>() {
-        return Some(v.to_string());
+    if let Some(v) = read_scalar_or_single::<VarLenUnicode>(&attr) {
+        return utf8(v.as_bytes());
     }
-    if let Ok(v) = attr.read_scalar::<VarLenAscii>() {
-        return Some(v.to_string());
+    if let Some(v) = read_scalar_or_single::<VarLenAscii>(&attr) {
+        return utf8(v.as_bytes());
     }
-    if let Ok(v) = attr.read_scalar::<FixedAscii<256>>() {
-        return Some(v.as_str().to_string());
+    if let Some(v) = read_scalar_or_single::<FixedAscii<256>>(&attr) {
+        return utf8(v.as_bytes());
     }
-    if let Ok(v) = attr.read_scalar::<FixedUnicode<256>>() {
-        return Some(v.as_str().to_string());
+    if let Some(v) = read_scalar_or_single::<FixedUnicode<256>>(&attr) {
+        return utf8(v.as_bytes());
     }
     None
 }
@@ -1327,16 +1412,16 @@ fn read_string_attr(dataset: &Dataset, name: &str) -> Option<String> {
 fn read_string_dataset(group: &Group, name: &str) -> Option<String> {
     let dataset = group.dataset(name).ok()?;
     if let Ok(v) = dataset.read_raw::<VarLenUnicode>() {
-        return v.first().map(ToString::to_string);
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     if let Ok(v) = dataset.read_raw::<VarLenAscii>() {
-        return v.first().map(ToString::to_string);
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     if let Ok(v) = dataset.read_raw::<FixedAscii<256>>() {
-        return v.first().map(|s| s.as_str().to_string());
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     if let Ok(v) = dataset.read_raw::<FixedUnicode<256>>() {
-        return v.first().map(|s| s.as_str().to_string());
+        return v.first().and_then(|s| utf8(s.as_bytes()));
     }
     None
 }
