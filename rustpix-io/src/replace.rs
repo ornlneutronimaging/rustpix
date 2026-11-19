@@ -12,7 +12,8 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Creates a new, empty file with a fresh name beside `path`.
 ///
 /// Exclusive creation means an existing file or link at that name is never reused.
-fn reserve_temp_sibling(path: &Path) -> io::Result<PathBuf> {
+/// A `private` file is created readable by its owner only.
+fn reserve_temp_sibling(path: &Path, private: bool) -> io::Result<PathBuf> {
     for _ in 0..64 {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -22,11 +23,12 @@ fn reserve_temp_sibling(path: &Path) -> io::Result<PathBuf> {
             ".rustpix-{}-{sequence}-{nanos:08x}.partial",
             std::process::id()
         ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        if private {
+            owner_only(&mut options);
+        }
+        match options.open(&temp) {
             Ok(_) => return Ok(temp),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
@@ -38,6 +40,15 @@ fn reserve_temp_sibling(path: &Path) -> io::Result<PathBuf> {
     ))
 }
 
+#[cfg(unix)]
+fn owner_only(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn owner_only(_: &mut fs::OpenOptions) {}
+
 /// Runs `write` on a temporary file beside `path`, then renames it onto `path`.
 ///
 /// When `write` fails the temporary file is removed and `path` is untouched. An
@@ -48,7 +59,9 @@ pub(crate) fn write_then_replace<T>(
     write: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
     let path = std::path::absolute(path)?;
-    let temp = reserve_temp_sibling(&path)?;
+    let replacing_file = fs::symlink_metadata(&path).is_ok_and(|m| m.is_file());
+    // The replaced file's mode is applied only at rename, so the data stays private until then.
+    let temp = reserve_temp_sibling(&path, replacing_file)?;
     let outcome = write(&temp).and_then(|value| {
         if let Ok(existing) = fs::symlink_metadata(&path) {
             if existing.is_file() {
@@ -62,4 +75,48 @@ pub(crate) fn write_then_replace<T>(
         let _ = fs::remove_file(&temp);
     }
     outcome
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn replacement_is_owner_only_until_renamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.h5");
+        fs::write(&dest, b"old").unwrap();
+        fs::set_permissions(&dest, fs::Permissions::from_mode(0o440)).unwrap();
+
+        write_then_replace(&dest, |temp| {
+            assert_eq!(mode(temp), 0o600);
+            fs::write(temp, b"new")?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(mode(&dest), 0o440);
+        assert_eq!(fs::read(&dest).unwrap(), b"new");
+    }
+
+    #[test]
+    fn new_destination_keeps_the_default_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.h5");
+        let reference = dir.path().join("reference");
+        fs::write(&reference, b"").unwrap();
+
+        write_then_replace(&dest, |temp| {
+            fs::write(temp, b"new")?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(mode(&dest), mode(&reference));
+    }
 }
