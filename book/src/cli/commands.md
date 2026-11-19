@@ -25,18 +25,34 @@ rustpix process [OPTIONS] -o <OUTPUT> <INPUT>...
 | `--temporal-window-ns <FLOAT>` | `75.0` | Temporal window for clustering (nanoseconds) |
 | `--min-cluster-size <INT>` | `1` | Minimum cluster size |
 | `--out-of-core <BOOL>` | `true` | Enable out-of-core processing |
-| `--memory-fraction <FLOAT>` | `0.5` | Fraction of available memory to use |
+| `--memory-fraction <FLOAT>` | `0.5` | Fraction of available memory to use (out-of-core only) |
 | `--memory-budget-bytes <INT>` | Auto | Explicit memory budget in bytes |
 | `--parallelism <INT>` | Auto | Worker threads for processing |
-| `--queue-depth <INT>` | `2` | Pipeline queue depth |
-| `--async-io <BOOL>` | `false` | Enable async I/O pipeline |
+| `--queue-depth <INT>` | `2` | Pipeline queue depth (out-of-core only) |
+| `--async-io <BOOL>` | `false` | Enable async I/O pipeline (out-of-core only) |
 | `--run-number <INT>` | `0` | Run number for SNS HDF5 export |
 | `--ipts <STRING>` | `""` | Experiment identifier for SNS HDF5 (e.g., `IPTS-XXXXX`) |
 | `--instrument <NAME>` | `venus` | Instrument preset for SNS HDF5 (`venus`) |
 | `--tof-bins <INT>` | `200` | Number of TOF bins for TIFF output |
-| `--tof-max <INT>` | Auto | Maximum TOF in 25ns ticks for TIFF (auto-detect if omitted) |
+| `--tof-max <INT>` | Auto | Maximum TOF in 25ns ticks for TIFF (auto-detect if omitted); neutrons above it are left out and counted in a warning |
 | `--bit-depth <INT>` | `16` | Bit depth for TIFF output (`16` or `32`) |
 | `-v, --verbose` | Off | Verbose output |
+
+The out-of-core options (`--memory-fraction`, `--memory-budget-bytes`,
+`--parallelism`, `--queue-depth`, `--async-io`) are rejected together with
+`--out-of-core false`.
+
+### Output files
+
+- Inputs are checked before anything is written: each must contain TPX3 data,
+  and none may be the output file.
+- The output is written to a temporary file next to its destination and moved
+  into place when the run succeeds. A failed run leaves an existing output
+  file as it was.
+- An output path ending in `.tpx3` is refused.
+- TIFF output also writes a spectrum to `<output stem>.csv`. If that file
+  exists and is not a spectrum from an earlier run, the command stops instead
+  of overwriting it.
 
 ### Examples
 
@@ -122,7 +138,7 @@ rustpix benchmark [OPTIONS] <INPUT>
 
 ```bash
 $ rustpix benchmark data.tpx3 --iterations 5
-Benchmarking with 5242880 hits, 5 iterations
+Benchmarking with 5242880 hits in 3600 pulses, 5 iterations
 Algorithm  | Mean Time (ms)  | Min Time (ms)   | Max Time (ms)
 -----------------------------------------------------------------
 ABS        | 245.32          | 238.45          | 256.78

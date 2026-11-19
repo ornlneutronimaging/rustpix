@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it removed nothing.
 - The weighted centroid was wrong for a cluster whose summed ToT exceeded
   `u32::MAX`.
+- `rustpix process` created (and so truncated) the output before opening any
+  input. A missing input emptied an existing output file, and naming the
+  input as the output destroyed it. Inputs are now checked first, an output
+  that is one of the inputs or ends in `.tpx3` is refused, and the output is
+  written to a temporary file and moved into place only on success.
+- TIFF export overwrote an existing `<stem>.csv` with its spectrum, even an
+  unrelated event file. It now stops unless that file is empty or a spectrum
+  from an earlier run. With `-f tiff -o file.csv` the verbose log no longer claims a
+  spectrum was written.
+- TIFF export counted every neutron with a TOF above `--tof-max` in the last
+  bin. Such neutrons are left out and reported in a warning.
+- `--tof-bins` values too large to allocate ended in an abort or a panic; they
+  are now an ordinary error, reported before any data is read.
+- Files with no TPX3 data (empty or not TPX3) were processed "successfully"
+  into an empty output. `process`, `info` and both benchmarks now reject them.
+- `benchmark --iterations 0` and `out-of-core-benchmark --iterations 0`
+  printed NaN and infinities; zero iterations is now an error.
+- An error while writing the TIFF spectrum CSV could be lost.
 
 ### Changed
 
@@ -37,6 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ABS throughput is about 5% lower.
 - `SpatialGrid::insert` and `remove` ignore a `Default` (cell-less) grid
   instead of dividing by zero.
+- `--memory-fraction`, `--memory-budget-bytes`, `--parallelism`,
+  `--queue-depth` and `--async-io` are rejected with `--out-of-core false`
+  instead of being ignored.
+- `rustpix process` replaces an existing output file only when the run
+  succeeds, keeping that file's permissions. A symbolic link given as `-o` is
+  replaced by the new file rather than followed.
+- `rustpix info` reads the file pulse by pulse instead of loading every hit.
+- `rustpix benchmark` clusters each pulse separately, as `process` does, and
+  no longer times the copy of the input. Its first output line now also
+  reports the pulse count.
+
 
 ## [1.4.1] - 2026-10-09
 
