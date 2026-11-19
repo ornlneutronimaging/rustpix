@@ -2,6 +2,7 @@
 //!
 //! Adapted from generic `GridClustering` to work directly on `HitBatch` (`SoA`).
 
+use crate::params::{float_to_usize, require_finite_non_negative, window_ticks};
 use crate::SpatialGrid;
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;
@@ -17,7 +18,7 @@ pub struct GridConfig {
     pub min_cluster_size: u16,
     /// Clusters with more hits are dropped (`None` = no limit).
     pub max_cluster_size: Option<usize>,
-    /// Grid cell size (pixels).
+    /// Grid cell size (pixels); raised to the radius when smaller.
     pub cell_size: usize,
 }
 
@@ -53,6 +54,9 @@ pub struct GridClustering {
     config: GridConfig,
 }
 
+/// One cell already spans the whole `u16` coordinate range at this size.
+const MAX_CELL_SIZE: usize = 65_536;
+
 struct GridUnionContext {
     radius_sq: f64,
     window_tof: u32,
@@ -69,12 +73,14 @@ impl GridClustering {
     /// Cluster one pulse of TOF-ordered hits, setting `cluster_id`.
     ///
     /// # Errors
-    /// Returns an error if clustering fails.
+    /// Returns an error for a non-finite or negative radius or temporal window.
     pub fn cluster(
         &self,
         batch: &mut HitBatch,
         state: &mut GridState,
     ) -> Result<usize, ClusteringError> {
+        require_finite_non_negative("radius", self.config.radius)?;
+        require_finite_non_negative("temporal_window_ns", self.config.temporal_window_ns)?;
         if batch.is_empty() {
             return Ok(0);
         }
@@ -98,13 +104,14 @@ impl GridClustering {
         let (width, height) = Self::batch_dimensions(batch);
         Self::init_union_find(parent, rank, roots, cluster_sizes, root_to_label, n);
 
-        let grid = Self::prepare_grid(grid, self.config.cell_size, width, height);
+        let cell_size = self.cell_size();
+        let grid = Self::prepare_grid(grid, cell_size, width, height);
         Self::fill_grid(grid, batch);
 
         let union_ctx = GridUnionContext {
             radius_sq: self.config.radius * self.config.radius,
-            window_tof: float_to_u32((self.config.temporal_window_ns / 25.0).ceil()),
-            cell_size: i32::try_from(self.config.cell_size).unwrap_or(i32::MAX),
+            window_tof: window_ticks(self.config.temporal_window_ns),
+            cell_size: i32::try_from(cell_size).unwrap_or(i32::MAX),
         };
 
         Self::union_hits(batch, grid, parent, rank, n, &union_ctx);
@@ -156,6 +163,14 @@ fn union_sets(parent: &mut [usize], rank: &mut [usize], i: usize, j: usize) {
 }
 
 impl GridClustering {
+    /// Cell size no smaller than the radius, so the 3x3 cell scan covers it.
+    fn cell_size(&self) -> usize {
+        self.config
+            .cell_size
+            .max(float_to_usize(self.config.radius.ceil()))
+            .clamp(1, MAX_CELL_SIZE)
+    }
+
     fn batch_dimensions(batch: &HitBatch) -> (usize, usize) {
         let mut max_x = 0usize;
         let mut max_y = 0usize;
@@ -299,16 +314,6 @@ impl GridClustering {
 
         usize::try_from(next_label).unwrap_or(0)
     }
-}
-
-fn float_to_u32(value: f64) -> u32 {
-    if value <= 0.0 {
-        return 0;
-    }
-    if value >= f64::from(u32::MAX) {
-        return u32::MAX;
-    }
-    format!("{value:.0}").parse::<u32>().unwrap_or(u32::MAX)
 }
 
 impl Default for GridClustering {

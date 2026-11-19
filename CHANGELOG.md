@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- ABS clustering split a cluster into single-hit clusters when the cluster
+  started at y >= 288 in a pulse whose hits all lay in a narrow strip at low x
+  (for example a sparse pulse on the lower-left chip of a quad detector).
+  Each hit was then reported as its own neutron.
+- ABS and Grid clustering missed neighbours farther apart than one 32-pixel
+  grid cell: with a radius above 32, or for an ABS cluster more than about
+  33 pixels across. Grid now uses a cell at least as large as the radius.
+- DBSCAN counted a neighbour twice when `epsilon` was above 32 and the hits
+  spanned a single grid column, which could form a cluster below `min_points`.
+- DBSCAN panicked when a `DbscanState` was reused for a batch covering a
+  larger area than the previous one.
+- `SpatialGrid::remove` took pixel coordinates but looked up a cell index, so
+  it removed nothing.
+- The weighted centroid was wrong for a cluster whose summed ToT exceeded
+  `u32::MAX`.
+
+### Changed
+
+- Clustering rejects invalid parameters with `ClusteringError::InvalidConfig`
+  instead of panicking or silently misbehaving: a NaN, infinite or negative
+  radius, epsilon or temporal window, and an ABS scan interval of 0.
+- ABS lists a cluster in every grid cell its bounding box covers. A hit that
+  fits two open clusters can now join the other one, which can also change
+  the cluster count; in synthetic full-detector tests this affected about
+  0.01% of hits on very dense pulses and none on sparse ones. Single-thread
+  ABS throughput is about 5% lower.
+- `SpatialGrid::insert` and `remove` ignore a `Default` (cell-less) grid
+  instead of dividing by zero.
+
 ## [1.4.1] - 2026-10-09
 
 ### Fixed

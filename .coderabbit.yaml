@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    base_branches:
+      - "^main$"
+  path_filters:
+    - "!Cargo.lock"
+    - "!pixi.lock"
+    - "!**/*.icns"
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Scientific data-processing code: silent wrong results matter more than style.
+        Check integer casts and arithmetic on file-supplied values for overflow or
+        truncation, indexing and slicing for panics, TOF units (25 ns ticks vs ns),
+        and pulse boundaries. Library code must return errors rather than panic.
+    - path: "rustpix-algorithms/**"
+      instructions: |
+        Clustering throughput is a headline feature; flag per-hit work added to hot
+        loops in abs.rs, grid.rs and dbscan.rs.
+    - path: "rustpix-python/**"
+      instructions: |
+        Check GIL handling, that no Rust panic can cross into Python, and that
+        keyword arguments and defaults match the docs in book/src/python-api.
+    - path: ".github/workflows/**"
+      instructions: |
+        Check that untrusted values reach shell only through env, that permissions
+        are scoped per job, and that third-party actions are pinned by SHA.
+    - path: "CHANGELOG.md"
+      instructions: |
+        Entries should describe user-visible changes and match the code in the PR.

@@ -1,7 +1,12 @@
 //! SoA-optimized ABS (Age-Based Spatial) clustering.
 
+use crate::params::{float_to_usize, require_finite_non_negative, window_ticks};
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;
+
+const MIN_CELL_SIZE: usize = 32;
+/// Largest radius that can change a comparison between `u16` coordinates.
+const MAX_RADIUS: usize = 65_535;
 
 /// Configuration for ABS (Age-Based Spatial) clustering.
 #[derive(Clone, Debug)]
@@ -12,7 +17,7 @@ pub struct AbsConfig {
     pub neutron_correlation_window_ns: f64,
     /// Minimum cluster size to keep.
     pub min_cluster_size: u16,
-    /// Number of hits between aging scans.
+    /// Number of hits between aging scans; must be at least 1.
     pub scan_interval: usize,
 }
 
@@ -35,8 +40,33 @@ struct Bucket {
     start_tof: u32,
     cluster_id: i32,
     is_active: bool,
-    insertion_x: u16,
-    insertion_y: u16,
+    /// Grid cells covered by the bounding box, each of which lists this bucket.
+    cells: CellRange,
+}
+
+/// Inclusive block of grid cells.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CellRange {
+    col_min: usize,
+    col_max: usize,
+    row_min: usize,
+    row_max: usize,
+}
+
+impl CellRange {
+    fn of_point(x: u16, y: u16, cell_size: usize) -> Self {
+        let (col, row) = (usize::from(x) / cell_size, usize::from(y) / cell_size);
+        Self {
+            col_min: col,
+            col_max: col,
+            row_min: row,
+            row_max: row,
+        }
+    }
+
+    fn contains(&self, col: usize, row: usize) -> bool {
+        (self.col_min..=self.col_max).contains(&col) && (self.row_min..=self.row_max).contains(&row)
+    }
 }
 
 impl Bucket {
@@ -49,12 +79,11 @@ impl Bucket {
             start_tof: 0,
             cluster_id: -1,
             is_active: false,
-            insertion_x: 0,
-            insertion_y: 0,
+            cells: CellRange::default(),
         }
     }
 
-    fn initialize(&mut self, x: u16, y: u16, tof: u32, cluster_id: i32) {
+    fn initialize(&mut self, x: u16, y: u16, tof: u32, cluster_id: i32, cell_size: usize) {
         self.x_min = x;
         self.x_max = x;
         self.y_min = y;
@@ -62,8 +91,7 @@ impl Bucket {
         self.start_tof = tof;
         self.cluster_id = cluster_id;
         self.is_active = true;
-        self.insertion_x = x;
-        self.insertion_y = y;
+        self.cells = CellRange::of_point(x, y, cell_size);
     }
 
     fn add_hit(&mut self, x: u16, y: u16) {
@@ -91,8 +119,10 @@ pub struct AbsState {
     buckets: Vec<Bucket>,
     active_indices: Vec<usize>,
     free_indices: Vec<usize>,
-    grid: Vec<Vec<usize>>, // Spatial index
+    /// Row-major cells listing the open buckets whose bounding box covers them.
+    grid: Vec<Vec<usize>>,
     grid_w: usize,
+    grid_h: usize,
     next_cluster_id: i32,
     cluster_sizes: Vec<u32>,
 }
@@ -105,6 +135,7 @@ impl Default for AbsState {
             free_indices: Vec::new(),
             grid: vec![Vec::new(); (256 / 32 + 1) * (256 / 32 + 1)], // 32 is cell size
             grid_w: 256 / 32 + 1,
+            grid_h: 256 / 32 + 1,
             next_cluster_id: 0,
             cluster_sizes: Vec::new(),
         }
@@ -121,14 +152,23 @@ impl AbsClustering {
     /// Cluster one pulse of TOF-ordered hits using ABS.
     ///
     /// # Errors
-    /// Returns an error if internal state limits are exceeded.
+    /// Returns an error for a non-finite or negative radius or window, a zero
+    /// scan interval, or when internal state limits are exceeded.
     pub fn cluster(
         &self,
         batch: &mut HitBatch,
         state: &mut AbsState,
     ) -> Result<usize, ClusteringError> {
+        self.validate()?;
         if batch.is_empty() {
             return Ok(0);
+        }
+        // Buckets left open by a call that returned an error.
+        if !state.active_indices.is_empty() {
+            Self::close_active_buckets(state);
+            for cell in &mut state.grid {
+                cell.clear();
+            }
         }
 
         let n = batch.len();
@@ -138,11 +178,13 @@ impl AbsClustering {
         state.cluster_sizes.clear();
         state.next_cluster_id = 0;
 
-        let window_tof = self.window_tof();
-        let cell_size = 32;
+        let window_tof = window_ticks(self.config.neutron_correlation_window_ns);
+        // At least as wide as the radius, so the 3x3 cell search covers it.
+        let radius = float_to_usize(self.config.radius.ceil()).min(MAX_RADIUS);
+        let cell_size = MIN_CELL_SIZE.max(radius);
 
         let grid_w = Self::resize_grid(batch, state, cell_size);
-        let radius_i32 = self.radius_as_i32();
+        let radius_i32 = i32::try_from(radius).unwrap_or(i32::MAX);
         let search_ctx = AbsSearchContext {
             window_tof,
             cell_size,
@@ -157,7 +199,7 @@ impl AbsClustering {
 
             // Aging
             if i % self.config.scan_interval == 0 && i > 0 {
-                Self::scan_and_close(tof, state, window_tof, cell_size, grid_w);
+                Self::scan_and_close(tof, state, window_tof, grid_w);
             }
 
             let found = Self::find_bucket_for_hit(x, y, tof, state, &search_ctx);
@@ -171,10 +213,12 @@ impl AbsClustering {
                 }
                 batch.cluster_id[i] = cid;
                 state.buckets[bidx].add_hit(x, y);
+                let (col, row) = (usize::from(x) / cell_size, usize::from(y) / cell_size);
+                Self::extend_cells(state, bidx, col, row, grid_w);
             } else {
                 let bidx = Self::get_bucket(state)?;
                 let cid = Self::new_cluster_id(state)?;
-                state.buckets[bidx].initialize(x, y, tof, cid);
+                state.buckets[bidx].initialize(x, y, tof, cid, cell_size);
                 if let Ok(idx) = usize::try_from(cid) {
                     if let Some(size) = state.cluster_sizes.get_mut(idx) {
                         *size += 1;
@@ -193,40 +237,63 @@ impl AbsClustering {
             }
         }
 
-        // Close every open bucket so clusters never span batches.
-        let last_tof = batch.tof.last().copied().unwrap_or(0);
-        let min_cluster_size = u32::from(self.config.min_cluster_size);
         Ok(Self::finish_batch(
             batch,
             state,
-            window_tof,
-            cell_size,
-            grid_w,
-            last_tof,
-            min_cluster_size,
+            u32::from(self.config.min_cluster_size),
         ))
     }
 
-    fn window_tof(&self) -> u32 {
-        let window = (self.config.neutron_correlation_window_ns / 25.0).ceil();
-        if window <= 0.0 {
-            return 0;
+    fn validate(&self) -> Result<(), ClusteringError> {
+        require_finite_non_negative("radius", self.config.radius)?;
+        require_finite_non_negative(
+            "neutron_correlation_window_ns",
+            self.config.neutron_correlation_window_ns,
+        )?;
+        if self.config.scan_interval == 0 {
+            return Err(ClusteringError::InvalidConfig(
+                "scan_interval must be at least 1".to_string(),
+            ));
         }
-        if window >= f64::from(u32::MAX) {
-            return u32::MAX;
-        }
-        format!("{window:.0}").parse::<u32>().unwrap_or(u32::MAX)
+        Ok(())
     }
 
-    fn radius_as_i32(&self) -> i32 {
-        let radius = self.config.radius.ceil();
-        if radius <= 0.0 {
-            return 0;
+    /// Lists the bucket in the cells its bounding box gains by covering cell `(col, row)`.
+    fn extend_cells(state: &mut AbsState, bidx: usize, col: usize, row: usize, grid_w: usize) {
+        let known = state.buckets[bidx].cells;
+        if known.contains(col, row) {
+            return;
         }
-        if radius >= f64::from(i32::MAX) {
-            return i32::MAX;
+        let now = CellRange {
+            col_min: known.col_min.min(col),
+            col_max: known.col_max.max(col),
+            row_min: known.row_min.min(row),
+            row_max: known.row_max.max(row),
+        };
+        for r in now.row_min..=now.row_max {
+            for c in now.col_min..=now.col_max {
+                if !known.contains(c, r) {
+                    if let Some(cell) = state.grid.get_mut(r * grid_w + c) {
+                        cell.push(bidx);
+                    }
+                }
+            }
         }
-        format!("{radius:.0}").parse::<i32>().unwrap_or(i32::MAX)
+        state.buckets[bidx].cells = now;
+    }
+
+    /// Removes the bucket from every cell that lists it.
+    fn unregister(state: &mut AbsState, bidx: usize, grid_w: usize) {
+        let cells = state.buckets[bidx].cells;
+        for row in cells.row_min..=cells.row_max {
+            for col in cells.col_min..=cells.col_max {
+                if let Some(cell) = state.grid.get_mut(row * grid_w + col) {
+                    if let Some(pos) = cell.iter().position(|&listed| listed == bidx) {
+                        cell.swap_remove(pos);
+                    }
+                }
+            }
+        }
     }
 
     fn resize_grid(batch: &HitBatch, state: &mut AbsState, cell_size: usize) -> usize {
@@ -243,15 +310,17 @@ impl AbsClustering {
             }
         }
 
-        let req_w = max_x + 32;
-        let req_h = max_y + 32;
-        let req_grid_w = req_w / cell_size + 1;
-        let req_grid_h = req_h / cell_size + 1;
-        let req_total = req_grid_w * req_grid_h;
+        // One empty column and row beyond the last hit's cell, so the 3x3 search
+        // never reads past a row's end into the next row.
+        let req_grid_w = max_x / cell_size + 2;
+        let req_grid_h = max_y / cell_size + 2;
 
-        if req_total > state.grid.len() || req_grid_w > state.grid_w {
-            state.grid = vec![Vec::new(); req_total];
+        // Insertion, lookup and removal all use `grid_w` as the row stride. A
+        // grid too small in either direction is rebuilt to this batch's size.
+        if req_grid_w > state.grid_w || req_grid_h > state.grid_h {
             state.grid_w = req_grid_w;
+            state.grid_h = req_grid_h;
+            state.grid = vec![Vec::new(); state.grid_w * state.grid_h];
         }
 
         state.grid_w
@@ -282,25 +351,9 @@ impl AbsClustering {
         usize::try_from(next).unwrap_or(0)
     }
 
-    fn finish_batch(
-        batch: &mut HitBatch,
-        state: &mut AbsState,
-        window_tof: u32,
-        cell_size: usize,
-        grid_w: usize,
-        last_tof: u32,
-        min_cluster_size: u32,
-    ) -> usize {
-        Self::scan_and_close(
-            last_tof.wrapping_add(window_tof + 1),
-            state,
-            window_tof,
-            cell_size,
-            grid_w,
-        );
-
-        // Force close remaining active
-        Self::close_active_buckets(state, cell_size, grid_w);
+    /// Closes every open bucket so clusters never span batches, then relabels by size.
+    fn finish_batch(batch: &mut HitBatch, state: &mut AbsState, min_cluster_size: u32) -> usize {
+        Self::close_active_buckets(state);
         Self::finalize_clusters(batch, state, min_cluster_size)
     }
 
@@ -357,20 +410,12 @@ impl AbsClustering {
         None
     }
 
-    fn close_active_buckets(state: &mut AbsState, cell_size: usize, grid_w: usize) {
+    fn close_active_buckets(state: &mut AbsState) {
         let active = std::mem::take(&mut state.active_indices);
         for bidx in active {
+            Self::unregister(state, bidx, state.grid_w);
             state.buckets[bidx].is_active = false;
             state.free_indices.push(bidx);
-            let b = &state.buckets[bidx];
-            let gx = usize::from(b.insertion_x) / cell_size;
-            let gy = usize::from(b.insertion_y) / cell_size;
-            let gidx = gy * grid_w + gx;
-            if let Some(cell) = state.grid.get_mut(gidx) {
-                if let Some(pos) = cell.iter().position(|&x| x == bidx) {
-                    cell.swap_remove(pos);
-                }
-            }
         }
     }
 
@@ -401,13 +446,7 @@ impl AbsClustering {
         Ok(cid)
     }
 
-    fn scan_and_close(
-        ref_tof: u32,
-        state: &mut AbsState,
-        window_tof: u32,
-        cell_size: usize,
-        grid_w: usize,
-    ) {
+    fn scan_and_close(ref_tof: u32, state: &mut AbsState, window_tof: u32, grid_w: usize) {
         let mut keep = Vec::new();
         let mut remove = Vec::new();
 
@@ -423,17 +462,7 @@ impl AbsClustering {
         state.active_indices = keep;
 
         for bidx in remove {
-            // Remove from grid
-            let b = &state.buckets[bidx];
-            let gx = usize::from(b.insertion_x) / cell_size;
-            let gy = usize::from(b.insertion_y) / cell_size;
-            let gidx = gy * grid_w + gx;
-            if let Some(cell) = state.grid.get_mut(gidx) {
-                if let Some(pos) = cell.iter().position(|&x| x == bidx) {
-                    cell.swap_remove(pos);
-                }
-            }
-
+            Self::unregister(state, bidx, grid_w);
             state.buckets[bidx].is_active = false;
             state.free_indices.push(bidx);
         }

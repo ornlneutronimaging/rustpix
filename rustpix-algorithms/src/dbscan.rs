@@ -1,5 +1,6 @@
 //! SoA-optimized DBSCAN clustering.
 
+use crate::params::{float_to_usize, require_finite_non_negative, window_ticks};
 use rayon::prelude::*;
 use rustpix_core::clustering::ClusteringError;
 use rustpix_core::soa::HitBatch;
@@ -79,12 +80,14 @@ impl DbscanClustering {
     /// Cluster hits using DBSCAN.
     ///
     /// # Errors
-    /// Returns an error if clustering fails.
+    /// Returns an error for a non-finite or negative epsilon or temporal window.
     pub fn cluster(
         &self,
         batch: &mut HitBatch,
         state: &mut DbscanState,
     ) -> Result<usize, ClusteringError> {
+        require_finite_non_negative("epsilon", self.config.epsilon)?;
+        require_finite_non_negative("temporal_window_ns", self.config.temporal_window_ns)?;
         let n = batch.len();
         if batch.is_empty() {
             return Ok(0);
@@ -175,12 +178,11 @@ impl DbscanClustering {
         let grid_h = height / cell_size + 1;
         let total_cells = grid_w * grid_h;
 
+        for cell in grid.iter_mut() {
+            cell.clear();
+        }
         if grid.len() < total_cells {
             grid.resize(total_cells, Vec::new());
-        } else {
-            for cell in grid.iter_mut() {
-                cell.clear();
-            }
         }
 
         for i in 0..n {
@@ -193,7 +195,7 @@ impl DbscanClustering {
         }
 
         let epsilon_sq = self.config.epsilon * self.config.epsilon;
-        let window_tof = float_to_u32((self.config.temporal_window_ns / 25.0).ceil());
+        let window_tof = window_ticks(self.config.temporal_window_ns);
 
         DbscanContext {
             grid,
@@ -282,6 +284,9 @@ impl DbscanClustering {
                 else {
                     continue;
                 };
+                if neighbor_x >= ctx.grid_w {
+                    continue;
+                }
                 let gidx = neighbor_y * ctx.grid_w + neighbor_x;
                 if let Some(cell) = ctx.grid.get(gidx) {
                     for &j in cell {
@@ -337,21 +342,4 @@ impl DbscanClustering {
             }
         }
     }
-}
-
-fn float_to_u32(value: f64) -> u32 {
-    if value <= 0.0 {
-        return 0;
-    }
-    if value >= f64::from(u32::MAX) {
-        return u32::MAX;
-    }
-    format!("{value:.0}").parse::<u32>().unwrap_or(u32::MAX)
-}
-
-fn float_to_usize(value: f64) -> usize {
-    if value <= 0.0 {
-        return 0;
-    }
-    format!("{value:.0}").parse::<usize>().unwrap_or(usize::MAX)
 }
