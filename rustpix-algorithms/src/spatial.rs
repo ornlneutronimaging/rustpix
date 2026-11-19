@@ -81,35 +81,22 @@ impl<T: Clone> SpatialGrid<T> {
     /// Ignores values outside the grid bounds.
     #[inline]
     pub fn insert(&mut self, x: i32, y: i32, value: T) {
-        if x < 0 || y < 0 {
-            return;
-        }
-
-        let cx = usize::try_from(x).unwrap_or(0) / self.cell_size;
-        let cy = usize::try_from(y).unwrap_or(0) / self.cell_size;
-
-        if cx < self.width_cells && cy < self.height_cells {
-            let idx = cy * self.width_cells + cx;
-            if let Some(cell) = self.cells.get_mut(idx) {
-                cell.push(value);
-            }
+        if let Some(cell) = self
+            .pixel_cell(x, y)
+            .and_then(|idx| self.cells.get_mut(idx))
+        {
+            cell.push(value);
         }
     }
 
-    /// Get the cell index for a given coordinate.
-    #[inline]
-    fn get_cell_index(&self, cx: i32, cy: i32) -> Option<usize> {
-        if cx < 0 || cy < 0 {
-            return None;
+    /// Index of the cell containing pixel `(x, y)`, if it lies inside the grid.
+    fn pixel_cell(&self, x: i32, y: i32) -> Option<usize> {
+        if self.cell_size == 0 {
+            return None; // `Default` grid with no cells
         }
-        let cx = usize::try_from(cx).ok()?;
-        let cy = usize::try_from(cy).ok()?;
-
-        if cx < self.width_cells && cy < self.height_cells {
-            Some(cy * self.width_cells + cx)
-        } else {
-            None
-        }
+        let cx = usize::try_from(x).ok()? / self.cell_size;
+        let cy = usize::try_from(y).ok()? / self.cell_size;
+        (cx < self.width_cells && cy < self.height_cells).then(|| cy * self.width_cells + cx)
     }
 
     /// Remove a value from the cell containing pixel `(x, y)`.
@@ -117,11 +104,7 @@ impl<T: Clone> SpatialGrid<T> {
     where
         T: PartialEq,
     {
-        if x < 0 || y < 0 {
-            return;
-        }
-        let cell_size = i32::try_from(self.cell_size).unwrap_or(i32::MAX);
-        if let Some(idx) = self.get_cell_index(x / cell_size, y / cell_size) {
+        if let Some(idx) = self.pixel_cell(x, y) {
             if let Some(cell) = self.cells.get_mut(idx) {
                 if let Some(pos) = cell.iter().position(|item| item == value) {
                     cell.swap_remove(pos);
@@ -134,13 +117,7 @@ impl<T: Clone> SpatialGrid<T> {
     #[inline]
     #[must_use]
     pub fn get_cell_slice(&self, x: i32, y: i32) -> Option<&[T]> {
-        if x < 0 || y < 0 {
-            return None;
-        }
-        let cell_size = i32::try_from(self.cell_size).unwrap_or(i32::MAX);
-        let cx = x / cell_size;
-        let cy = y / cell_size;
-        self.get_cell_index(cx, cy)
+        self.pixel_cell(x, y)
             .and_then(|idx| self.cells.get(idx).map(Vec::as_slice))
     }
 
@@ -170,6 +147,9 @@ impl<T: Clone> SpatialGrid<T> {
     /// Appends neighbors to the provided buffer to avoid allocation.
     #[inline]
     pub fn query_neighborhood(&self, x: i32, y: i32, buffer: &mut Vec<T>) {
+        if self.cell_size == 0 {
+            return;
+        }
         let cell_size = i32::try_from(self.cell_size).unwrap_or(i32::MAX);
         let cx = x / cell_size;
         let cy = y / cell_size;
@@ -227,6 +207,16 @@ mod tests {
         grid.insert(100, 100, 8);
         grid.remove(100, 100, &7);
         assert_eq!(grid.get_cell_slice(100, 100), Some(&[8][..]));
+    }
+
+    #[test]
+    fn test_default_grid_ignores_insert_and_remove() {
+        let mut grid: SpatialGrid<usize> = SpatialGrid::default();
+        grid.insert(0, 0, 7);
+        grid.remove(0, 0, &7);
+        let mut found = Vec::new();
+        grid.query_neighborhood(0, 0, &mut found);
+        assert_eq!((grid.get_cell_slice(0, 0), found.len()), (None, 0));
     }
 
     #[test]

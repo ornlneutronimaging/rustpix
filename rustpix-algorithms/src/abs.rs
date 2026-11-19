@@ -320,7 +320,7 @@ impl AbsClustering {
         // the grid is rebuilt whenever the width changes.
         if req_grid_w != state.grid_w || req_grid_h > state.grid_h {
             state.grid_w = req_grid_w;
-            state.grid_h = state.grid_h.max(req_grid_h);
+            state.grid_h = req_grid_h;
             state.grid = vec![Vec::new(); state.grid_w * state.grid_h];
         }
         let _ = req_total;
@@ -384,6 +384,9 @@ impl AbsClustering {
                 else {
                     continue;
                 };
+                if neighbor_x >= ctx.grid_w {
+                    continue; // would wrap into the next row
+                }
                 let gidx = neighbor_y * ctx.grid_w + neighbor_x;
                 if let Some(cell) = state.grid.get(gidx) {
                     for &bidx in cell {

@@ -41,15 +41,23 @@ fn grid_keeps_hits_apart_beyond_the_radius() {
 
 #[test]
 fn grid_state_survives_a_cell_size_change() {
+    // 15 px apart, in 32 px cells 0 and 1; a stale 32 px grid searched with a
+    // 50 px step would skip cell 1.
+    let pair = || {
+        let mut batch = HitBatch::default();
+        batch.push((20, 10, 1000, 30, 0, 0));
+        batch.push((35, 10, 1000, 30, 0, 0));
+        batch
+    };
     let mut state = GridState::default();
     for radius in [5.0, 50.0, 5.0] {
         let config = GridConfig {
             radius,
             ..Default::default()
         };
-        let expected = if radius >= 40.0 { 1 } else { 2 };
+        let expected = if radius >= 15.0 { 1 } else { 2 };
         let clusters = GridClustering::new(config)
-            .cluster(&mut distant_pair(), &mut state)
+            .cluster(&mut pair(), &mut state)
             .unwrap();
         assert_eq!(clusters, expected, "radius = {radius}");
     }

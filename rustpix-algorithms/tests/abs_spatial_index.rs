@@ -112,3 +112,32 @@ fn aged_buckets_are_closed_and_reusable() {
         .unwrap();
     assert_eq!(clusters, 500);
 }
+
+#[test]
+fn reused_state_sizes_the_grid_from_the_current_batch() {
+    let mut state = AbsState::default();
+    for (x, y) in [(0, 65_535), (65_535, 0)] {
+        let mut batch = HitBatch::default();
+        batch.push((x, y, 1000, 30, 0, 0));
+        assert_eq!(abs_clusters(&mut batch, &mut state), 1);
+    }
+}
+
+#[test]
+fn search_does_not_wrap_into_the_next_row() {
+    // Radius 50 gives 50 px cells; the last hit's right-hand neighbour column
+    // is past the grid edge and must not alias row 1, column 0.
+    let mut batch = HitBatch::default();
+    for (x, y) in [(90, 99), (0, 50), (50, 50), (100, 55)] {
+        batch.push((x, y, 1000, 30, 0, 0));
+    }
+    let config = AbsConfig {
+        radius: 50.0,
+        ..Default::default()
+    };
+    let clusters = AbsClustering::new(config)
+        .cluster(&mut batch, &mut AbsState::default())
+        .unwrap();
+    assert!(clusters >= 1);
+    assert!(batch.cluster_id.iter().all(|&id| id >= 0));
+}

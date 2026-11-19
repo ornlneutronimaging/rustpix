@@ -30,10 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clustering rejects invalid parameters with `ClusteringError::InvalidConfig`
   instead of panicking or silently misbehaving: a NaN, infinite or negative
   radius, epsilon or temporal window, and an ABS scan interval of 0.
-- ABS lists a cluster in every grid cell its bounding box covers. Cluster
-  counts are unchanged; on very dense pulses a few hits that fit two
-  overlapping open clusters (about 0.01% in synthetic tests) join the other
-  one. Single-thread ABS throughput is about 5% lower.
+- ABS lists a cluster in every grid cell its bounding box covers. A hit that
+  fits two open clusters can now join the other one, which can also change
+  the cluster count; in synthetic full-detector tests this affected about
+  0.01% of hits on very dense pulses and none on sparse ones. Single-thread
+  ABS throughput is about 5% lower.
+- `SpatialGrid::insert` and `remove` ignore a `Default` (cell-less) grid
+  instead of dividing by zero.
 
 ## [1.4.1] - 2026-10-09
 
