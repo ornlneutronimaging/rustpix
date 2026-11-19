@@ -629,12 +629,14 @@ fn ensure_spectrum_replaceable(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
+    if file.metadata()?.len() == 0 {
+        return Ok(());
+    }
     let mut first_line = String::new();
     let readable = BufReader::new(file.take(256))
         .read_line(&mut first_line)
         .is_ok();
-    let first_line = first_line.trim_end();
-    if readable && (first_line.is_empty() || first_line == SPECTRUM_HEADER) {
+    if readable && first_line.trim_end() == SPECTRUM_HEADER {
         return Ok(());
     }
     Err(CliError::Other(format!(
@@ -658,7 +660,7 @@ fn run_process_flat(
     ooc_config: &OutOfCoreConfig,
     verbose: bool,
 ) -> Result<(usize, usize)> {
-    let pending = PendingOutput::new(output);
+    let pending = PendingOutput::new(output)?;
     let mut writer = rustpix_io::DataFileWriter::create(pending.path())?;
     let mut wrote_header = false;
     let mut total_hits = 0usize;
@@ -747,7 +749,7 @@ fn run_process_hdf5(
         include_chip_id: true,
         include_n_hits: true,
     };
-    let pending = PendingOutput::new(output);
+    let pending = PendingOutput::new(output)?;
     let mut sink = Hdf5NeutronSink::create(pending.path(), options)?;
     let mut total_hits = 0usize;
     let mut total_neutrons = 0usize;
@@ -855,7 +857,7 @@ fn run_process_sns_hdf5(
         Instrument::Venus => SnsWriteOptions::venus_defaults(run_meta),
     };
     write_options.super_resolution_factor = extraction.super_resolution_factor;
-    let pending = PendingOutput::new(output);
+    let pending = PendingOutput::new(output)?;
     let mut sink = SnsEventSink::create(pending.path(), write_options)
         .map_err(|e| CliError::Other(format!("Failed to create SNS HDF5: {e}")))?;
 
@@ -1062,7 +1064,7 @@ fn run_process_tiff(
         eprintln!("Writing TIFF stack to: {}", output.display());
     }
 
-    let tiff = PendingOutput::new(output);
+    let tiff = PendingOutput::new(output)?;
     write_tiff_stack_file(
         tiff.path(),
         &stack.data,
@@ -1073,7 +1075,7 @@ fn run_process_tiff(
     )?;
 
     if let Some(spectrum_path) = spectrum_sidecar_path(output) {
-        let spectrum = PendingOutput::new(&spectrum_path);
+        let spectrum = PendingOutput::new(&spectrum_path)?;
         write_spectrum_csv(
             spectrum.path(),
             &stack.data,

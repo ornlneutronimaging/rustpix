@@ -286,6 +286,56 @@ fn tiff_spectrum_does_not_overwrite_an_unrelated_csv() {
 }
 
 #[test]
+fn tiff_spectrum_guard_needs_the_spectrum_header() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("run.tpx3");
+    let stack = dir.path().join("ev.tif");
+    let csv = dir.path().join("ev.csv");
+    write_sample(&input);
+    fs::write(&csv, "\nkeep,this\n").unwrap();
+
+    let result = rustpix(&["process", s(&input), "-o", s(&stack)]);
+    assert!(!result.status.success());
+    assert_eq!(fs::read_to_string(&csv).unwrap(), "\nkeep,this\n");
+}
+
+#[test]
+fn staging_never_writes_through_an_existing_file() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("run.tpx3");
+    let output = dir.path().join("out.csv");
+    write_sample(&input);
+    let decoy = dir.path().join(format!(
+        ".rustpix-{}-0-00000000.partial",
+        std::process::id()
+    ));
+    fs::write(&decoy, "not ours").unwrap();
+
+    assert!(rustpix(&["process", s(&input), "-o", s(&output)])
+        .status
+        .success());
+    assert_eq!(fs::read_to_string(&decoy).unwrap(), "not ours");
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_an_output_keeps_its_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("run.tpx3");
+    let output = dir.path().join("out.csv");
+    write_sample(&input);
+    fs::write(&output, "old").unwrap();
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(rustpix(&["process", s(&input), "-o", s(&output)])
+        .status
+        .success());
+    let mode = fs::metadata(&output).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
 fn tiff_rerun_replaces_its_own_spectrum() {
     let dir = TempDir::new().unwrap();
     let input = dir.path().join("run.tpx3");

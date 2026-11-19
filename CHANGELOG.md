@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--memory-fraction`, `--memory-budget-bytes`, `--parallelism`,
   `--queue-depth` and `--async-io` are rejected with `--out-of-core false`
   instead of being ignored.
+- `rustpix process` replaces an existing output file only when the run
+  succeeds, keeping that file's permissions. A symbolic link given as `-o` is
+  replaced by the new file rather than followed.
 - `rustpix info` reads the file pulse by pulse instead of loading every hit.
 - `rustpix benchmark` clusters each pulse separately, as `process` does, and
   no longer times the copy of the input. Its first output line now also
