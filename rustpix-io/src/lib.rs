@@ -13,6 +13,8 @@ pub mod hdf5_sns;
 pub mod out_of_core;
 mod out_of_core_pipeline;
 mod reader;
+#[cfg(feature = "hdf5")]
+mod replace;
 pub mod scanner;
 mod writer;
 

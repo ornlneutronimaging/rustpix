@@ -22,6 +22,7 @@ use crate::hdf5::{
     to_var_len_unicode, NeutronEventBatch,
 };
 use crate::reader::EventBatch;
+use crate::replace::write_then_replace;
 use crate::{Error, Result};
 use hdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
 use hdf5::{Dataset, File, Group};
@@ -747,7 +748,8 @@ impl Drop for SnsEventSink {
 
 /// Write hit events in SNS `NXsnsevent` format (one-shot).
 ///
-/// All batches are written to bank index 0.
+/// All batches go to bank index 0. An existing file at `path` is replaced
+/// only when the write succeeds.
 ///
 /// # Errors
 /// Returns an error if the file cannot be created or data cannot be written.
@@ -756,17 +758,19 @@ where
     P: AsRef<Path>,
     I: IntoIterator<Item = EventBatch>,
 {
-    let mut sink = SnsEventSink::create(path, options.clone())?;
-    for batch in batches {
-        sink.write_hits(0, &batch)?;
-    }
-    sink.finalize()?;
-    Ok(())
+    write_then_replace(path.as_ref(), |temp| {
+        let mut sink = SnsEventSink::create(temp, options.clone())?;
+        for batch in batches {
+            sink.write_hits(0, &batch)?;
+        }
+        sink.finalize()
+    })
 }
 
 /// Write neutron events in SNS `NXsnsevent` format (one-shot).
 ///
-/// All batches are written to bank index 0.
+/// All batches go to bank index 0. An existing file at `path` is replaced
+/// only when the write succeeds.
 ///
 /// # Errors
 /// Returns an error if the file cannot be created or data cannot be written.
@@ -775,12 +779,13 @@ where
     P: AsRef<Path>,
     I: IntoIterator<Item = NeutronEventBatch>,
 {
-    let mut sink = SnsEventSink::create(path, options.clone())?;
-    for batch in batches {
-        sink.write_neutrons(0, &batch)?;
-    }
-    sink.finalize()?;
-    Ok(())
+    write_then_replace(path.as_ref(), |temp| {
+        let mut sink = SnsEventSink::create(temp, options.clone())?;
+        for batch in batches {
+            sink.write_neutrons(0, &batch)?;
+        }
+        sink.finalize()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1972,6 +1977,56 @@ mod tests {
             err_msg.contains("non-monotonic"),
             "Expected non-monotonic error, got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn test_one_shot_failure_keeps_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        std::fs::write(&path, b"previous export").unwrap();
+
+        let batches = vec![
+            make_hit_batch(1000, &[0], &[0], &[100]),
+            make_hit_batch(2000, &[1], &[1], &[200]),
+            make_hit_batch(1500, &[2], &[2], &[300]),
+        ];
+        let err = write_hits_sns(&path, batches, &make_test_options()).unwrap_err();
+        assert!(err.to_string().contains("non-monotonic"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+
+        let fresh = dir.path().join("fresh.nxs.h5");
+        let batches = vec![
+            make_neutron_batch(2000, &[8.0], &[8.0], &[100]),
+            make_neutron_batch(1000, &[16.0], &[16.0], &[200]),
+        ];
+        assert!(write_neutrons_sns(&fresh, batches, &make_test_options()).is_err());
+        assert!(!fresh.exists());
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".partial"))
+            .collect();
+        assert_eq!(leftovers, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_one_shot_success_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.nxs.h5");
+        std::fs::write(&path, b"previous export").unwrap();
+
+        let batches = vec![
+            make_hit_batch(1000, &[0], &[0], &[100]),
+            make_hit_batch(2000, &[1], &[1], &[200]),
+        ];
+        write_hits_sns(&path, batches, &make_test_options()).unwrap();
+
+        let events = SnsEventReader::open(&path)
+            .unwrap()
+            .read_events(&venus_bank100_config(), 0, None)
+            .unwrap();
+        assert_eq!(events.event_id.len(), 2);
     }
 
     #[test]
