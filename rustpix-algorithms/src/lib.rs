@@ -11,6 +11,7 @@
 mod abs;
 mod dbscan;
 mod grid;
+mod params;
 mod processing;
 pub mod spatial;
 

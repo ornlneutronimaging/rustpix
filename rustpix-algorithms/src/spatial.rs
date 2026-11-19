@@ -112,12 +112,16 @@ impl<T: Clone> SpatialGrid<T> {
         }
     }
 
-    /// Remove a value from the given coordinates.
+    /// Remove a value from the cell containing pixel `(x, y)`.
     pub fn remove(&mut self, x: i32, y: i32, value: &T)
     where
         T: PartialEq,
     {
-        if let Some(idx) = self.get_cell_index(x, y) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        let cell_size = i32::try_from(self.cell_size).unwrap_or(i32::MAX);
+        if let Some(idx) = self.get_cell_index(x / cell_size, y / cell_size) {
             if let Some(cell) = self.cells.get_mut(idx) {
                 if let Some(pos) = cell.iter().position(|item| item == value) {
                     cell.swap_remove(pos);
@@ -214,6 +218,15 @@ mod tests {
         assert!(neighbors.contains(&0));
         assert!(neighbors.contains(&1));
         assert!(!neighbors.contains(&2));
+    }
+
+    #[test]
+    fn test_remove_uses_pixel_coordinates() {
+        let mut grid: SpatialGrid<usize> = SpatialGrid::new(32, 512, 512);
+        grid.insert(100, 100, 7);
+        grid.insert(100, 100, 8);
+        grid.remove(100, 100, &7);
+        assert_eq!(grid.get_cell_slice(100, 100), Some(&[8][..]));
     }
 
     #[test]
