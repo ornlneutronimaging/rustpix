@@ -30,10 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clustering rejects invalid parameters with `ClusteringError::InvalidConfig`
   instead of panicking or silently misbehaving: a NaN, infinite or negative
   radius, epsilon or temporal window, and an ABS scan interval of 0.
-- When a hit could join more than one open ABS cluster, it joins the one
-  opened first. The choice used to depend on grid-cell scan order. Cluster
-  counts are unchanged; on very dense pulses a small fraction of such hits
-  (under 0.2% in synthetic tests) is assigned to the other overlapping cluster.
+- ABS lists a cluster in every grid cell its bounding box covers. Cluster
+  counts are unchanged; on very dense pulses a few hits that fit two
+  overlapping open clusters (about 0.01% in synthetic tests) join the other
+  one. Single-thread ABS throughput is about 5% lower.
 
 ## [1.4.1] - 2026-10-09
 

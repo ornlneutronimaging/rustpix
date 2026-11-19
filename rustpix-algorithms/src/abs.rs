@@ -32,21 +32,6 @@ impl Default for AbsConfig {
     }
 }
 
-/// Inclusive block of grid cells.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct CellRange {
-    col_min: usize,
-    col_max: usize,
-    row_min: usize,
-    row_max: usize,
-}
-
-impl CellRange {
-    fn contains(&self, col: usize, row: usize) -> bool {
-        (self.col_min..=self.col_max).contains(&col) && (self.row_min..=self.row_max).contains(&row)
-    }
-}
-
 struct Bucket {
     x_min: u16,
     x_max: u16,
@@ -55,8 +40,33 @@ struct Bucket {
     start_tof: u32,
     cluster_id: i32,
     is_active: bool,
-    /// Grid cells that hold this bucket's index.
-    cells: Option<CellRange>,
+    /// Grid cells covered by the bounding box, each of which lists this bucket.
+    cells: CellRange,
+}
+
+/// Inclusive block of grid cells.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CellRange {
+    col_min: usize,
+    col_max: usize,
+    row_min: usize,
+    row_max: usize,
+}
+
+impl CellRange {
+    fn of_point(x: u16, y: u16, cell_size: usize) -> Self {
+        let (col, row) = (usize::from(x) / cell_size, usize::from(y) / cell_size);
+        Self {
+            col_min: col,
+            col_max: col,
+            row_min: row,
+            row_max: row,
+        }
+    }
+
+    fn contains(&self, col: usize, row: usize) -> bool {
+        (self.col_min..=self.col_max).contains(&col) && (self.row_min..=self.row_max).contains(&row)
+    }
 }
 
 impl Bucket {
@@ -69,11 +79,11 @@ impl Bucket {
             start_tof: 0,
             cluster_id: -1,
             is_active: false,
-            cells: None,
+            cells: CellRange::default(),
         }
     }
 
-    fn initialize(&mut self, x: u16, y: u16, tof: u32, cluster_id: i32) {
+    fn initialize(&mut self, x: u16, y: u16, tof: u32, cluster_id: i32, cell_size: usize) {
         self.x_min = x;
         self.x_max = x;
         self.y_min = y;
@@ -81,7 +91,7 @@ impl Bucket {
         self.start_tof = tof;
         self.cluster_id = cluster_id;
         self.is_active = true;
-        self.cells = None;
+        self.cells = CellRange::of_point(x, y, cell_size);
     }
 
     fn add_hit(&mut self, x: u16, y: u16) {
@@ -89,11 +99,6 @@ impl Bucket {
         self.x_max = self.x_max.max(x);
         self.y_min = self.y_min.min(y);
         self.y_max = self.y_max.max(y);
-    }
-
-    fn release(&mut self) {
-        self.is_active = false;
-        self.cells = None;
     }
 }
 
@@ -106,36 +111,7 @@ struct AbsSearchContext {
     window_tof: u32,
     cell_size: usize,
     grid_w: usize,
-    grid_h: usize,
-    radius: i32,
-}
-
-impl AbsSearchContext {
-    /// Cells overlapped by the bucket's bounding box grown by the radius.
-    fn reach(&self, bucket: &Bucket) -> CellRange {
-        let low =
-            |v: u16| usize::try_from(i32::from(v) - self.radius).unwrap_or(0) / self.cell_size;
-        let high = |v: u16, cells: usize| {
-            (usize::try_from(i32::from(v) + self.radius).unwrap_or(0) / self.cell_size)
-                .min(cells.saturating_sub(1))
-        };
-        CellRange {
-            col_min: low(bucket.x_min),
-            col_max: high(bucket.x_max, self.grid_w),
-            row_min: low(bucket.y_min),
-            row_max: high(bucket.y_max, self.grid_h),
-        }
-    }
-
-    fn accepts(&self, bucket: &Bucket, x: u16, y: u16, tof: u32) -> bool {
-        let (ix, iy) = (i32::from(x), i32::from(y));
-        bucket.is_active
-            && ix >= i32::from(bucket.x_min) - self.radius
-            && ix <= i32::from(bucket.x_max) + self.radius
-            && iy >= i32::from(bucket.y_min) - self.radius
-            && iy <= i32::from(bucket.y_max) + self.radius
-            && tof.wrapping_sub(bucket.start_tof) <= self.window_tof
-    }
+    radius_i32: i32,
 }
 
 /// Reusable ABS clustering state for streaming or repeated runs.
@@ -143,7 +119,7 @@ pub struct AbsState {
     buckets: Vec<Bucket>,
     active_indices: Vec<usize>,
     free_indices: Vec<usize>,
-    /// Row-major cells; each lists the open buckets a hit in that cell may join.
+    /// Row-major cells listing the open buckets whose bounding box covers them.
     grid: Vec<Vec<usize>>,
     grid_w: usize,
     grid_h: usize,
@@ -153,14 +129,13 @@ pub struct AbsState {
 
 impl Default for AbsState {
     fn default() -> Self {
-        let cells_per_side = 256 / MIN_CELL_SIZE + 1;
         Self {
             buckets: Vec::new(),
             active_indices: Vec::new(),
             free_indices: Vec::new(),
-            grid: vec![Vec::new(); cells_per_side * cells_per_side],
-            grid_w: cells_per_side,
-            grid_h: cells_per_side,
+            grid: vec![Vec::new(); (256 / 32 + 1) * (256 / 32 + 1)], // 32 is cell size
+            grid_w: 256 / 32 + 1,
+            grid_h: 256 / 32 + 1,
             next_cluster_id: 0,
             cluster_sizes: Vec::new(),
         }
@@ -188,55 +163,81 @@ impl AbsClustering {
         if batch.is_empty() {
             return Ok(0);
         }
+        // Buckets left open by a call that returned an error.
+        if !state.active_indices.is_empty() {
+            Self::close_active_buckets(state);
+            for cell in &mut state.grid {
+                cell.clear();
+            }
+        }
 
+        let n = batch.len();
+        // Since batch.cluster_id stores per-hit result, we write to it eventually.
+        // ABS writes cluster ID when assigning hits to buckets.
         batch.cluster_id.fill(-1);
-        Self::reset(state);
+        state.cluster_sizes.clear();
+        state.next_cluster_id = 0;
 
+        let window_tof = window_ticks(self.config.neutron_correlation_window_ns);
+        // At least as wide as the radius, so the 3x3 cell search covers it.
         let radius = float_to_usize(self.config.radius.ceil()).min(MAX_RADIUS);
         let cell_size = MIN_CELL_SIZE.max(radius);
-        let (grid_w, grid_h) = Self::resize_grid(batch, state, cell_size);
-        let ctx = AbsSearchContext {
-            window_tof: window_ticks(self.config.neutron_correlation_window_ns),
+
+        let grid_w = Self::resize_grid(batch, state, cell_size);
+        let radius_i32 = i32::try_from(radius).unwrap_or(i32::MAX);
+        let search_ctx = AbsSearchContext {
+            window_tof,
             cell_size,
             grid_w,
-            grid_h,
-            radius: i32::try_from(radius).unwrap_or(i32::MAX),
+            radius_i32,
         };
 
-        for i in 0..batch.len() {
+        for i in 0..n {
             let x = batch.x[i];
             let y = batch.y[i];
             let tof = batch.tof[i];
 
-            if i > 0 && i % self.config.scan_interval == 0 {
-                Self::scan_and_close(tof, state, &ctx);
+            // Aging
+            if i % self.config.scan_interval == 0 && i > 0 {
+                Self::scan_and_close(tof, state, window_tof, grid_w);
             }
 
-            let cid = if let Some(bidx) = Self::find_bucket_for_hit(x, y, tof, state, &ctx) {
+            let found = Self::find_bucket_for_hit(x, y, tof, state, &search_ctx);
+
+            if let Some(bidx) = found {
+                let cid = state.buckets[bidx].cluster_id;
+                if let Ok(idx) = usize::try_from(cid) {
+                    if let Some(size) = state.cluster_sizes.get_mut(idx) {
+                        *size += 1;
+                    }
+                }
+                batch.cluster_id[i] = cid;
                 state.buckets[bidx].add_hit(x, y);
-                Self::register(state, bidx, &ctx);
-                state.buckets[bidx].cluster_id
+                let (col, row) = (usize::from(x) / cell_size, usize::from(y) / cell_size);
+                Self::extend_cells(state, bidx, col, row, grid_w);
             } else {
-                let cid = Self::new_cluster_id(state)?;
                 let bidx = Self::get_bucket(state)?;
-                state.buckets[bidx].initialize(x, y, tof, cid);
+                let cid = Self::new_cluster_id(state)?;
+                state.buckets[bidx].initialize(x, y, tof, cid, cell_size);
+                if let Ok(idx) = usize::try_from(cid) {
+                    if let Some(size) = state.cluster_sizes.get_mut(idx) {
+                        *size += 1;
+                    }
+                }
+                batch.cluster_id[i] = cid;
                 state.active_indices.push(bidx);
-                Self::register(state, bidx, &ctx);
-                cid
-            };
 
-            if let Some(size) = usize::try_from(cid)
-                .ok()
-                .and_then(|idx| state.cluster_sizes.get_mut(idx))
-            {
-                *size += 1;
+                // Insert into grid
+                let cell_col = usize::from(x) / cell_size;
+                let cell_row = usize::from(y) / cell_size;
+                let gidx = cell_row * grid_w + cell_col;
+                if gidx < state.grid.len() {
+                    state.grid[gidx].push(bidx);
+                }
             }
-            batch.cluster_id[i] = cid;
         }
 
-        // Close every open bucket so clusters never span batches.
-        Self::close_active_buckets(state);
-        Ok(Self::finalize_clusters(
+        Ok(Self::finish_batch(
             batch,
             state,
             u32::from(self.config.min_cluster_size),
@@ -257,59 +258,33 @@ impl AbsClustering {
         Ok(())
     }
 
-    /// Drops anything a previous call left open, including after an error.
-    fn reset(state: &mut AbsState) {
-        for bidx in state.active_indices.drain(..) {
-            state.buckets[bidx].release();
-            state.free_indices.push(bidx);
-        }
-        for cell in &mut state.grid {
-            cell.clear();
-        }
-        state.cluster_sizes.clear();
-        state.next_cluster_id = 0;
-    }
-
-    /// Grows the grid to hold every hit's cell and returns its `(width, height)` in cells.
-    fn resize_grid(batch: &HitBatch, state: &mut AbsState, cell_size: usize) -> (usize, usize) {
-        let max_x = batch.x.iter().copied().max().map_or(0, usize::from);
-        let max_y = batch.y.iter().copied().max().map_or(0, usize::from);
-        let req_grid_w = max_x / cell_size + 1;
-        let req_grid_h = max_y / cell_size + 1;
-
-        if req_grid_w > state.grid_w || req_grid_h > state.grid_h {
-            state.grid_w = state.grid_w.max(req_grid_w);
-            state.grid_h = state.grid_h.max(req_grid_h);
-            state.grid = vec![Vec::new(); state.grid_w * state.grid_h];
-        }
-
-        (state.grid_w, state.grid_h)
-    }
-
-    /// Lists the bucket in every cell its grown bounding box overlaps.
-    fn register(state: &mut AbsState, bidx: usize, ctx: &AbsSearchContext) {
+    /// Lists the bucket in the cells its bounding box gains by covering cell `(col, row)`.
+    fn extend_cells(state: &mut AbsState, bidx: usize, col: usize, row: usize, grid_w: usize) {
         let known = state.buckets[bidx].cells;
-        let reach = ctx.reach(&state.buckets[bidx]);
-        if known == Some(reach) {
+        if known.contains(col, row) {
             return;
         }
-        for row in reach.row_min..=reach.row_max {
-            for col in reach.col_min..=reach.col_max {
-                if known.is_some_and(|cells| cells.contains(col, row)) {
-                    continue;
-                }
-                if let Some(cell) = state.grid.get_mut(row * ctx.grid_w + col) {
-                    cell.push(bidx);
+        let now = CellRange {
+            col_min: known.col_min.min(col),
+            col_max: known.col_max.max(col),
+            row_min: known.row_min.min(row),
+            row_max: known.row_max.max(row),
+        };
+        for r in now.row_min..=now.row_max {
+            for c in now.col_min..=now.col_max {
+                if !known.contains(c, r) {
+                    if let Some(cell) = state.grid.get_mut(r * grid_w + c) {
+                        cell.push(bidx);
+                    }
                 }
             }
         }
-        state.buckets[bidx].cells = Some(reach);
+        state.buckets[bidx].cells = now;
     }
 
+    /// Removes the bucket from every cell that lists it.
     fn unregister(state: &mut AbsState, bidx: usize, grid_w: usize) {
-        let Some(cells) = state.buckets[bidx].cells.take() else {
-            return;
-        };
+        let cells = state.buckets[bidx].cells;
         for row in cells.row_min..=cells.row_max {
             for col in cells.col_min..=cells.col_max {
                 if let Some(cell) = state.grid.get_mut(row * grid_w + col) {
@@ -319,6 +294,38 @@ impl AbsClustering {
                 }
             }
         }
+    }
+
+    fn resize_grid(batch: &HitBatch, state: &mut AbsState, cell_size: usize) -> usize {
+        let mut max_x = 0usize;
+        let mut max_y = 0usize;
+        for i in 0..batch.len() {
+            let x = usize::from(batch.x[i]);
+            let y = usize::from(batch.y[i]);
+            if x > max_x {
+                max_x = x;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+        }
+
+        let req_w = max_x + 32;
+        let req_h = max_y + 32;
+        let req_grid_w = req_w / cell_size + 1;
+        let req_grid_h = req_h / cell_size + 1;
+        let req_total = req_grid_w * req_grid_h;
+
+        // Insertion, lookup and removal all use `grid_w` as the row stride, so
+        // the grid is rebuilt whenever the width changes.
+        if req_grid_w != state.grid_w || req_grid_h > state.grid_h {
+            state.grid_w = req_grid_w;
+            state.grid_h = state.grid_h.max(req_grid_h);
+            state.grid = vec![Vec::new(); state.grid_w * state.grid_h];
+        }
+        let _ = req_total;
+
+        state.grid_w
     }
 
     fn finalize_clusters(
@@ -346,6 +353,12 @@ impl AbsClustering {
         usize::try_from(next).unwrap_or(0)
     }
 
+    /// Closes every open bucket so clusters never span batches, then relabels by size.
+    fn finish_batch(batch: &mut HitBatch, state: &mut AbsState, min_cluster_size: u32) -> usize {
+        Self::close_active_buckets(state);
+        Self::finalize_clusters(batch, state, min_cluster_size)
+    }
+
     fn find_bucket_for_hit(
         x: u16,
         y: u16,
@@ -353,21 +366,57 @@ impl AbsClustering {
         state: &AbsState,
         ctx: &AbsSearchContext,
     ) -> Option<usize> {
-        let col = usize::from(x) / ctx.cell_size;
-        let row = usize::from(y) / ctx.cell_size;
-        // The earliest-opened cluster wins, whatever order the cell lists it in.
-        state
-            .grid
-            .get(row * ctx.grid_w + col)?
-            .iter()
-            .copied()
-            .filter(|&bidx| ctx.accepts(&state.buckets[bidx], x, y, tof))
-            .min_by_key(|&bidx| state.buckets[bidx].cluster_id)
+        let cell_col = usize::from(x) / ctx.cell_size;
+        let cell_row = usize::from(y) / ctx.cell_size;
+        let cell_col_i32 = i32::try_from(cell_col).unwrap_or(i32::MAX);
+        let cell_row_i32 = i32::try_from(cell_row).unwrap_or(i32::MAX);
+        let ix = i32::from(x);
+        let iy = i32::from(y);
+
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let ncx = cell_col_i32 + dx;
+                let ncy = cell_row_i32 + dy;
+                if ncx < 0 || ncy < 0 {
+                    continue;
+                }
+                let (Ok(neighbor_x), Ok(neighbor_y)) = (usize::try_from(ncx), usize::try_from(ncy))
+                else {
+                    continue;
+                };
+                let gidx = neighbor_y * ctx.grid_w + neighbor_x;
+                if let Some(cell) = state.grid.get(gidx) {
+                    for &bidx in cell {
+                        let bucket = &state.buckets[bidx];
+                        if bucket.is_active {
+                            let x_min_bound = i32::from(bucket.x_min) - ctx.radius_i32;
+                            let x_max_bound = i32::from(bucket.x_max) + ctx.radius_i32;
+                            let y_min_bound = i32::from(bucket.y_min) - ctx.radius_i32;
+                            let y_max_bound = i32::from(bucket.y_max) + ctx.radius_i32;
+
+                            if ix >= x_min_bound
+                                && ix <= x_max_bound
+                                && iy >= y_min_bound
+                                && iy <= y_max_bound
+                            {
+                                let dt = tof.wrapping_sub(bucket.start_tof);
+                                if dt <= ctx.window_tof {
+                                    return Some(bidx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn close_active_buckets(state: &mut AbsState) {
-        for bidx in state.active_indices.drain(..) {
-            state.buckets[bidx].release();
+        let active = std::mem::take(&mut state.active_indices);
+        for bidx in active {
+            Self::unregister(state, bidx, state.grid_w);
+            state.buckets[bidx].is_active = false;
             state.free_indices.push(bidx);
         }
     }
@@ -399,21 +448,24 @@ impl AbsClustering {
         Ok(cid)
     }
 
-    /// Closes buckets whose first hit is more than one window before `ref_tof`.
-    fn scan_and_close(ref_tof: u32, state: &mut AbsState, ctx: &AbsSearchContext) {
-        let mut closed = Vec::new();
-        let buckets = &state.buckets;
-        state.active_indices.retain(|&bidx| {
-            let open = ref_tof.wrapping_sub(buckets[bidx].start_tof) <= ctx.window_tof;
-            if !open {
-                closed.push(bidx);
-            }
-            open
-        });
+    fn scan_and_close(ref_tof: u32, state: &mut AbsState, window_tof: u32, grid_w: usize) {
+        let mut keep = Vec::new();
+        let mut remove = Vec::new();
 
-        for bidx in closed {
-            Self::unregister(state, bidx, ctx.grid_w);
-            state.buckets[bidx].release();
+        for &bidx in &state.active_indices {
+            let bucket = &state.buckets[bidx];
+            let dt = ref_tof.wrapping_sub(bucket.start_tof);
+            if dt > window_tof {
+                remove.push(bidx);
+            } else {
+                keep.push(bidx);
+            }
+        }
+        state.active_indices = keep;
+
+        for bidx in remove {
+            Self::unregister(state, bidx, grid_w);
+            state.buckets[bidx].is_active = false;
             state.free_indices.push(bidx);
         }
     }
