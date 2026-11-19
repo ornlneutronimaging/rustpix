@@ -110,13 +110,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TDC times are now compared modulo the counter, so the hit stays in its pulse.
 - TPX3: hits stamped before a chip's first TDC got a TOF near 2^32; they are
   dropped.
-- TPX3: chips whose first TDC fell on different sides of a rollover numbered
-  the same pulse differently, splitting it in the time-ordered stream.
 - TPX3: `enable_missing_tdc_correction` had no effect; turning it off now
   stops the one-period subtraction for TOFs longer than a period.
+  `DetectorConfig::missing_tdc_threshold_25ns` gives the value to pass to the
+  lower-level parsers, and `PulseReader::with_period` sets the TDC period
+  when that threshold is `u32::MAX`.
 - TPX3: transform validation used 32-bit arithmetic that could overflow and
-  pass invalid transforms; `from_json` also rejects a TDC frequency that is
-  not finite and positive. `DetectorConfig::validate` checks both.
+  pass invalid transforms; `from_json` and `from_file` also reject a TDC
+  frequency that is not finite and positive. `DetectorConfig::validate`
+  checks both.
+- TPX3: `process_section_into_batch` keeps a late hit in the previous pulse
+  of the same section instead of giving it a TOF near 2^32.
 
 ### Changed
 

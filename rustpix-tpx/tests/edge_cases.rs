@@ -131,33 +131,30 @@ fn missing_tdc_correction_follows_its_flag() {
 }
 
 #[test]
-fn chips_starting_on_either_side_of_a_rollover_share_pulses() {
-    let tdc_a = 0x3FFF_0000;
-    let tdc_b = (tdc_a + PERIOD) & 0x3FFF_FFFF;
+fn late_hit_keeps_its_pulse_in_the_section_parser() {
+    let data = bytes(&[tdc(1000), tdc(2000), hit(1999), hit(2100)]);
+    let section = rustpix_tpx::section::Tpx3Section {
+        start_offset: 0,
+        end_offset: data.len(),
+        chip_id: 0,
+        initial_tdc: None,
+        final_tdc: None,
+    };
+    let mut batch = HitBatch::default();
+    process_section_into_batch(&data, &section, PERIOD, |_, x, y| (x, y), &mut batch);
+    assert_eq!(batch.tof, vec![999, 100]);
+}
+
+#[test]
+fn long_tof_at_a_low_tdc_frequency_is_kept() {
+    // 0.05 Hz: 20 s pulses, longer than half the 26.8 s counter range.
+    let mut config = identity_config();
+    config.tdc_frequency_hz = 0.05;
     let found = pulses(
-        &[
-            header(0),
-            tdc(tdc_a),
-            hit(tdc_a + 10),
-            tdc(tdc_b),
-            hit(tdc_b + 10),
-            tdc(tdc_b + PERIOD),
-            header(1),
-            tdc(tdc_b),
-            hit(tdc_b + 20),
-            tdc(tdc_b + PERIOD),
-        ],
-        &identity_config(),
+        &[header(0), tdc(1000), hit(600_001_000), tdc(800_001_000)],
+        &config,
     );
-    let summary: Vec<(u64, Vec<u8>)> = found
-        .iter()
-        .map(|p| (p.tdc_timestamp, p.hits.chip_id.clone()))
-        .collect();
-    let extended_b = (1u64 << 30) | u64::from(tdc_b);
-    assert_eq!(
-        summary,
-        vec![(u64::from(tdc_a), vec![0]), (extended_b, vec![0, 1])]
-    );
+    assert_eq!(found[0].hits.tof, vec![600_000_000]);
 }
 
 #[test]

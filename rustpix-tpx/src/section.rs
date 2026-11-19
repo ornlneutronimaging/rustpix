@@ -120,6 +120,7 @@ pub fn process_section_into_batch(
     let num_packets = section_data.len() / PACKET_SIZE;
 
     let mut current_tdc = section.initial_tdc;
+    let mut previous_tdc: Option<u32> = None;
 
     for i in 0..num_packets {
         let offset = i * PACKET_SIZE;
@@ -132,13 +133,20 @@ pub fn process_section_into_batch(
         let packet = Tpx3Packet::new(raw);
 
         if packet.is_tdc() {
+            previous_tdc = current_tdc;
             current_tdc = Some(packet.tdc_timestamp());
         } else if packet.is_hit() {
             // Skip hits until we have a TDC reference
-            let Some(tdc_ts) = current_tdc else { continue };
-            // A hit stamped before the TDC belongs to a pulse this function does not track.
+            let Some(current) = current_tdc else { continue };
+            // A hit stamped before the current TDC is a late hit of the previous pulse.
             let raw_timestamp = packet.timestamp_coarse();
-            let Some(tof) = ticks_after(raw_timestamp, tdc_ts) else {
+            let Some((tdc_ts, tof)) = std::iter::once(Some(current))
+                .chain(std::iter::once(previous_tdc))
+                .flatten()
+                .find_map(|tdc| {
+                    ticks_after(raw_timestamp, tdc, tdc_correction_25ns).map(|tof| (tdc, tof))
+                })
+            else {
                 continue;
             };
 

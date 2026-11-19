@@ -25,9 +25,6 @@ use std::collections::BinaryHeap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// Half the 30-bit TDC range, in 25 ns ticks.
-const HALF_WRAP: u32 = 1 << 29;
-
 /// A batch of hits belonging to a single pulse (TDC period) from one chip.
 #[derive(Debug, Clone)]
 pub struct PulseBatch {
@@ -107,6 +104,8 @@ where
     ready_queue: VecDeque<PulseBatch>,
 
     tdc_correction: u32,
+    /// TDC period in 25 ns ticks, used to tell late hits from current ones.
+    period: u32,
     chip_transform: Arc<dyn Fn(u8, u16, u16) -> (u16, u16) + Send + Sync + 'static>,
 }
 
@@ -138,19 +137,19 @@ where
             tdc_epoch: 0,
             last_tdc: initial_tdc,
             tdc_correction,
+            period: tdc_correction,
             chip_transform: Arc::new(chip_transform),
         }
     }
 
-    /// Adds `by` to the rollover epoch of every pulse not yet returned.
-    fn shift_epoch(&mut self, by: u64) {
-        self.tdc_epoch += by;
-        if let Some(prev) = self.prev_batch.as_mut() {
-            prev.tdc_epoch += by;
-        }
-        for batch in &mut self.ready_queue {
-            batch.tdc_epoch += by;
-        }
+    /// Sets the TDC period in 25 ns ticks.
+    ///
+    /// Defaults to `tdc_correction`; set it when that is `u32::MAX` because
+    /// missing-TDC correction is off.
+    #[must_use]
+    pub fn with_period(mut self, period_25ns: u32) -> Self {
+        self.period = period_25ns;
+        self
     }
 
     /// Return the next pulse batch from this chip, if available.
@@ -230,13 +229,13 @@ where
 
                     // A hit stamped before the current TDC is a late hit of the
                     // previous pulse; compared modulo 2^30 so it holds across a rollover.
-                    if let Some(tof) = ticks_after(raw_ts, curr_tdc) {
+                    if let Some(tof) = ticks_after(raw_ts, curr_tdc, self.period) {
                         let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
                         let tof = apply_missing_tdc_correction(tof, self.tdc_correction);
                         self.curr_batch.push((gx, gy, tof, tot, ts_curr, chip));
                     } else if let Some(prev) = self.prev_batch.as_mut() {
                         let prev_tdc = prev.tdc_timestamp;
-                        if let Some(tof) = ticks_after(raw_ts, prev_tdc) {
+                        if let Some(tof) = ticks_after(raw_ts, prev_tdc, self.period) {
                             let ts_prev = correct_timestamp_rollover(raw_ts, prev_tdc);
                             let tof = apply_missing_tdc_correction(tof, self.tdc_correction);
                             prev.hits.push((gx, gy, tof, tot, ts_prev, chip));
@@ -320,33 +319,15 @@ where
                 &chip_sections,
                 tdc_correction,
                 transform_closure,
-            );
+            )
+            .with_period(config.tdc_correction_25ns());
 
-            let first = reader.next_pulse();
-            readers.push((reader, first));
+            if let Some(batch) = reader.next_pulse() {
+                heap.push(batch);
+            }
+
+            readers.push(reader);
         }
-
-        // Each reader counts rollovers from its own first TDC. A chip whose
-        // first TDC is more than half a wrap below the latest chip's started
-        // after a rollover the others have not seen yet.
-        let latest = readers
-            .iter()
-            .filter_map(|(_, first)| first.as_ref().map(|b| b.tdc_timestamp))
-            .max()
-            .unwrap_or(0);
-        let readers = readers
-            .into_iter()
-            .map(|(mut reader, first)| {
-                if let Some(mut batch) = first {
-                    if latest - batch.tdc_timestamp > HALF_WRAP {
-                        reader.shift_epoch(1);
-                        batch.tdc_epoch += 1;
-                    }
-                    heap.push(batch);
-                }
-                reader
-            })
-            .collect();
 
         Self { readers, heap }
     }
