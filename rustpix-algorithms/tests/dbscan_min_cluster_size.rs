@@ -39,12 +39,12 @@ fn test_dbscan_min_cluster_size_ignored() {
     assert_eq!(n, 1, "Expected 1 cluster, but got {n}");
 
     // Verify Cluster 1 points have a valid ID (>= 0)
-    for i in 0..5 {
-        assert!(batch.cluster_id[i] >= 0, "Point {i} should be in a cluster");
+    for (i, &label) in batch.cluster_id.iter().enumerate().take(5) {
+        assert!(label >= 0, "Point {i} should be in a cluster");
     }
 
     // Verify Cluster 2 points are noise (-1)
-    for i in 5..8 {
-        assert_eq!(batch.cluster_id[i], -1, "Point {i} should be noise");
+    for (i, &label) in batch.cluster_id.iter().enumerate().skip(5) {
+        assert_eq!(label, -1, "Point {i} should be noise");
     }
 }
