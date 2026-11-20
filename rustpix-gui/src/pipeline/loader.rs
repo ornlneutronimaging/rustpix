@@ -86,8 +86,16 @@ pub fn load_file_worker(
         "Scanning sections...".to_string(),
     ));
 
-    let io_sections = scan_sections_with_progress(&mmap, tx, cancel_flag.as_ref());
+    let io_sections =
+        scan_sections_with_progress(&mmap, SCAN_CHUNK_BYTES, tx, cancel_flag.as_ref());
     if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if io_sections.is_empty() {
+        let _ = tx.send(AppMessage::LoadError(format!(
+            "{}: no TPX3 section header found; not a TPX3 file",
+            path.display()
+        )));
         return;
     }
     let total_sections = io_sections.len();
@@ -226,7 +234,8 @@ fn load_sns_file_worker(
                 );
                 current_pulse_ns = Some(pulse_ns);
             }
-            let tof_25 = u32::try_from(chunk.tof_ns[i] / 25).unwrap_or(u32::MAX);
+            // Nearest tick: f32 microseconds are not exact multiples of 25 ns.
+            let tof_25 = u32::try_from(chunk.tof_ns[i].saturating_add(12) / 25).unwrap_or(u32::MAX);
             #[allow(clippy::cast_possible_truncation)]
             let timestamp_25 = ((pulse_ns / 25).wrapping_add(u64::from(tof_25))) as u32;
             pulse_hits.push((chunk.x[i], chunk.y[i], tof_25, 0, timestamp_25, 0));
@@ -355,48 +364,51 @@ fn build_sns_debug_info(
     s
 }
 
-/// Scan sections in chunks with progress reporting.
+/// Bytes scanned per progress update while looking for section headers.
+const SCAN_CHUNK_BYTES: usize = 50 * 1024 * 1024;
+
+/// Finds TPX3 sections, reporting progress every `chunk_bytes` or so.
 ///
-/// Processes the memory-mapped file in 50MB chunks, scanning for
-/// TPX3 section boundaries and reporting progress.
+/// A window with no complete section is widened rather than advanced, so a
+/// section longer than one window keeps its header.
 fn scan_sections_with_progress(
-    mmap: &memmap2::Mmap,
+    data: &[u8],
+    chunk_bytes: usize,
     tx: &Sender<AppMessage>,
     cancel_flag: &std::sync::atomic::AtomicBool,
 ) -> Vec<rustpix_io::scanner::Section> {
     let mut io_sections = Vec::new();
+    let total_bytes = data.len();
+    let chunk_bytes = chunk_bytes.max(8);
     let mut offset = 0;
-    let chunk_size = 50 * 1024 * 1024; // 50MB chunks
-    let total_bytes = mmap.len().max(1);
+    let mut window = chunk_bytes;
 
     while offset < total_bytes {
         if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
-        let end = (offset + chunk_size).min(total_bytes);
+        let end = offset.saturating_add(window).min(total_bytes);
         let is_eof = end == total_bytes;
-        let data = &mmap[offset..end];
 
-        let (sections, consumed) = PacketScanner::scan_sections(data, is_eof);
+        let (sections, consumed) = PacketScanner::scan_sections(&data[offset..end], is_eof);
         for mut section in sections {
             section.start_offset += offset;
             section.end_offset += offset;
             io_sections.push(section);
         }
 
-        offset = offset.saturating_add(consumed);
+        if consumed == 0 && !is_eof {
+            window = window.saturating_mul(2);
+            continue;
+        }
+        offset += consumed;
+        window = chunk_bytes;
 
         let ratio = usize_to_f32(offset) / usize_to_f32(total_bytes);
         let _ = tx.send(AppMessage::LoadProgress(
             0.15 * ratio,
             format!("Scanning sections... {:.0}%", ratio * 100.0),
         ));
-
-        if consumed == 0 && !is_eof {
-            // Section may span chunk boundary - advance minimally to find next header
-            // rather than skipping the entire chunk which could drop sections
-            offset = offset.saturating_add(8); // One TPX3 packet size
-        }
     }
 
     io_sections
@@ -407,7 +419,7 @@ fn scan_sections_with_progress(
 /// Converts I/O sections to TPX3 sections, tracking TDC state per chip
 /// to handle timestamp rollover correctly.
 fn build_tpx_sections(
-    mmap: &memmap2::Mmap,
+    mmap: &[u8],
     io_sections: Vec<rustpix_io::scanner::Section>,
 ) -> Vec<Tpx3Section> {
     let mut tpx_sections = Vec::with_capacity(io_sections.len());
@@ -438,7 +450,7 @@ fn build_tpx_sections(
 ///
 /// Generates a debug string with TDC correction info and sample hit data
 /// for diagnostic purposes.
-fn build_debug_info(mmap: &memmap2::Mmap, sections: &[Tpx3Section], tdc_correction: u32) -> String {
+fn build_debug_info(mmap: &[u8], sections: &[Tpx3Section], tdc_correction: u32) -> String {
     let mut debug_str = String::new();
     let _ = writeln!(debug_str, "TDC Correction (25ns): {tdc_correction}");
 
@@ -479,7 +491,7 @@ fn build_debug_info(mmap: &memmap2::Mmap, sections: &[Tpx3Section], tdc_correcti
 /// Uses parallel processing per chip with synchronized merging
 /// to produce a globally time-ordered `HitBatch`.
 fn process_sections_to_batch(
-    mmap: &memmap2::Mmap,
+    mmap: &[u8],
     sections: &[Tpx3Section],
     det_config: &DetectorConfig,
     tx: &Sender<AppMessage>,
@@ -505,12 +517,14 @@ fn process_sections_to_batch(
     let progress_denominator = total_packets.max(1);
     let mut processed_hits = 0usize;
     let mut last_update = Instant::now();
-    let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
-        Vec::with_capacity(max_chip + 1);
-    receivers.resize_with(max_chip + 1, || None);
     let mut heap = BinaryHeap::new();
 
     std::thread::scope(|scope| {
+        // Owned by the closure so the receivers drop before the scope joins the
+        // chip threads; a thread blocked in `send` then wakes and exits.
+        let mut receivers: Vec<Option<std::sync::mpsc::Receiver<PulseBatch>>> =
+            Vec::with_capacity(max_chip + 1);
+        receivers.resize_with(max_chip + 1, || None);
         for (chip_id, chip_sections) in sections_by_chip.iter().enumerate() {
             if chip_sections.is_empty() {
                 continue;
@@ -752,18 +766,31 @@ mod tests {
         );
     }
 
-    /// A pulse spanning a read-slice boundary must not be split into two
-    /// bounds entries: chunk size 2 puts the first pulse's two events in
-    /// slice one and the second pulse's event in slice two.
+    /// A pulse spanning a read-slice boundary must not be split into two bounds entries.
     #[test]
     fn load_sns_file_pulse_spans_chunk_boundary() {
+        // Chunk size 1 splits the first pulse's two events across slices.
+        for chunk_events in [1, 2] {
+            load_sns_file_with_chunk(chunk_events);
+        }
+    }
+
+    fn load_sns_file_with_chunk(chunk_events: u64) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gui_chunked.nxs.h5");
         write_sns_test_file(&path);
 
         let (tx, rx) = channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        load_sns_file_worker(&path, &tx, &DetectorConfig::default(), 10, true, &cancel, 2);
+        load_sns_file_worker(
+            &path,
+            &tx,
+            &DetectorConfig::default(),
+            10,
+            true,
+            &cancel,
+            chunk_events,
+        );
         drop(tx);
 
         let mut complete = None;
@@ -851,5 +878,176 @@ mod tests {
         assert!(batch.is_none());
         assert!(bounds.is_none());
         assert_eq!(hyperstack.full_spectrum().iter().sum::<u64>(), 3);
+    }
+
+    fn header(chip: u8) -> u64 {
+        0x3358_5054 | (u64::from(chip) << 32)
+    }
+
+    fn tdc(timestamp: u32) -> u64 {
+        0x6F00_0000_0000_0000 | (u64::from(timestamp) << 12)
+    }
+
+    fn hit(timestamp: u32, addr: u16) -> u64 {
+        0xB000_0000_0000_0000
+            | (u64::from(timestamp & 0x3FFF) << 30)
+            | (10 << 20)
+            | (u64::from(addr) << 44)
+            | u64::from(timestamp >> 14)
+    }
+
+    fn bytes(packets: &[u64]) -> Vec<u8> {
+        packets.iter().flat_map(|p| p.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn scan_keeps_a_section_longer_than_one_window() {
+        let mut packets = vec![header(0), tdc(1000)];
+        packets.extend((0..200).map(|i| hit(1100 + i, 0)));
+        packets.extend([header(1), tdc(1000), hit(1100, 0)]);
+        let data = bytes(&packets);
+        let (tx, _rx) = channel();
+
+        let sections = scan_sections_with_progress(&data, 64, &tx, &AtomicBool::new(false));
+        let starts: Vec<(usize, u8)> = sections
+            .iter()
+            .map(|s| (s.start_offset, s.chip_id))
+            .collect();
+        assert_eq!(starts, vec![(0, 0), (202 * 8, 1)]);
+        assert_eq!(sections.last().unwrap().end_offset, data.len());
+    }
+
+    #[test]
+    fn scan_of_data_without_headers_is_linear_and_empty() {
+        let (tx, rx) = channel();
+        assert_eq!(
+            scan_sections_with_progress(&[], 64, &tx, &AtomicBool::new(false)).len(),
+            0
+        );
+
+        let zeros = vec![0u8; 1 << 20];
+        assert_eq!(
+            scan_sections_with_progress(&zeros, 64, &tx, &AtomicBool::new(false)).len(),
+            0
+        );
+        drop(tx);
+        // Stepping 8 bytes at a time would send over 100,000 progress messages.
+        assert!(rx.iter().count() < 10);
+    }
+
+    #[test]
+    fn tpx3_files_without_sections_report_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents) in [("empty.tpx3", Vec::new()), ("zeros.tpx3", vec![0u8; 4096])] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            let (tx, rx) = channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            load_file_worker(&path, &tx, DetectorConfig::default(), 10, true, &cancel);
+            drop(tx);
+            let outcome: Vec<bool> = rx
+                .iter()
+                .filter_map(|msg| match msg {
+                    AppMessage::LoadError(_) => Some(false),
+                    AppMessage::LoadComplete(..) => Some(true),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(outcome, vec![false], "{name}");
+        }
+    }
+
+    #[test]
+    fn cancel_during_merge_returns() {
+        // Two chips with many pulses, so producers run ahead of the merge and
+        // block on their two-slot channels when the merge stops.
+        let mut packets = Vec::new();
+        for chip in 0..2u8 {
+            packets.push(header(chip));
+            for pulse in 0..2000u32 {
+                let t0 = 1000 + pulse * 1000;
+                packets.push(tdc(t0));
+                packets.extend((0..50).map(|i| hit(t0 + 10 + i, 0)));
+            }
+        }
+        let data = bytes(&packets);
+        let (tx, _rx) = channel();
+        let io_sections = scan_sections_with_progress(&data, 1 << 20, &tx, &AtomicBool::new(false));
+        let sections = build_tpx_sections(&data, io_sections);
+        let config = DetectorConfig::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let (done_tx, done_rx) = channel();
+        let worker_cancel = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            let mut hyperstack = Hyperstack3D::new(10, 514, 514, config.tdc_correction_25ns());
+            let (tx, _rx) = channel();
+            process_sections_to_batch(
+                &data,
+                &sections,
+                &config,
+                &tx,
+                &worker_cancel,
+                &mut hyperstack,
+                true,
+            );
+            let _ = done_tx.send(());
+        });
+        std::thread::sleep(Duration::from_millis(5));
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "loader did not return after cancel"
+        );
+    }
+
+    #[test]
+    fn sns_tof_rounds_to_the_nearest_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tof.nxs.h5");
+        let run = SnsRunMetadata {
+            run_number: 1,
+            experiment_identifier: String::new(),
+            start_time: "2025-01-01T00:00:00Z".to_string(),
+            end_time: None,
+            duration: None,
+            proton_charge: None,
+            title: None,
+        };
+        // Above 16.384 ms an f32 in microseconds no longer holds 25 ns ticks exactly.
+        let ticks: Vec<u32> = (655_360..655_400).collect();
+        let n = ticks.len();
+        let mut hits = HitBatch::with_capacity(n);
+        hits.x.extend(std::iter::repeat_n(5u16, n));
+        hits.y.extend(std::iter::repeat_n(5u16, n));
+        hits.tof.extend_from_slice(&ticks);
+        hits.tot.extend(std::iter::repeat_n(10u16, n));
+        hits.timestamp.extend(std::iter::repeat_n(0u32, n));
+        hits.chip_id.extend(std::iter::repeat_n(0u8, n));
+        hits.cluster_id.extend(std::iter::repeat_n(-1i32, n));
+        let mut sink = SnsEventSink::create(&path, SnsWriteOptions::venus_defaults(run)).unwrap();
+        sink.write_hits(
+            0,
+            &EventBatch {
+                tdc_timestamp_25ns: 1000,
+                hits,
+            },
+        )
+        .unwrap();
+        sink.finalize().unwrap();
+        drop(sink);
+
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        load_file_worker(&path, &tx, DetectorConfig::default(), 10, true, &cancel);
+        drop(tx);
+        let batch = rx
+            .iter()
+            .find_map(|msg| match msg {
+                AppMessage::LoadComplete(_, batch, ..) => batch,
+                _ => None,
+            })
+            .expect("hits cached");
+        assert_eq!(batch.tof, ticks);
     }
 }

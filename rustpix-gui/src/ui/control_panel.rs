@@ -345,12 +345,14 @@ impl RustpixApp {
     }
 
     fn render_status_indicator(&self, ui: &mut egui::Ui) {
-        let (status_color, status_text) =
-            if self.processing.is_loading || self.processing.is_processing {
-                (accent::BLUE, self.processing.status_text.as_str())
-            } else {
-                (accent::GREEN, "Ready")
-            };
+        let status_text = self.processing.status_text.as_str();
+        let status_color = if self.processing.is_loading || self.processing.is_processing {
+            accent::BLUE
+        } else if status_text.starts_with("Error") {
+            accent::RED
+        } else {
+            accent::GREEN
+        };
         ui.label(egui::RichText::new("●").size(11.0).color(status_color));
         ui.label(
             egui::RichText::new(status_text)
@@ -1650,7 +1652,6 @@ x,y are local chip coordinates (pixels).",
             );
         }
         if resp.clicked() {
-            self.processing.reset_cancel();
             self.run_processing();
         }
     }
@@ -2098,18 +2099,24 @@ x,y are local chip coordinates (pixels).",
                             }
                         }
                         ExportFormat::SnsHdf5 => {
-                            let default_name = if self.ui_state.export.sns.run_number.is_empty() {
-                                "rustpix_sns.nxs.h5".to_string()
+                            if let Err(message) = self.sns_run_number() {
+                                self.ui_state.roi_warning =
+                                    Some((message, ctx.input(|i| i.time + 6.0)));
                             } else {
-                                format!("VENUS_{}.nxs.h5", self.ui_state.export.sns.run_number)
-                            };
-                            if let Some(path) = self
-                                .export_dialog()
-                                .set_file_name(&default_name)
-                                .save_file()
-                            {
-                                self.start_export_sns_hdf5(path);
-                                should_close = true;
+                                let default_name = if self.ui_state.export.sns.run_number.is_empty()
+                                {
+                                    "rustpix_sns.nxs.h5".to_string()
+                                } else {
+                                    format!("VENUS_{}.nxs.h5", self.ui_state.export.sns.run_number)
+                                };
+                                if let Some(path) = self
+                                    .export_dialog()
+                                    .set_file_name(&default_name)
+                                    .save_file()
+                                {
+                                    self.start_export_sns_hdf5(path);
+                                    should_close = true;
+                                }
                             }
                         }
                         ExportFormat::TiffFolder | ExportFormat::TiffStack => {

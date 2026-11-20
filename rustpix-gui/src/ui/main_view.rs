@@ -2028,8 +2028,11 @@ impl RustpixApp {
     }
 
     fn spectrum_bin_params(&self, spectrum: Option<&[u64]>, n_bins: usize) -> (usize, f64, f64) {
-        let tdc_period = 1.0 / self.tdc_frequency;
-        let max_ms = tdc_period * 1e3;
+        // The loaded data's binning, not the live TDC control, which may have changed since.
+        let max_ms = self.active_hyperstack().map_or_else(
+            || 1e3 / self.tdc_frequency,
+            |hs| f64::from(hs.tof_max()) * 25e-6,
+        );
         let spec_bins = spectrum.map_or(n_bins, <[u64]>::len);
         let bin_width_ms = if spec_bins > 0 {
             max_ms / usize_to_f64(spec_bins)
@@ -3072,13 +3075,11 @@ impl RustpixApp {
             } else {
                 None
             };
-            if include_energy && energy.is_none() {
-                continue;
-            }
             let mut row = Vec::new();
             row.push(format!("{tof_ms:.6}"));
-            if let Some(energy) = energy {
-                row.push(format!("{energy:.6}"));
+            if include_energy {
+                // An empty cell where energy is undefined keeps every TOF bin in the file.
+                row.push(energy.map_or_else(String::new, |energy| format!("{energy:.6}")));
             }
             if include_full {
                 let count = full.get(i).copied().unwrap_or(0);

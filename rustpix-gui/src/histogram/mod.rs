@@ -77,6 +77,9 @@ pub struct Hyperstack3D {
 
     /// Width of each TOF bin in 25ns units.
     bin_width: f64,
+
+    /// Events left out because their TOF exceeds `tof_max`.
+    above_range: u64,
 }
 
 impl Hyperstack3D {
@@ -104,6 +107,7 @@ impl Hyperstack3D {
             height,
             tof_max,
             bin_width,
+            above_range: 0,
         }
     }
 
@@ -173,7 +177,11 @@ impl Hyperstack3D {
             let x = x as usize;
             let y = y as usize;
 
-            // Calculate TOF bin
+            if tof > hyperstack.tof_max {
+                hyperstack.above_range += 1;
+                continue;
+            }
+            // A TOF exactly at `tof_max` belongs to the last bin.
             let tof_bin = if hyperstack.bin_width > 0.0 {
                 let bin = (f64::from(tof) / hyperstack.bin_width) as usize;
                 bin.min(n_tof_bins.saturating_sub(1))
@@ -229,6 +237,10 @@ impl Hyperstack3D {
             let x = usize::from(batch.x[i]);
             let y = usize::from(batch.y[i]);
             let tof = batch.tof[i];
+            if tof > self.tof_max {
+                self.above_range += 1;
+                continue;
+            }
 
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let tof_bin = if bin_width > 0.0 {
@@ -339,6 +351,13 @@ impl Hyperstack3D {
     #[inline]
     pub fn tof_max(&self) -> u32 {
         self.tof_max
+    }
+
+    /// Number of events left out because their TOF exceeds [`Self::tof_max`].
+    #[must_use]
+    #[inline]
+    pub fn above_range(&self) -> u64 {
+        self.above_range
     }
 
     /// Get the bin width in 25ns units.
@@ -487,5 +506,17 @@ mod tests {
 
         let spec = hs.spectrum(0..4, 0..4);
         assert_eq!(spec, vec![1, 0, 2, 0, 1]);
+    }
+
+    #[test]
+    fn events_beyond_tof_max_are_left_out() {
+        let mut hyperstack = Hyperstack3D::new(4, 2, 2, 100);
+        let mut batch = HitBatch::default();
+        for tof in [0, 99, 100, 101, 5000] {
+            batch.push((1, 1, tof, 10, 0, 0));
+        }
+        hyperstack.accumulate_hits(&batch);
+        assert_eq!(hyperstack.full_spectrum(), vec![1, 0, 0, 2]);
+        assert_eq!(hyperstack.above_range(), 2);
     }
 }
