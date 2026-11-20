@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-11-20
+
 ### Added
 
 - `rustpix process --tdc-frequency <HZ>` (default 60) sets the TDC frequency.
