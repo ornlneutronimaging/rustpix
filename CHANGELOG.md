@@ -47,11 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `write_neutrons_sns`) write to a temporary file and rename it into place on
   success. A failed export used to leave a truncated file that read back as
   valid, and could destroy an existing file before failing.
-- The SNS reader read `event_time_zero` and `event_index` whole for every
-  call; a file declaring huge arrays aborted the process. It now reads only
-  the pulses covering the requested events, requires the whole `event_index`
-  to be sorted, and rejects banks with more than 2^26 pulses (about 12 days at
-  60 Hz).
 - The SNS reader ignored `units`, `offset_seconds` and `offset_nanoseconds`
   attributes stored as 1-element arrays and silently used defaults (TOF could
   come back 1000x too large; pulse times run-relative instead of absolute).
@@ -70,7 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Hdf5HistogramSink` lost every cached chunk after one failed chunk write.
 - `SnsEventSink::finalize` reported success on a second call after a failed
   first one.
-- `SnsEventSink` overwrote a caller-supplied `end_time` and `duration`.
+- `SnsEventSink::finalize` replaced a caller-supplied `duration` whenever
+  events were written, and a caller-supplied `end_time` when the start time
+  also parsed.
 - ISO 8601 offsets without a colon (`+0530`) were read as whole hours, and
   out-of-range dates and times were accepted; both are now rejected.
 
@@ -115,9 +112,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ABS throughput is about 5% lower.
 - `SpatialGrid::insert` and `remove` ignore a `Default` (cell-less) grid
   instead of dividing by zero.
-- `--memory-fraction`, `--memory-budget-bytes`, `--parallelism`,
-  `--queue-depth` and `--async-io` are rejected with `--out-of-core false`
-  instead of being ignored.
 - `rustpix process` replaces an existing output file only when the run
   succeeds, keeping that file's permissions. A symbolic link given as `-o` is
   replaced by the new file rather than followed.
@@ -125,8 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rustpix benchmark` clusters each pulse separately, as `process` does, and
   no longer times the copy of the input. Its first output line now also
   reports the pulse count.
-- The SNS writer assigns a neutron whose centroid rounds onto a chip-gap
-  pixel to the nearer real pixel inside the bank instead of dropping it.
 - One-shot HDF5 exports keep an existing destination's permissions; a
   symbolic link at the destination is replaced by the new file, not followed.
   The file is written in an owner-only directory beside the destination, so

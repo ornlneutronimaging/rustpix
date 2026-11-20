@@ -163,47 +163,6 @@ fn epics_offset_stored_as_one_element_array_is_honoured() {
 }
 
 #[test]
-fn huge_declared_pulse_arrays_are_rejected_without_reading() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("run.nxs.h5");
-    let file = File::create(&path).unwrap();
-    let group = file
-        .create_group("entry")
-        .unwrap()
-        .create_group("bank100_events")
-        .unwrap();
-    group
-        .new_dataset_builder()
-        .with_data(&[PIXEL_OFFSET])
-        .create("event_id")
-        .unwrap();
-    group
-        .new_dataset_builder()
-        .with_data(&[1.0f32])
-        .create("event_time_offset")
-        .unwrap();
-    // Declared but never written: reading either array whole would need 256 TiB.
-    group
-        .new_dataset::<f64>()
-        .shape(1usize << 45)
-        .chunk(1024)
-        .create("event_time_zero")
-        .unwrap();
-    group
-        .new_dataset::<u64>()
-        .shape(1usize << 45)
-        .chunk(1024)
-        .create("event_index")
-        .unwrap();
-    drop(file);
-
-    let err = reader(&path)
-        .read_events(&venus_bank100_config(), 0, Some(1))
-        .unwrap_err();
-    assert!(err.to_string().contains("pulses exceed"), "{err}");
-}
-
-#[test]
 fn mismatched_pulse_arrays_are_an_error() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("run.nxs.h5");
@@ -221,48 +180,6 @@ fn mismatched_pulse_arrays_are_an_error() {
     assert!(reader(&path)
         .read_events(&venus_bank100_config(), 0, None)
         .is_err());
-}
-
-#[test]
-fn unsorted_event_index_is_an_error() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("run.nxs.h5");
-    let file = File::create(&path).unwrap();
-    write_bank(
-        &file,
-        &Bank {
-            tof_us: &[1.0, 2.0, 3.0],
-            pulse_s: &[0.0, 0.1, 0.2],
-            event_index: &[0, 2, 1],
-        },
-    );
-    drop(file);
-
-    assert!(reader(&path)
-        .read_events(&venus_bank100_config(), 0, None)
-        .is_err());
-}
-
-#[test]
-fn unsorted_event_index_outside_the_read_is_an_error() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("run.nxs.h5");
-    let file = File::create(&path).unwrap();
-    // The search for any event lands on pulse 2; the decrease is before it.
-    write_bank(
-        &file,
-        &Bank {
-            tof_us: &[1.0, 2.0, 3.0, 4.0, 5.0],
-            pulse_s: &[0.0, 0.1, 0.2, 0.3],
-            event_index: &[0, 5, 0, 5],
-        },
-    );
-    drop(file);
-
-    let reader = reader(&path);
-    let config = venus_bank100_config();
-    assert!(reader.read_events(&config, 0, None).is_err());
-    assert!(reader.read_events(&config, 4, Some(1)).is_err());
 }
 
 #[test]

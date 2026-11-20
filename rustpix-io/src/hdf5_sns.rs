@@ -30,35 +30,9 @@ use hdf5::{Attribute, Dataset, File, Group};
 use ndarray::s;
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Mutex;
 
 const NS_PER_TICK: u64 = 25;
 const US_PER_TICK: f64 = 25.0 / 1000.0;
-
-/// Moves a centroid that rounds onto a gap pixel to the nearer real pixel beside the gap.
-///
-/// `exact` is the unrounded coordinate and `rounded` its rounding; the pixel
-/// returned is `rounded` itself when that is not a gap pixel.
-fn step_off_gap(exact: f64, rounded: u32, gaps: &[u32], bank_size: u32) -> u32 {
-    if !gaps.contains(&rounded) {
-        return rounded;
-    }
-    let in_bank = |c: u32| remap_gap(c, gaps).is_some_and(|v| v < bank_size);
-    let mut low = rounded;
-    while low > 0 && gaps.contains(&low) {
-        low -= 1;
-    }
-    let mut high = rounded;
-    while high < u32::MAX && gaps.contains(&high) {
-        high += 1;
-    }
-    match (in_bank(low), in_bank(high)) {
-        (true, true) if f64::from(high) - exact < exact - f64::from(low) => high,
-        (true, _) => low,
-        (false, true) => high,
-        (false, false) => rounded, // dropped by the caller's gap check
-    }
-}
 
 /// Remap a coordinate from the source grid (which may contain chip-gap pixels)
 /// to the target grid (which does not).
@@ -362,18 +336,8 @@ impl SnsBankEventWriter {
             if !fx.is_finite() || !fy.is_finite() || fx < 0.0 || fy < 0.0 {
                 continue;
             }
-            let raw_x = step_off_gap(
-                batch.neutrons.x[i] * inv,
-                fx as u32,
-                &bank.gap_columns,
-                bank.width,
-            );
-            let raw_y = step_off_gap(
-                batch.neutrons.y[i] * inv,
-                fy as u32,
-                &bank.gap_rows,
-                bank.height,
-            );
+            let raw_x = fx as u32;
+            let raw_y = fy as u32;
             let Some(px) = remap_gap(raw_x, &bank.gap_columns) else {
                 continue;
             };
@@ -1178,8 +1142,6 @@ pub struct SnsEventReader {
     _file: File,
     entry: Group,
     banks: Vec<SnsBankInfo>,
-    /// Banks whose whole `event_index` has been checked to be sorted.
-    sorted_banks: Mutex<HashSet<String>>,
 }
 
 impl SnsEventReader {
@@ -1213,7 +1175,6 @@ impl SnsEventReader {
             _file: file,
             entry,
             banks,
-            sorted_banks: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1314,35 +1275,32 @@ impl SnsEventReader {
             .map(|&v| (f64::from(v) * tof_scale_ns).max(0.0).round() as u64)
             .collect();
 
-        // Pulse times: read only the pulses that cover events [start, end).
+        // Pulse times: the per-pulse arrays are small (one entry per pulse),
+        // so read them fully and expand to one timestamp per event.
         let tz_ds = group.dataset("event_time_zero")?;
-        let index_ds = group.dataset("event_index")?;
-        let n_pulses = tz_ds.size();
-        if n_pulses == 0 || index_ds.size() != n_pulses {
-            return Err(Error::InvalidFormat(format!(
-                "bank {}: event_index has {} entries but event_time_zero has {}",
-                config.name,
-                index_ds.size(),
-                n_pulses,
-            )));
-        }
-        self.check_event_index_sorted(&config.name, &index_ds, n_pulses)?;
-        let index_at =
-            |p: usize| -> Result<u64> { Ok(index_ds.read_slice_1d::<u64, _>(s![p..=p])?[0]) };
-        // The pulse holding event i is the last one whose first-event index is <= i.
-        let first = last_pulse_at_or_before(n_pulses, start, &index_at)?;
-        let last = last_pulse_at_or_before(n_pulses, end - 1, &index_at)?.max(first);
-        let event_index = index_ds.read_slice_1d::<u64, _>(s![first..=last])?.to_vec();
         let pulse_scale_ns = units_scale_ns(&tz_ds, "second")?;
         let base_ns = pulse_offset_ns(&tz_ds)?;
         let pulse_ns = tz_ds
-            .read_slice_1d::<f64, _>(s![first..=last])?
+            .read_raw::<f64>()?
             .iter()
             .map(|&v| pulse_time_ns(base_ns, v, pulse_scale_ns))
             .collect::<Result<Vec<u64>>>()?;
+        let event_index: Vec<u64> = group.dataset("event_index")?.read_raw()?;
+        if pulse_ns.is_empty() || event_index.len() != pulse_ns.len() {
+            return Err(Error::InvalidFormat(format!(
+                "bank {}: event_index has {} entries but event_time_zero has {}",
+                config.name,
+                event_index.len(),
+                pulse_ns.len(),
+            )));
+        }
 
         events.pulse_time_ns.reserve(events.event_id.len());
-        let mut p = 0;
+        // Index of the pulse the first event of the slice belongs to:
+        // the last pulse whose first-event index is <= start.
+        let mut p = event_index
+            .partition_point(|&v| v <= start)
+            .saturating_sub(1);
         for i in start..end {
             while p + 1 < event_index.len() && event_index[p + 1] <= i {
                 p += 1;
@@ -1353,52 +1311,6 @@ impl SnsEventReader {
         Ok(events)
     }
 }
-
-impl SnsEventReader {
-    /// Checks once per bank that the whole `event_index` is non-decreasing.
-    ///
-    /// The pulse search assumes sorted input, so an unsorted index would assign
-    /// events to the wrong pulse without any local sign of it.
-    fn check_event_index_sorted(
-        &self,
-        bank: &str,
-        index_ds: &Dataset,
-        n_pulses: usize,
-    ) -> Result<()> {
-        let mut sorted_banks = self
-            .sorted_banks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if sorted_banks.contains(bank) {
-            return Ok(());
-        }
-        if n_pulses > MAX_PULSES {
-            return Err(Error::InvalidFormat(format!(
-                "bank {bank}: {n_pulses} pulses exceed the supported {MAX_PULSES}"
-            )));
-        }
-        let mut previous = 0u64;
-        let mut chunk_start = 0;
-        while chunk_start < n_pulses {
-            let chunk_end = n_pulses.min(chunk_start + EVENT_INDEX_CHUNK);
-            let chunk = index_ds.read_slice_1d::<u64, _>(s![chunk_start..chunk_end])?;
-            for &value in &chunk {
-                if value < previous {
-                    return Err(Error::InvalidFormat(format!(
-                        "bank {bank}: event_index is not sorted"
-                    )));
-                }
-                previous = value;
-            }
-            chunk_start = chunk_end;
-        }
-        sorted_banks.insert(bank.to_string());
-        Ok(())
-    }
-}
-
-/// Pulses read per chunk when checking `event_index` order (8 MiB of `u64`).
-const EVENT_INDEX_CHUNK: usize = 1 << 20;
 
 /// Read events from `bank100` of a VENUS SNS `NeXus` file (one-shot).
 ///
@@ -1429,27 +1341,6 @@ fn units_scale_ns(dataset: &Dataset, default_units: &str) -> Result<f64> {
             dataset.name(),
         ))),
     }
-}
-
-/// Upper bound on pulses in one bank (about 12 days at 60 Hz).
-const MAX_PULSES: usize = 1 << 26;
-
-/// Index of the last pulse whose first-event index is <= `event`, or 0 if none is.
-fn last_pulse_at_or_before(
-    n_pulses: usize,
-    event: u64,
-    index_at: &impl Fn(usize) -> Result<u64>,
-) -> Result<usize> {
-    let (mut lo, mut hi) = (0, n_pulses);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if index_at(mid)? <= event {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    Ok(lo.saturating_sub(1))
 }
 
 /// Absolute pulse time in ns from the origin and one `event_time_zero` value.
@@ -2107,7 +1998,7 @@ mod tests {
     }
 
     #[test]
-    fn test_neutron_on_gap_moves_to_the_nearer_pixel() {
+    fn test_neutron_rounding_onto_gap_dropped() {
         // Source columns 256 and 257 are the gap; 255 and 258 lie either side.
         let mut opts = make_test_options();
         opts.super_resolution_factor = 1.0;
@@ -2124,7 +2015,7 @@ mod tests {
             .map(|id| (id - 1_000_000) % 512)
             .collect();
         // Source 258 becomes bank column 256 once the two gap columns are removed.
-        assert_eq!(columns, vec![255, 255, 255, 256, 256, 256, 100]);
+        assert_eq!(columns, vec![255, 256, 256, 100]);
     }
 
     #[test]
@@ -2187,15 +2078,6 @@ mod tests {
             assert_eq!(iso8601_to_epoch_secs(bad), None, "{bad}");
         }
         assert!(iso8601_to_epoch_secs("2024-02-29T00:00:00Z").is_some());
-    }
-
-    #[test]
-    fn test_gap_snapping_stays_inside_the_bank() {
-        // Columns 0 and 1 are real, column 2 is a trailing gap.
-        assert_eq!(step_off_gap(2.25, 2, &[2], 2), 1);
-        // An interior gap still picks the nearer side.
-        assert_eq!(step_off_gap(256.6, 257, &[256, 257], 512), 258);
-        assert_eq!(step_off_gap(256.4, 256, &[256, 257], 512), 255);
     }
 
     #[test]

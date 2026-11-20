@@ -411,7 +411,7 @@ fn zero_iterations_is_rejected() {
 }
 
 #[test]
-fn out_of_core_flags_require_out_of_core() {
+fn out_of_core_flags_ignored_without_out_of_core() {
     let dir = TempDir::new().unwrap();
     let input = dir.path().join("run.tpx3");
     let output = dir.path().join("out.csv");
@@ -434,8 +434,7 @@ fn out_of_core_flags_require_out_of_core() {
             flag[0],
             flag[1],
         ]);
-        assert!(!result.status.success(), "{flag:?}");
-        assert!(String::from_utf8_lossy(&result.stderr).contains(flag[0]));
+        assert!(result.status.success(), "{flag:?}");
 
         let result = rustpix(&["process", s(&input), "-o", s(&output), flag[0], flag[1]]);
         assert!(result.status.success(), "{flag:?}: {result:?}");

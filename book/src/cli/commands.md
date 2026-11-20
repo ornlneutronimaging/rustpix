@@ -39,7 +39,7 @@ rustpix process [OPTIONS] -o <OUTPUT> <INPUT>...
 | `-v, --verbose` | Off | Verbose output |
 
 The out-of-core options (`--memory-fraction`, `--memory-budget-bytes`,
-`--parallelism`, `--queue-depth`, `--async-io`) are rejected together with
+`--parallelism`, `--queue-depth`, `--async-io`) have no effect with
 `--out-of-core false`.
 
 ### Output files
