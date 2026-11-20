@@ -113,12 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TPX3: `enable_missing_tdc_correction` had no effect; turning it off now
   stops the one-period subtraction for TOFs longer than a period.
   `DetectorConfig::missing_tdc_threshold_25ns` gives the value to pass to the
-  lower-level parsers, and `PulseReader::with_period` sets the TDC period
-  when that threshold is `u32::MAX`.
+  lower-level parsers.
 - TPX3: transform validation used 32-bit arithmetic that could overflow and
   pass invalid transforms; `from_json` and `from_file` also reject a TDC
-  frequency that is not finite and positive. `DetectorConfig::validate`
-  checks both.
+  frequency that is not finite or is below `MIN_TDC_FREQUENCY_HZ` (0.15 Hz),
+  the lowest at which a late hit and a missed TDC both fit the 30-bit
+  timestamp counter. `DetectorConfig::validate` checks both.
 - TPX3: `process_section_into_batch` keeps a late hit in the previous pulse
   of the same section instead of giving it a TOF near 2^32.
 

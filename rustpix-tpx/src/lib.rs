@@ -135,6 +135,11 @@ impl ChipTransform {
     }
 }
 
+/// Lowest TDC frequency [`DetectorConfig::validate`] accepts, in Hz.
+///
+/// Its period, 6.7 s, is just under 2^28 ticks of 25 ns.
+pub const MIN_TDC_FREQUENCY_HZ: f64 = 0.15;
+
 /// Detector configuration for TPX3 processing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetectorConfig {
@@ -402,13 +407,16 @@ impl DetectorConfig {
     /// Validates the TDC frequency and every chip transform.
     ///
     /// Called when loading from JSON; call it for programmatically built configs.
+    /// The frequency must be at least [`MIN_TDC_FREQUENCY_HZ`], so that a TOF of two
+    /// periods (one missed TDC) and late hits both fit the 30-bit timestamp counter.
     ///
     /// # Errors
-    /// Returns an error for a frequency that is not finite and positive, or an invalid transform.
+    /// Returns an error for a frequency that is not finite or is below the minimum, or
+    /// for an invalid transform.
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if !(self.tdc_frequency_hz.is_finite() && self.tdc_frequency_hz > 0.0) {
+        if !(self.tdc_frequency_hz.is_finite() && self.tdc_frequency_hz >= MIN_TDC_FREQUENCY_HZ) {
             return Err(format!(
-                "tdc_frequency_hz must be finite and positive, got {}",
+                "tdc_frequency_hz must be finite and at least {MIN_TDC_FREQUENCY_HZ} Hz, got {}",
                 self.tdc_frequency_hz
             )
             .into());

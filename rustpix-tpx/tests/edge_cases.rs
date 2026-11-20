@@ -3,7 +3,7 @@
 use rustpix_core::soa::HitBatch;
 use rustpix_tpx::ordering::{MergedPulseBatch, TimeOrderedStream};
 use rustpix_tpx::section::{discover_sections, process_section_into_batch};
-use rustpix_tpx::{DetectorConfig, Tpx3Packet};
+use rustpix_tpx::{DetectorConfig, Tpx3Packet, MIN_TDC_FREQUENCY_HZ};
 
 const PERIOD: u32 = 666_667;
 
@@ -146,15 +146,73 @@ fn late_hit_keeps_its_pulse_in_the_section_parser() {
 }
 
 #[test]
-fn long_tof_at_a_low_tdc_frequency_is_kept() {
-    // 0.05 Hz: 20 s pulses, longer than half the 26.8 s counter range.
+fn lowest_frequency_keeps_long_and_missed_tdc_tofs() {
     let mut config = identity_config();
-    config.tdc_frequency_hz = 0.05;
+    config.tdc_frequency_hz = MIN_TDC_FREQUENCY_HZ;
+    config.validate().unwrap();
+    let period = config.tdc_correction_25ns();
+    // The second hit follows a missed TDC, one period plus 5 ticks late.
     let found = pulses(
-        &[header(0), tdc(1000), hit(600_001_000), tdc(800_001_000)],
+        &[
+            header(0),
+            tdc(1000),
+            hit(1000 + period - 1),
+            hit(1000 + period + 5),
+            tdc(1000 + 2 * period + 10),
+        ],
         &config,
     );
-    assert_eq!(found[0].hits.tof, vec![600_000_000]);
+    let mut tofs = found[0].hits.tof.clone();
+    tofs.sort_unstable();
+    assert_eq!(tofs, vec![5, period - 1]);
+}
+
+#[test]
+fn frequency_below_the_minimum_is_rejected() {
+    let json = r#"{"detector":{"timing":{"tdc_frequency_hz":0.05}}}"#;
+    assert!(DetectorConfig::from_json(json).is_err());
+    let mut config = DetectorConfig::venus_defaults();
+    config.tdc_frequency_hz = 0.14;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn section_parser_orders_hits_with_correction_off() {
+    let section_for = |data: &[u8]| rustpix_tpx::section::Tpx3Section {
+        start_offset: 0,
+        end_offset: data.len(),
+        chip_id: 0,
+        initial_tdc: None,
+        final_tdc: None,
+    };
+    let off = DetectorConfig::venus_defaults();
+    let threshold = DetectorConfig {
+        enable_missing_tdc_correction: false,
+        ..off
+    }
+    .missing_tdc_threshold_25ns();
+
+    let early = bytes(&[tdc(1000), hit(998)]);
+    let mut batch = HitBatch::default();
+    process_section_into_batch(
+        &early,
+        &section_for(&early),
+        threshold,
+        |_, x, y| (x, y),
+        &mut batch,
+    );
+    assert_eq!(batch.tof, Vec::<u32>::new());
+
+    let late = bytes(&[tdc(1000), tdc(2000), hit(1900)]);
+    let mut batch = HitBatch::default();
+    process_section_into_batch(
+        &late,
+        &section_for(&late),
+        threshold,
+        |_, x, y| (x, y),
+        &mut batch,
+    );
+    assert_eq!(batch.tof, vec![900]);
 }
 
 #[test]

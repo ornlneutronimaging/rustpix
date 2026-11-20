@@ -104,8 +104,6 @@ where
     ready_queue: VecDeque<PulseBatch>,
 
     tdc_correction: u32,
-    /// TDC period in 25 ns ticks, used to tell late hits from current ones.
-    period: u32,
     chip_transform: Arc<dyn Fn(u8, u16, u16) -> (u16, u16) + Send + Sync + 'static>,
 }
 
@@ -137,19 +135,8 @@ where
             tdc_epoch: 0,
             last_tdc: initial_tdc,
             tdc_correction,
-            period: tdc_correction,
             chip_transform: Arc::new(chip_transform),
         }
-    }
-
-    /// Sets the TDC period in 25 ns ticks.
-    ///
-    /// Defaults to `tdc_correction`; set it when that is `u32::MAX` because
-    /// missing-TDC correction is off.
-    #[must_use]
-    pub fn with_period(mut self, period_25ns: u32) -> Self {
-        self.period = period_25ns;
-        self
     }
 
     /// Return the next pulse batch from this chip, if available.
@@ -229,13 +216,13 @@ where
 
                     // A hit stamped before the current TDC is a late hit of the
                     // previous pulse; compared modulo 2^30 so it holds across a rollover.
-                    if let Some(tof) = ticks_after(raw_ts, curr_tdc, self.period) {
+                    if let Some(tof) = ticks_after(raw_ts, curr_tdc) {
                         let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
                         let tof = apply_missing_tdc_correction(tof, self.tdc_correction);
                         self.curr_batch.push((gx, gy, tof, tot, ts_curr, chip));
                     } else if let Some(prev) = self.prev_batch.as_mut() {
                         let prev_tdc = prev.tdc_timestamp;
-                        if let Some(tof) = ticks_after(raw_ts, prev_tdc, self.period) {
+                        if let Some(tof) = ticks_after(raw_ts, prev_tdc) {
                             let ts_prev = correct_timestamp_rollover(raw_ts, prev_tdc);
                             let tof = apply_missing_tdc_correction(tof, self.tdc_correction);
                             prev.hits.push((gx, gy, tof, tot, ts_prev, chip));
@@ -319,8 +306,7 @@ where
                 &chip_sections,
                 tdc_correction,
                 transform_closure,
-            )
-            .with_period(config.tdc_correction_25ns());
+            );
 
             if let Some(batch) = reader.next_pulse() {
                 heap.push(batch);

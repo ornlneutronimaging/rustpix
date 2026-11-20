@@ -23,17 +23,21 @@ pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32
 /// Mask of the 30-bit hit and TDC timestamp counters.
 const TIMESTAMP_MASK: u32 = 0x3FFF_FFFF;
 
+/// Ticks a hit may follow its TDC: half the 30-bit counter (13.4 s).
+///
+/// Holds two TDC periods for every frequency `DetectorConfig::validate` accepts.
+pub(crate) const AFTER_TDC_WINDOW: u32 = 1 << 29;
+
 /// Ticks from `tdc` forward to `hit` on the 30-bit counter, or `None` when the hit is earlier.
 ///
-/// A hit up to `max(period_25ns, 2^29)` ticks after the TDC counts as after it;
-/// the rest of the counter range counts as before it. The comparison is modulo
-/// the counter, so it holds across a rollover.
+/// A hit less than [`AFTER_TDC_WINDOW`] ticks after the TDC counts as after it; the
+/// other half of the counter range counts as before it. The comparison is modulo the
+/// counter, so it holds across a rollover.
 #[inline]
 #[must_use]
-pub(crate) fn ticks_after(hit: u32, tdc: u32, period_25ns: u32) -> Option<u32> {
+pub(crate) fn ticks_after(hit: u32, tdc: u32) -> Option<u32> {
     let forward = hit.wrapping_sub(tdc) & TIMESTAMP_MASK;
-    let after_window = period_25ns.clamp(1 << 29, TIMESTAMP_MASK);
-    (forward < after_window).then_some(forward)
+    (forward < AFTER_TDC_WINDOW).then_some(forward)
 }
 
 /// Subtracts one TDC period from a TOF longer than it (a missed TDC packet).
@@ -86,20 +90,20 @@ mod tests {
 
     #[test]
     fn ticks_after_holds_across_rollover() {
-        let period = 666_667;
-        assert_eq!(ticks_after(1100, 1000, period), Some(100));
-        assert_eq!(ticks_after(999, 1000, period), None);
+        assert_eq!(ticks_after(1100, 1000), Some(100));
+        assert_eq!(ticks_after(999, 1000), None);
         // Hit 0xFF00 ticks after a TDC just before the wrap.
-        assert_eq!(ticks_after(0x3FFF_FF00, 0x3FFF_0000, period), Some(0xFF00));
+        assert_eq!(ticks_after(0x3FFF_FF00, 0x3FFF_0000), Some(0xFF00));
         // Hit just before the wrap, TDC just after it: the hit is earlier.
-        assert_eq!(ticks_after(0x3FFF_FF00, 0x10, period), None);
+        assert_eq!(ticks_after(0x3FFF_FF00, 0x10), None);
         // Hit just after the wrap, TDC just before it.
-        assert_eq!(ticks_after(0x20, 0x3FFF_FFF0, period), Some(0x30));
-        // At 0.05 Hz a pulse lasts 8e8 ticks, more than half the counter range.
+        assert_eq!(ticks_after(0x20, 0x3FFF_FFF0), Some(0x30));
+        // The window is half the counter range.
         assert_eq!(
-            ticks_after(600_001_000, 1000, 800_000_000),
-            Some(600_000_000)
+            ticks_after(1000 + AFTER_TDC_WINDOW - 1, 1000),
+            Some(AFTER_TDC_WINDOW - 1)
         );
+        assert_eq!(ticks_after(1000 + AFTER_TDC_WINDOW, 1000), None);
     }
 
     #[test]

@@ -143,9 +143,7 @@ pub fn process_section_into_batch(
             let Some((tdc_ts, tof)) = std::iter::once(Some(current))
                 .chain(std::iter::once(previous_tdc))
                 .flatten()
-                .find_map(|tdc| {
-                    ticks_after(raw_timestamp, tdc, tdc_correction_25ns).map(|tof| (tdc, tof))
-                })
+                .find_map(|tdc| ticks_after(raw_timestamp, tdc).map(|tof| (tdc, tof)))
             else {
                 continue;
             };
