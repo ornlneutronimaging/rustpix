@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `rustpix process --tdc-frequency <HZ>` (default 60) sets the TDC frequency.
-  The CLI always used 60 Hz, so a run at another TDC rate, such as 30 Hz,
-  could not be processed correctly from the CLI.
+  The CLI always used 60 Hz, so in a run at a lower TDC rate, such as 30 Hz,
+  every TOF beyond one 60 Hz period was folded back by that period.
 
 ### Fixed
 
