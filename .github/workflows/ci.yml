@@ -113,6 +113,10 @@ jobs:
         run: pip install maturin
       - name: Build Python wheel
         run: maturin build --release -m rustpix-python/Cargo.toml
+      - name: Run Python tests
+        run: |
+          pip install target/wheels/*.whl pytest pyarrow
+          python -m pytest tests/ -v
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:

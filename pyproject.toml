@@ -76,7 +76,7 @@ default = { features = [] }
 
 [tool.pixi.tasks]
 # Core tasks
-test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && (test -d tests && python -m pytest tests/ -v || echo 'No Python tests yet')", depends-on = [
+test = { cmd = "cargo test --workspace && python -c 'import rustpix; print(f\"rustpix imported successfully: {len(dir(rustpix))} symbols\")' && python -m pytest tests/ -v", depends-on = [
   "build-debug",
 ], description = "Run all tests (Rust + Python)" }
 clippy = { cmd = "cargo clippy --workspace --all-targets --all-features", description = "Run clippy for all Rust crates/targets/features" }
