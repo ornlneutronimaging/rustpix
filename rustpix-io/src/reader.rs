@@ -140,6 +140,16 @@ impl Tpx3FileReader {
         self
     }
 
+    /// Rejects a detector configuration the parser cannot use.
+    fn check_config(&self) -> Result<()> {
+        self.config.validate().map_err(|err| {
+            rustpix_core::Error::from(rustpix_core::error::ProcessingError::Config(
+                err.to_string(),
+            ))
+            .into()
+        })
+    }
+
     /// Returns the file size in bytes.
     #[must_use]
     pub fn file_size(&self) -> usize {
@@ -155,7 +165,7 @@ impl Tpx3FileReader {
     /// Reads all hits, time-ordered across pulses and chips.
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid.
+    /// Returns an error if the file size or detector configuration is invalid.
     pub fn read_batch(&self) -> Result<HitBatch> {
         self.read_batch_time_ordered()
     }
@@ -163,7 +173,7 @@ impl Tpx3FileReader {
     /// Equivalent to `read_batch`.
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid.
+    /// Returns an error if the file size or detector configuration is invalid.
     pub fn read_batch_time_ordered(&self) -> Result<HitBatch> {
         self.read_batch_with_pulse_starts().map(|(batch, _)| batch)
     }
@@ -171,7 +181,7 @@ impl Tpx3FileReader {
     /// Like [`read_batch`](Self::read_batch), plus each pulse's first hit index.
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid.
+    /// Returns an error if the file size or detector configuration is invalid.
     pub fn read_batch_with_pulse_starts(&self) -> Result<(HitBatch, Vec<usize>)> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
@@ -181,6 +191,7 @@ impl Tpx3FileReader {
             )));
         }
 
+        self.check_config()?;
         let data = self.reader.as_bytes();
         let sections = discover_sections(data);
 
@@ -200,7 +211,7 @@ impl Tpx3FileReader {
     /// Returns a time-ordered stream of hit batches (pulse-merged).
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid.
+    /// Returns an error if the file size or detector configuration is invalid.
     pub fn stream_time_ordered(&self) -> Result<TimeOrderedHitStream> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
@@ -210,6 +221,7 @@ impl Tpx3FileReader {
             )));
         }
 
+        self.check_config()?;
         let sections = discover_sections(self.reader.as_bytes());
         let stream = TimeOrderedStream::new(
             SharedMmap(self.reader.mmap.clone()),
@@ -222,7 +234,7 @@ impl Tpx3FileReader {
     /// Returns a time-ordered stream of event batches (pulse-merged with TDC).
     ///
     /// # Errors
-    /// Returns an error if the file size is invalid.
+    /// Returns an error if the file size or detector configuration is invalid.
     pub fn stream_time_ordered_events(&self) -> Result<TimeOrderedEventStream> {
         if !self.reader.len().is_multiple_of(8) {
             return Err(Error::InvalidFormat(format!(
@@ -232,6 +244,7 @@ impl Tpx3FileReader {
             )));
         }
 
+        self.check_config()?;
         let sections = discover_sections(self.reader.as_bytes());
         let stream = TimeOrderedStream::new(
             SharedMmap(self.reader.mmap.clone()),
@@ -293,6 +306,32 @@ mod tests {
 
         let reader = Tpx3FileReader::open(file.path()).unwrap();
         assert!(reader.read_batch().is_err());
+    }
+
+    #[test]
+    fn unsupported_tdc_frequency_is_an_error() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&rustpix_tpx::Tpx3Packet::TPX3_HEADER_MAGIC.to_le_bytes())
+            .unwrap();
+        file.flush().unwrap();
+        let mut config = DetectorConfig::venus_defaults();
+        config.tdc_frequency_hz = 0.05;
+        let reader = Tpx3FileReader::open(file.path())
+            .unwrap()
+            .with_config(config);
+        let is_config_error = |err: Error| {
+            matches!(
+                err,
+                Error::CoreError(rustpix_core::Error::Processing(
+                    rustpix_core::error::ProcessingError::Config(_)
+                ))
+            )
+        };
+        assert!(is_config_error(reader.read_batch().unwrap_err()));
+        assert!(reader.stream_time_ordered().is_err_and(is_config_error));
+        assert!(reader
+            .stream_time_ordered_events()
+            .is_err_and(is_config_error));
     }
 
     #[test]

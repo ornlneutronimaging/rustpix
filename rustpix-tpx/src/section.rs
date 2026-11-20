@@ -107,6 +107,11 @@ pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
 }
 
 /// Process a single section into a `HitBatch` (`SoA`).
+///
+/// Before the section's first TDC packet, a hit can only be matched to the TDC
+/// inherited from earlier sections; a late hit older than that TDC is dropped, where
+/// `PulseReader` keeps it. The TDC frequency must be at least
+/// [`crate::MIN_TDC_FREQUENCY_HZ`], as for `PulseReader::new`.
 pub fn process_section_into_batch(
     data: &[u8],
     section: &Tpx3Section,

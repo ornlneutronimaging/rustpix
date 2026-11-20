@@ -118,7 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass invalid transforms; `from_json` and `from_file` also reject a TDC
   frequency that is not finite or is below `MIN_TDC_FREQUENCY_HZ` (0.15 Hz),
   the lowest at which a late hit and a missed TDC both fit the 30-bit
-  timestamp counter. `DetectorConfig::validate` checks both.
+  timestamp counter. `DetectorConfig::validate` checks both, and
+  `Tpx3FileReader` now applies it before reading, so a configuration built in
+  code is checked too.
 - TPX3: `process_section_into_batch` keeps a late hit in the previous pulse
   of the same section instead of giving it a TOF near 2^32.
 

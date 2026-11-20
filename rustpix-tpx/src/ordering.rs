@@ -112,6 +112,11 @@ where
     D: AsRef<[u8]> + Clone,
 {
     /// Create a pulse reader for a single chip's section stream.
+    ///
+    /// The TDC frequency must be at least [`crate::MIN_TDC_FREQUENCY_HZ`]; lower
+    /// frequencies give wrong pulse assignments. A hit counts as after a TDC when it is
+    /// less than 2^29 ticks later. `tdc_correction` is the value from
+    /// `DetectorConfig::missing_tdc_threshold_25ns`.
     pub fn new(
         data: D,
         sections: &[Tpx3Section],
@@ -274,6 +279,9 @@ where
     D: AsRef<[u8]> + Clone,
 {
     /// Construct a time-ordered stream from per-chip sections.
+    ///
+    /// `config` must pass [`DetectorConfig::validate`]; a TDC frequency below
+    /// [`crate::MIN_TDC_FREQUENCY_HZ`] gives wrong pulse assignments.
     pub fn new(data: D, sections: &[Tpx3Section], config: &DetectorConfig) -> Self {
         // Group sections by chip
         let max_chip = sections.iter().map(|s| s.chip_id).max().unwrap_or(0);

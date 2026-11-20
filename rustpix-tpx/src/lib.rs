@@ -145,7 +145,10 @@ pub const MIN_TDC_FREQUENCY_HZ: f64 = 0.15;
 pub struct DetectorConfig {
     /// TDC frequency in Hz (default: 60.0 for SNS).
     pub tdc_frequency_hz: f64,
-    /// Enable missing TDC correction.
+    /// Subtract one nominal TDC period, rounded to 25 ns ticks, from a TOF that exceeds it.
+    ///
+    /// Compensates for one missed TDC packet. Corrects the TOF only: the hit stays in
+    /// the earlier pulse, and a TOF over two periods keeps one period too many.
     pub enable_missing_tdc_correction: bool,
     /// Chip size X in pixels (default: 256).
     pub chip_size_x: u16,

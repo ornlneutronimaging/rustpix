@@ -77,18 +77,17 @@ fn late_hit_across_the_counter_rollover_stays_in_its_pulse() {
         ],
         &identity_config(),
     );
-    let summary: Vec<(u32, Vec<u32>)> = found
+    let summary: Vec<(u64, Vec<u32>)> = found
         .iter()
-        .map(|p| {
-            (
-                u32::try_from(p.tdc_timestamp & 0x3FFF_FFFF).unwrap(),
-                p.hits.tof.clone(),
-            )
-        })
+        .map(|p| (p.tdc_timestamp, p.hits.tof.clone()))
         .collect();
+    // TDC B follows the wrap, so its extended timestamp is one counter range later.
     assert_eq!(
         summary,
-        vec![(tdc_a, vec![100, late - tdc_a]), (tdc_b, vec![100])]
+        vec![
+            (u64::from(tdc_a), vec![100, late - tdc_a]),
+            (u64::from(tdc_b) + (1 << 30), vec![100]),
+        ]
     );
 }
 
@@ -165,6 +164,59 @@ fn lowest_frequency_keeps_long_and_missed_tdc_tofs() {
     let mut tofs = found[0].hits.tof.clone();
     tofs.sort_unstable();
     assert_eq!(tofs, vec![5, period - 1]);
+}
+
+#[test]
+fn late_hit_near_two_periods_after_a_missed_tdc() {
+    let mut config = identity_config();
+    config.tdc_frequency_hz = MIN_TDC_FREQUENCY_HZ;
+    let period = config.tdc_correction_25ns();
+    let a = 1000;
+    // TDC A + P is missed; the hit is stamped just before A + 2P and read out after it.
+    let packets = [
+        header(0),
+        tdc(a),
+        tdc(a + 2 * period),
+        hit(a + 2 * period - 1),
+        tdc(a + 3 * period),
+    ];
+    let first = |config: &DetectorConfig| {
+        let found = pulses(&packets, config);
+        (found[0].tdc_timestamp, found[0].hits.tof.clone())
+    };
+
+    config.enable_missing_tdc_correction = true;
+    assert_eq!(first(&config), (u64::from(a), vec![period - 1]));
+    config.enable_missing_tdc_correction = false;
+    assert_eq!(first(&config), (u64::from(a), vec![2 * period - 1]));
+}
+
+#[test]
+fn late_hit_at_a_section_start_is_dropped_by_the_section_parser() {
+    // The hit belongs to TDC 1000 but is read out in the next section.
+    let packets = [
+        header(0),
+        tdc(1000),
+        tdc(1000 + PERIOD),
+        header(0),
+        hit(900 + PERIOD),
+        tdc(1000 + 2 * PERIOD),
+    ];
+    let data = bytes(&packets);
+    let sections = discover_sections(&data);
+    assert_eq!(sections.len(), 2);
+    for threshold in [PERIOD, u32::MAX] {
+        let mut batch = HitBatch::default();
+        for section in &sections {
+            process_section_into_batch(&data, section, threshold, |_, x, y| (x, y), &mut batch);
+        }
+        assert_eq!(batch.tof, Vec::<u32>::new(), "threshold {threshold}");
+    }
+
+    let found = pulses(&packets, &identity_config());
+    let found = found.iter().find(|p| !p.hits.tof.is_empty()).unwrap();
+    assert_eq!(found.tdc_timestamp, 1000);
+    assert_eq!(found.hits.tof, vec![PERIOD - 100]);
 }
 
 #[test]
