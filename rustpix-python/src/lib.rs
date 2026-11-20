@@ -387,6 +387,7 @@ impl PyNeutronBatch {
     }
 }
 
+// Unsendable: wraps a non-`Send` iterator, so use a stream on the thread that created it.
 #[pyclass(name = "HitBatchStream", unsendable)]
 struct PyHitBatchStream {
     stream: TimeOrderedHitStream,
@@ -408,6 +409,7 @@ impl PyHitBatchStream {
     }
 }
 
+// Unsendable: wraps a non-`Send` iterator, so use a stream on the thread that created it.
 #[pyclass(name = "NeutronBatchStream", unsendable)]
 struct PyNeutronBatchStream {
     stream: NeutronStream,

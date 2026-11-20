@@ -1,9 +1,10 @@
 //! Efficient time-ordering of hits using a K-way merge strategy.
 //!
 //! # Problem
-//! TPX3 data comes in "sections" (chunks) per chip. Packets within a chip are
-//! roughly ordered by time (TDC packets delineate pulses, pixels are between TDCs).
-//! However, sections from different chips can be interleaved arbitrarily.
+//! TPX3 data comes in "sections" (chunks) per chip. The detector sends hits out of
+//! its buffer in bunches, so hit timestamps are ordered over long ranges and
+//! disordered over short ranges; TDC packets delineate pulses. Sections from
+//! different chips can be interleaved arbitrarily.
 //!
 //! # Solution
 //! We use a "Pulse-Based K-Way Merge":
@@ -205,82 +206,35 @@ where
                         return self.ready_queue.pop_front();
                     }
                 } else if packet.is_hit() {
-                    // Decide where this hit belongs.
-                    // Candidates:
-                    // 1. `curr_tdc` (the active pulse we just saw start)
-                    // 2. `prev_batch` (the pulse before that, for late hits)
-
                     let (local_x, local_y) = packet.pixel_coordinates();
                     let (gx, gy) = (self.chip_transform)(section.chip_id, local_x, local_y);
                     let raw_ts = packet.timestamp_coarse();
                     let tot = packet.tot();
                     let chip = section.chip_id;
 
-                    // Logic to assign hit
                     let mut assigned_to_prev = false;
 
                     if let Some(ref mut prev) = self.prev_batch {
-                        // Check fit with prev
                         let prev_tdc = prev.tdc_timestamp;
                         let ts_prev = correct_timestamp_rollover(raw_ts, prev_tdc);
 
-                        // If we assume a pulse is ~16ms (666666 units).
-                        // Late margin ~14ms.
-                        // If `ts_prev - prev_tdc` is reasonable (< 1.5 * period?),
-                        // AND it fits better than current?
-
-                        // Simple check from empirical findings:
-                        // "A hit arriving AFTER TDC1 with TOF > 14ms ... likely belongs to TDC0".
-                        // Note: The hit arrives after TDC1 (which started `curr`).
-                        // So checking against `curr` would yield a very small TOF (or wrapped large if hit < tdc).
-                        // Checking against `prev` yields a large TOF (~16ms).
-
-                        // Wait, if hit < curr_tdc, it DEFINITELY belongs to prev (or earlier).
-                        // If hit >= curr_tdc, but only by a little?
-                        // Causality: Hit cannot happen before it is read out.
-                        // But timestamps reflect physical event time.
-
-                        // Rule:
-                        // 1. Calculate TS relative to Prev.
-                        let _tof_prev = ts_prev.wrapping_sub(prev_tdc);
-
-                        // 2. If valid late hit:
-                        //    valid if tof_prev < tdc_correction + margin?
-                        //    Actually, tdc_correction is "period".
-                        //    Let's allow late hits up to 2 * period for safety?
-                        //    Or just check if it is "before" current pulse start?
-
                         if let Some(curr_tdc) = self.curr_tdc {
                             let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
-                            // If timestamp is strictly before current pulse start
-                            // (allow for some jitter/rollover logic)
+                            // Stamped before the current TDC: a late hit of the previous pulse.
+                            // Bunched readout causes these; on VENUS data they are rare and within 1 ms.
                             if ts_curr < curr_tdc {
-                                // Definitely prev
-                                // Calculate correct TOF relative to prev
                                 let tof = calculate_tof(ts_prev, prev_tdc, self.tdc_correction);
                                 prev.hits.push((gx, gy, tof, tot, ts_prev, chip));
                                 assigned_to_prev = true;
-                            } else {
-                                // It is >= curr_tdc.
-                                // Does it belong to prev anyway? (Very late hit?)
-                                // "TOF > 14ms" means event happened 14ms after Prev TDC.
-                                // Current TDC is at 16.6ms.
-                                // So hit is at Prev + 14ms.
-                                // Current is at Prev + 16.6ms.
-                                // Hit is BEFORE Current.
-                                // So `ts_curr < curr_tdc` covers this!
-
-                                // Is there a case where Hit > Curr but belongs to Prev? NO.
-                                // That would mean Hit happened AFTER Curr start, meaning it belongs to Curr (or Next).
-
-                                // So the simple check `ts_curr < curr_tdc` correctly identifies late hits
-                                // provided `correct_timestamp_rollover` works.
                             }
+                            // A late hit with the 30-bit wrap between it and this TDC goes to the current
+                            // pulse with a ~26.8 s TOF; none seen on VENUS data, so not handled.
                         }
                     }
 
                     if !assigned_to_prev {
-                        // Assign to current
+                        // Hits at or after the current TDC; also, in a chip's first pulse, hits stamped
+                        // just before it, which get a wrapped TOF outside every real bin (a few per run).
                         if let Some(curr_tdc) = self.curr_tdc {
                             let ts_curr = correct_timestamp_rollover(raw_ts, curr_tdc);
                             let tof = calculate_tof(ts_curr, curr_tdc, self.tdc_correction);

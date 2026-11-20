@@ -417,6 +417,9 @@ impl DetectorConfig {
     }
 
     /// TDC correction value in 25ns units.
+    ///
+    /// The nominal period, rounded. Measured VENUS 60 Hz TDC intervals are 666,670 to
+    /// 666,679 ticks, mostly 666,675; hits in a frame's last 12 ticks fold to near 0.
     #[must_use]
     pub fn tdc_correction_25ns(&self) -> u32 {
         let correction = (self.tdc_period_seconds() / 25e-9).round();
