@@ -247,6 +247,8 @@ pub struct RustpixApp {
     neutron_super_resolution_factor: f64,
     /// Super-resolution factor captured when clustering starts.
     processing_super_resolution_factor: f64,
+    /// TOF range in 25 ns ticks captured when clustering starts.
+    processing_tof_max: u32,
     /// Whether to weight extraction by TOT.
     pub(crate) weighted_by_tot: bool,
     /// Minimum TOT threshold for extraction.
@@ -333,6 +335,7 @@ impl Default for RustpixApp {
             super_resolution_factor: 1.0,
             neutron_super_resolution_factor: 1.0,
             processing_super_resolution_factor: 1.0,
+            processing_tof_max: 0,
             weighted_by_tot: false,
             min_tot_threshold: 0,
             ui_state,
@@ -481,6 +484,8 @@ impl RustpixApp {
 
             let (tx, cancel_flag) = self.start_job();
             let algo_type = self.algo_type;
+            let detector_config = self.current_detector_config();
+            self.processing_tof_max = detector_config.tdc_correction_25ns();
             let config = ClusteringWorkerConfig {
                 radius: self.radius,
                 temporal_window_ns: self.temporal_window_ns,
@@ -488,7 +493,7 @@ impl RustpixApp {
                 max_cluster_size: self.max_cluster_size,
                 dbscan_min_points: self.dbscan_min_points,
                 grid_cell_size: self.grid_cell_size,
-                detector_config: self.current_detector_config(),
+                detector_config,
                 super_resolution_factor: self.super_resolution_factor,
                 weighted_by_tot: self.weighted_by_tot,
                 min_tot_threshold: self.min_tot_threshold,
@@ -991,22 +996,29 @@ impl RustpixApp {
         });
     }
 
+    /// Run number from the SNS export form; blank means 0.
+    ///
+    /// # Errors
+    /// Returns a message for the user when the text is not a whole number.
+    pub(crate) fn sns_run_number(&self) -> std::result::Result<u32, String> {
+        let run_text = self.ui_state.export.sns.run_number.trim();
+        if run_text.is_empty() {
+            return Ok(0);
+        }
+        run_text
+            .parse::<u32>()
+            .map_err(|_| format!("Run number must be a whole number, not \"{run_text}\""))
+    }
+
     pub(crate) fn start_export_sns_hdf5(&mut self, path: PathBuf) {
         if self.ui_state.export.in_progress {
             return;
         }
 
-        let sns_opts = &self.ui_state.export.sns;
-        let run_text = sns_opts.run_number.trim();
-        let run_number = if run_text.is_empty() {
-            0
-        } else if let Ok(number) = run_text.parse::<u32>() {
-            number
-        } else {
-            self.ui_state.export.status =
-                format!("Run number must be a whole number, not \"{run_text}\"");
+        let Ok(run_number) = self.sns_run_number() else {
             return;
         };
+        let sns_opts = &self.ui_state.export.sns;
         let proton_charge = sns_opts
             .proton_charge
             .trim()
@@ -1679,7 +1691,7 @@ impl RustpixApp {
             let neutron_hs = Hyperstack3D::from_neutrons(
                 &neutrons,
                 self.neutron_tof_bins.max(1),
-                hit_hs.tof_max(),
+                self.processing_tof_max,
                 hit_hs.width(),
                 hit_hs.height(),
                 super_res_factor,
@@ -3153,6 +3165,38 @@ impl eframe::App for RustpixApp {
 #[cfg(test)]
 mod export_tests {
     use super::*;
+
+    #[test]
+    fn sns_run_number_rejects_non_numeric_text() {
+        let mut app = RustpixApp::default();
+        app.ui_state.export.sns.run_number = " 15159 ".to_string();
+        assert_eq!(app.sns_run_number(), Ok(15159));
+        app.ui_state.export.sns.run_number = String::new();
+        assert_eq!(app.sns_run_number(), Ok(0));
+        app.ui_state.export.sns.run_number = "abc".to_string();
+        assert!(app.sns_run_number().is_err());
+    }
+
+    #[test]
+    fn clustering_uses_the_tof_range_captured_at_start() {
+        // Loaded at 120 Hz, clustered after switching to 60 Hz.
+        let mut app = RustpixApp {
+            hyperstack: Some(Arc::new(Hyperstack3D::new(10, 514, 514, 333_333))),
+            processing_tof_max: 666_667,
+            ..RustpixApp::default()
+        };
+        app.processing.is_processing = true;
+        let mut neutrons = NeutronBatch::default();
+        neutrons.push(rustpix_core::neutron::Neutron::new(
+            8.0, 8.0, 500_000, 10, 1, 0,
+        ));
+
+        app.handle_processing_complete(neutrons, Vec::new(), Duration::ZERO);
+
+        let neutron_hs = app.neutron_hyperstack.as_deref().unwrap();
+        assert_eq!(neutron_hs.tof_max(), 666_667);
+        assert_eq!(neutron_hs.above_range(), 0);
+    }
 
     #[test]
     fn partial_file_replaces_destination_only_on_commit() {
