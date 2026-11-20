@@ -42,7 +42,7 @@ Rustpix is organized as a Rust workspace with multiple crates:
 |-------|-------------|
 | **rustpix-core** | Core traits and types |
 | **rustpix-tpx** | TPX3 packet parser and hit types |
-| **rustpix-algorithms** | Clustering algorithms (ABS, DBSCAN, Graph, Grid) |
+| **rustpix-algorithms** | Clustering algorithms (ABS, DBSCAN, Grid) |
 | **rustpix-io** | File I/O with memory-mapped reading |
 | **rustpix-python** | Python bindings (PyO3) |
 | **rustpix-cli** | Command-line interface |

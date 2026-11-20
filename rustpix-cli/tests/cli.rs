@@ -466,3 +466,53 @@ fn benchmark_clusters_pulse_by_pulse() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("3 hits in 2 pulses"), "{stdout}");
 }
+
+#[test]
+fn tdc_frequency_sets_the_period_subtracted_from_long_tofs() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("run.tpx3");
+    let output = dir.path().join("out.csv");
+    // One hit 25 ms after its TDC: past a 60 Hz period, inside a 30 Hz one.
+    write_packets(&input, &[header(3), tdc(1000), hit(1_001_000)]);
+
+    for (freq, tof) in [("60", "333333"), ("30", "1000000")] {
+        for out_of_core in ["true", "false"] {
+            let result = rustpix(&[
+                "process",
+                s(&input),
+                "-o",
+                s(&output),
+                "--tdc-frequency",
+                freq,
+                "--out-of-core",
+                out_of_core,
+            ]);
+            assert!(result.status.success(), "{freq} Hz: {result:?}");
+            let csv = fs::read_to_string(&output).unwrap();
+            let row = csv.lines().nth(1).unwrap();
+            assert_eq!(
+                row.split(',').nth(2),
+                Some(tof),
+                "{freq} Hz, out-of-core {out_of_core}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_positive_tdc_frequency_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("run.tpx3");
+    write_sample(&input);
+    for freq in ["0", "-30", "NaN"] {
+        let output = dir.path().join("out.csv");
+        let arg = format!("--tdc-frequency={freq}");
+        let result = rustpix(&["process", s(&input), "-o", s(&output), &arg]);
+        assert!(!result.status.success(), "{freq}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("positive number"),
+            "{freq}: {result:?}"
+        );
+        assert!(!output.exists(), "{freq}");
+    }
+}

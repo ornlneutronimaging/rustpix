@@ -59,7 +59,7 @@ Group attributes:
 
 | Name             | Type | Shape | Units | Notes |
 |------------------|------|-------|-------|-------|
-| `event_time_zero`| u64  | (J)   | ns    | start time of each pulse |
+| `event_time_zero`| u64  | (J)   | ns    | Start time of each pulse. The CLI writes it relative to each input's first written pulse, each later input continuing one tick after the previous input's last pulse. Python `process_tpx3_neutrons` writes the detector's TDC time; with `time_ordered=False`, and from `cluster_hits`, all events are written as one pulse at 0. |
 | `event_index`    | i32  | (J)   | id    | index into event arrays for each pulse |
 
 These fields are part of the NXevent_data definition and are standard for pulsed

@@ -1,6 +1,6 @@
 //! Analyze timestamp patterns in TPX3 data to understand rollover behavior.
 //!
-//! Run with: cargo run --bin `analyze_timestamps` -- <`tpx3_file`>
+//! Run with: cargo run --bin `analyze-timestamps` -- <`tpx3_file`>
 
 use std::collections::HashMap;
 use std::env;

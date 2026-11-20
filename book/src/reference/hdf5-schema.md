@@ -44,7 +44,7 @@ Event groups follow the NeXus **NXevent_data** base class, used by SNS/ISIS even
 
 | Name | Type | Shape | Units | Description |
 |------|------|-------|-------|-------------|
-| `event_time_zero` | u64 | (J) | ns | Start time of each pulse |
+| `event_time_zero` | u64 | (J) | ns | Start time of each pulse. The CLI writes it relative to each input's first written pulse, each later input continuing one tick after the previous input's last pulse. Python `process_tpx3_neutrons` writes the detector's TDC time; with `time_ordered=False`, and from `cluster_hits`, all events are written as one pulse at 0. |
 | `event_index` | i32 | (J) | id | Index into event arrays |
 
 ### Optional Datasets

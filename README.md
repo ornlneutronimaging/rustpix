@@ -15,7 +15,6 @@ High-performance pixel detector data processing for neutron imaging. Supports Ti
 - **Multiple Clustering Algorithms**:
   - ABS (Age-Based Spatial) - single-pass clustering of TOF-ordered hits
   - DBSCAN - Density-based with spatial indexing
-  - Graph - Union-find connected components
   - Grid - Parallel grid-based clustering
 - **Streaming Architecture**: Process files larger than RAM
 - **Python Bindings**: Thin wrappers with NumPy integration
@@ -73,7 +72,8 @@ config = rustpix.ClusteringConfig(radius=5.0, temporal_window_ns=75.0)
 neutrons = rustpix.process_tpx3_neutrons(
     "data.tpx3",
     clustering_config=config,
-    algorithm="abs"
+    algorithm="abs",
+    collect=True,
 )
 
 # Convert to NumPy
@@ -113,7 +113,7 @@ cargo run -p rustpix-gui --release
 | ------------------------ | ---------------------------------------------------- |
 | **rustpix-core**         | Core traits and types                                |
 | **rustpix-tpx**          | TPX3 packet parser and hit types                     |
-| **rustpix-algorithms**   | Clustering algorithms (ABS, DBSCAN, Graph, Grid)     |
+| **rustpix-algorithms**   | Clustering algorithms (ABS, DBSCAN, Grid)            |
 | **rustpix-io**           | File I/O with memory-mapped reading                  |
 | **rustpix-python**       | Python bindings (PyO3)                               |
 | **rustpix-cli**          | Command-line interface                               |
@@ -177,8 +177,8 @@ neutrons = rustpix.process_tpx3_neutrons(
 # Process with custom parameters
 rustpix process input.tpx3 -o output.csv \
     --algorithm dbscan \
-    --spatial-epsilon 2.0 \
-    --temporal-epsilon 500
+    --radius 2.0 \
+    --temporal-window-ns 500
 
 # Show file information
 rustpix info input.tpx3
@@ -186,8 +186,8 @@ rustpix info input.tpx3
 # Benchmark different algorithms
 rustpix benchmark input.tpx3 --iterations 5
 
-# Convert formats
-rustpix convert input.tpx3 -f hdf5 -o output.h5
+# Export neutrons to HDF5 (format from the extension)
+rustpix process input.tpx3 -o output.h5
 ```
 
 ## Performance
@@ -242,7 +242,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome through GitHub issues and pull requests.
 
 ## Acknowledgments
 

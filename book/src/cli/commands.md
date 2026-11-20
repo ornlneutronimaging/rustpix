@@ -24,10 +24,11 @@ rustpix process [OPTIONS] -o <OUTPUT> <INPUT>...
 | `--radius <FLOAT>` | `5.0` | Spatial radius for clustering (pixels) |
 | `--temporal-window-ns <FLOAT>` | `75.0` | Temporal window for clustering (nanoseconds) |
 | `--min-cluster-size <INT>` | `1` | Minimum cluster size |
+| `--tdc-frequency <FLOAT>` | `60.0` | TDC frequency in Hz; must match the run's TDC rate |
 | `--out-of-core <BOOL>` | `true` | Enable out-of-core processing |
 | `--memory-fraction <FLOAT>` | `0.5` | Fraction of available memory to use (out-of-core only) |
 | `--memory-budget-bytes <INT>` | Auto | Explicit memory budget in bytes |
-| `--parallelism <INT>` | Auto | Worker threads for processing |
+| `--parallelism <INT>` | `1` | Worker threads for processing (out-of-core only) |
 | `--queue-depth <INT>` | `2` | Pipeline queue depth (out-of-core only) |
 | `--async-io <BOOL>` | `false` | Enable async I/O pipeline (out-of-core only) |
 | `--run-number <INT>` | `0` | Run number for SNS HDF5 export |
@@ -41,6 +42,10 @@ rustpix process [OPTIONS] -o <OUTPUT> <INPUT>...
 The out-of-core options (`--memory-fraction`, `--memory-budget-bytes`,
 `--parallelism`, `--queue-depth`, `--async-io`) have no effect with
 `--out-of-core false`.
+
+The CLI uses the VENUS detector layout. Set `--tdc-frequency` to the run's
+TDC rate, for example `30` for a 30 Hz run; with the wrong rate, TOFs beyond
+one period fold back.
 
 ### Output files
 
@@ -178,10 +183,3 @@ Multi-thread avg: 4.567s (threads: 4, async: true)
 Speedup: 2.70x
 ```
 
-## Environment Variables
-
-The CLI respects standard environment variables:
-
-| Variable | Description |
-|----------|-------------|
-| `RAYON_NUM_THREADS` | Override default thread count for parallel processing |

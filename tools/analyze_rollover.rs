@@ -1,6 +1,6 @@
 //! Analyze behavior around TDC rollover point.
 //!
-//! Run with: cargo run --bin `analyze_rollover` -- <`tpx3_file`>
+//! Run with: cargo run --bin `analyze-rollover` -- <`tpx3_file`>
 
 use std::env;
 use std::fs::File;

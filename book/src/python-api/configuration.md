@@ -19,7 +19,7 @@ config = rustpix.DetectorConfig(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `tdc_frequency_hz` | `float` | `60.0` | TDC frequency in Hz |
+| `tdc_frequency_hz` | `float` | `60.0` | TDC frequency in Hz. Must match the run's TDC rate, for example `30.0` for a 30 Hz run; otherwise TOFs beyond one period fold back. |
 | `enable_missing_tdc_correction` | `bool` | `True` | Deprecated: has no effect, and passing it raises a `DeprecationWarning`. The one-missed-TDC correction is always applied. Will be removed in the next major release. |
 | `chip_size_x` | `int` | `256` | Chip width in pixels |
 | `chip_size_y` | `int` | `256` | Chip height in pixels |
@@ -49,7 +49,7 @@ config = rustpix.DetectorConfig(
 config = rustpix.DetectorConfig.venus_defaults()
 
 # Load from JSON
-config = rustpix.DetectorConfig.from_json('{"tdc_frequency_hz": 60.0}')
+config = rustpix.DetectorConfig.from_json('{"detector": {"timing": {"tdc_frequency_hz": 60.0}}}')
 ```
 
 ## ClusteringConfig
@@ -176,6 +176,6 @@ for batch in rustpix.stream_tpx3_neutrons(
 | `out_of_core` | `bool` | `True` | Enable out-of-core processing |
 | `memory_fraction` | `float` | `0.5` | Fraction of RAM to target |
 | `memory_budget_bytes` | `int` | Auto | Explicit memory budget |
-| `parallelism` | `int` | CPU count | Worker thread count |
-| `queue_depth` | `int` | `8` | Pipeline queue depth |
-| `async_io` | `bool` | `True` | Enable async I/O |
+| `parallelism` | `int` | `1` | Worker thread count |
+| `queue_depth` | `int` | `2` | Pipeline queue depth |
+| `async_io` | `bool` | `False` | Enable async I/O |
