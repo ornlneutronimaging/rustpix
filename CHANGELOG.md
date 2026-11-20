@@ -131,6 +131,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `f64` coordinates and `super_resolution_factor`, the SNS `title` and the
   `(1,)` shape of a bank's `total_counts`.
 
+### Deprecated
+
+- `DetectorConfig::enable_missing_tdc_correction` (Rust field, Python keyword
+  argument, JSON `timing` key) has no effect: the correction for one missed
+  TDC is always applied. It is still accepted, and will be removed in the
+  next major release. Python raises a `DeprecationWarning` when it is passed,
+  and the GUI no longer shows the checkbox.
+
 
 ## [1.4.1] - 2026-10-09
 

@@ -1,7 +1,9 @@
 //! Thin Python bindings for rustpix.
 
 use numpy::PyArray1;
-use pyo3::exceptions::{PyImportError, PyNotImplementedError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{
+    PyDeprecationWarning, PyImportError, PyNotImplementedError, PyRuntimeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -84,18 +86,28 @@ impl PyDetectorConfig {
         chip_transforms=None
     ))]
     fn new(
+        py: Python<'_>,
         tdc_frequency_hz: Option<f64>,
         enable_missing_tdc_correction: Option<bool>,
         chip_size_x: Option<u16>,
         chip_size_y: Option<u16>,
         chip_transforms: Option<Vec<ChipTransformTuple>>,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let mut config = DetectorConfig::default();
         if let Some(value) = tdc_frequency_hz {
             config.tdc_frequency_hz = value;
         }
         if let Some(value) = enable_missing_tdc_correction {
-            config.enable_missing_tdc_correction = value;
+            PyErr::warn(
+                py,
+                &py.get_type::<PyDeprecationWarning>(),
+                c"enable_missing_tdc_correction has no effect and will be removed in the next major release",
+                1,
+            )?;
+            #[allow(deprecated)]
+            {
+                config.enable_missing_tdc_correction = value;
+            }
         }
         if let Some(value) = chip_size_x {
             config.chip_size_x = value;
@@ -109,7 +121,7 @@ impl PyDetectorConfig {
                 .map(|(a, b, c, d, tx, ty)| ChipTransform { a, b, c, d, tx, ty })
                 .collect();
         }
-        Self { inner: config }
+        Ok(Self { inner: config })
     }
 
     #[staticmethod]
@@ -1364,6 +1376,7 @@ fn parse_algorithm(name: &str) -> PyResult<ClusteringAlgorithm> {
 fn detector_config_to_dict(py: Python<'_>, config: &DetectorConfig) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
     dict.set_item("tdc_frequency_hz", config.tdc_frequency_hz)?;
+    #[allow(deprecated)]
     dict.set_item(
         "enable_missing_tdc_correction",
         config.enable_missing_tdc_correction,

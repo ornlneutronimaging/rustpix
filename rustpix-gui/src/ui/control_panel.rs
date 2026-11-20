@@ -1110,13 +1110,6 @@ impl RustpixApp {
                         }
                     });
 
-                    changed |= ui
-                        .checkbox(
-                            &mut config.enable_missing_tdc_correction,
-                            "Enable missing TDC correction",
-                        )
-                        .changed();
-
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label("Chip transforms");
