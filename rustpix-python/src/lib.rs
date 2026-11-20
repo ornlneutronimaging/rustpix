@@ -2,7 +2,8 @@
 
 use numpy::PyArray1;
 use pyo3::exceptions::{
-    PyDeprecationWarning, PyImportError, PyNotImplementedError, PyRuntimeError, PyValueError,
+    PyDeprecationWarning, PyFutureWarning, PyImportError, PyNotImplementedError, PyRuntimeError,
+    PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -281,6 +282,7 @@ impl PyHitBatch {
     /// Convert the batch to a PyArrow Table (moves the underlying buffers).
     #[pyo3(name = "to_arrow")]
     fn take_arrow(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let pyarrow = import_pyarrow(py)?;
         let batch = self
             .batch
             .take()
@@ -308,6 +310,7 @@ impl PyHitBatch {
 
         pyarrow_table_from_numpy(
             py,
+            &pyarrow,
             &arrays,
             &["x", "y", "tof", "tot", "timestamp", "chip_id", "cluster_id"],
         )
@@ -368,6 +371,7 @@ impl PyNeutronBatch {
     /// Convert neutrons to a PyArrow Table (moves the underlying buffers).
     #[pyo3(name = "to_arrow")]
     fn take_arrow(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let pyarrow = import_pyarrow(py)?;
         let batch = self
             .batch
             .take()
@@ -391,7 +395,12 @@ impl PyNeutronBatch {
             PyArray1::from_vec(py, chip_id).into_any().unbind(),
         ];
 
-        pyarrow_table_from_numpy(py, &arrays, &["x", "y", "tof", "tot", "n_hits", "chip_id"])
+        pyarrow_table_from_numpy(
+            py,
+            &pyarrow,
+            &arrays,
+            &["x", "y", "tof", "tot", "n_hits", "chip_id"],
+        )
     }
 
     fn __repr__(&self) -> String {
@@ -502,6 +511,14 @@ fn process_tpx3_neutrons(
     collect: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
+    warn_unknown_kwargs(
+        kwargs,
+        &[
+            ALGORITHM_KWARGS,
+            OUT_OF_CORE_KWARGS,
+            &["output_path", "time_ordered"],
+        ],
+    )?;
     let processing = parse_processing_kwargs(kwargs)?;
 
     // HDF5 output requires collect mode.
@@ -677,8 +694,12 @@ fn cluster_hits(
     extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyNeutronBatch> {
+    warn_unknown_kwargs(kwargs, &[ALGORITHM_KWARGS, &["output_path"]])?;
     let selection = parse_algorithm_kwargs(kwargs)?;
     let output_path = parse_output_path(kwargs)?;
+    if let Some(ref path) = output_path {
+        reject_sns_output(path)?;
+    }
 
     let clustering = clustering_config
         .as_ref()
@@ -739,6 +760,10 @@ fn stream_tpx3_neutrons(
     extraction_config: Option<PyRef<'_, PyExtractionConfig>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyNeutronBatchStream> {
+    warn_unknown_kwargs(
+        kwargs,
+        &[ALGORITHM_KWARGS, OUT_OF_CORE_KWARGS, &["output_path"]],
+    )?;
     let selection = parse_algorithm_kwargs(kwargs)?;
     let output_path = parse_output_path(kwargs)?;
     let out_of_core = parse_out_of_core_kwargs(kwargs)?;
@@ -1036,6 +1061,19 @@ fn collect_and_write_nexus_neutrons(
     Ok(all_neutrons)
 }
 
+/// Errors on `*.nxs.h5` paths, which need per-pulse TDC timestamps a `NeutronBatch` lacks.
+fn reject_sns_output(output_path: &str) -> PyResult<()> {
+    if detect_hdf5_format(output_path) == "sns" {
+        return Err(PyValueError::new_err(
+            "SNS NXsnsevent output (*.nxs.h5) requires per-pulse TDC timestamps \
+             which are not available in this code path. Use \
+             process_tpx3_neutrons(collect=True, time_ordered=True) for SNS export, \
+             or use a .h5 extension for generic NeXus output.",
+        ));
+    }
+    Ok(())
+}
+
 /// Write a `NeutronBatch` to a generic NeXus HDF5 file.
 /// Errors on `*.nxs.h5` paths: SNS output needs per-pulse TDC timestamps this batch lacks.
 fn write_neutrons_hdf5(
@@ -1045,16 +1083,7 @@ fn write_neutrons_hdf5(
     detector_dims: (usize, usize),
 ) -> PyResult<()> {
     let path = std::path::Path::new(output_path);
-    let format = detect_hdf5_format(output_path);
-
-    if format == "sns" {
-        return Err(PyValueError::new_err(
-            "SNS NXsnsevent output (*.nxs.h5) requires per-pulse TDC timestamps \
-             which are not available in this code path. Use \
-             process_tpx3_neutrons(collect=True, time_ordered=True) for SNS export, \
-             or use a .h5 extension for generic NeXus output.",
-        ));
-    }
+    reject_sns_output(output_path)?;
 
     let event_batch = NeutronEventBatch {
         tdc_timestamp_25ns: 0,
@@ -1215,6 +1244,40 @@ impl OutOfCoreKwargs {
         }
         memory
     }
+}
+
+const ALGORITHM_KWARGS: &[&str] = &[
+    "algorithm",
+    "abs_scan_interval",
+    "dbscan_min_points",
+    "grid_cell_size",
+];
+const OUT_OF_CORE_KWARGS: &[&str] = &[
+    "out_of_core",
+    "memory_fraction",
+    "memory_budget_bytes",
+    "parallelism",
+    "queue_depth",
+    "async_io",
+];
+
+/// Warns with `FutureWarning` for each keyword argument not in `groups`; such arguments are ignored.
+fn warn_unknown_kwargs(kwargs: Option<&Bound<'_, PyDict>>, groups: &[&[&str]]) -> PyResult<()> {
+    let Some(kwargs) = kwargs else {
+        return Ok(());
+    };
+    let py = kwargs.py();
+    for key in kwargs.keys() {
+        let key: String = key.extract()?;
+        if groups.iter().any(|group| group.contains(&key.as_str())) {
+            continue;
+        }
+        let message = std::ffi::CString::new(format!(
+            "unexpected keyword argument '{key}' is ignored; it will raise TypeError in the next major release"
+        ))?;
+        PyErr::warn(py, &py.get_type::<PyFutureWarning>(), &message, 1)?;
+    }
+    Ok(())
 }
 
 fn extract_kwarg<'py, T: FromPyObject<'py>>(
@@ -1410,23 +1473,26 @@ fn extraction_config_to_dict(py: Python<'_>, config: &ExtractionConfig) -> PyRes
     Ok(dict.into_any().unbind())
 }
 
-fn pyarrow_table_from_numpy(
-    py: Python<'_>,
-    arrays: &[PyObject],
-    names: &[&str],
-) -> PyResult<PyObject> {
-    let pyarrow = PyModule::import(py, "pyarrow").map_err(|err| {
+/// Imports `pyarrow`; called before a batch gives up its buffers, so a missing import keeps them.
+fn import_pyarrow(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    PyModule::import(py, "pyarrow").map_err(|err| {
         PyImportError::new_err(format!(
             "pyarrow is required for to_arrow (import failed: {err})"
         ))
-    })?;
+    })
+}
+
+fn pyarrow_table_from_numpy(
+    py: Python<'_>,
+    pyarrow: &Bound<'_, PyModule>,
+    arrays: &[PyObject],
+    names: &[&str],
+) -> PyResult<PyObject> {
     let array_fn = pyarrow.getattr("array")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", false)?;
 
     let mut arrow_arrays = Vec::with_capacity(arrays.len());
     for array in arrays {
-        arrow_arrays.push(array_fn.call((array,), Some(&kwargs))?);
+        arrow_arrays.push(array_fn.call1((array,))?);
     }
 
     let arrays_list = PyList::new(py, arrow_arrays)?;

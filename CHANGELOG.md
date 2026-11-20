@@ -101,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of being written as 0.
 - Dropping a threaded out-of-core stream (`--parallelism` above 1 or async
   I/O on) before it was exhausted could hang.
+- Python: `HitBatch.to_arrow()` and `NeutronBatch.to_arrow()` passed
+  `copy=False` to `pyarrow.array`, which does not accept it, after taking the
+  batch's data, so they failed and left the batch empty. `pyarrow` is now
+  imported before the data is taken.
+- Python: `cluster_hits` with an `*.nxs.h5` `output_path` clustered the batch,
+  writing cluster IDs into it, before refusing the path; it now refuses first.
 
 ### Changed
 
@@ -140,6 +146,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TDC is always applied. It is still accepted, and will be removed in the
   next major release. Python raises a `DeprecationWarning` when it is passed,
   and the GUI no longer shows the checkbox.
+- Python: `process_tpx3_neutrons`, `stream_tpx3_neutrons` and `cluster_hits`
+  ignore keyword arguments they do not read, such as `radius` (a
+  `ClusteringConfig` field) or a misspelled name. They now raise a
+  `FutureWarning` for each; it will be a `TypeError` in the next major
+  release.
 
 
 ## [1.4.1] - 2026-10-09
