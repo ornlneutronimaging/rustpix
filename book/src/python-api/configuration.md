@@ -9,7 +9,6 @@ import rustpix
 
 config = rustpix.DetectorConfig(
     tdc_frequency_hz=60.0,            # TDC frequency (Hz)
-    enable_missing_tdc_correction=True,
     chip_size_x=256,                  # Chip width in pixels
     chip_size_y=256,                  # Chip height in pixels
     chip_transforms=None              # Custom chip transformations
@@ -21,7 +20,7 @@ config = rustpix.DetectorConfig(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `tdc_frequency_hz` | `float` | `60.0` | TDC frequency in Hz |
-| `enable_missing_tdc_correction` | `bool` | `True` | Correct for missing TDC packets |
+| `enable_missing_tdc_correction` | `bool` | `True` | Deprecated: has no effect, and passing it raises a `DeprecationWarning`. The one-missed-TDC correction is always applied. Will be removed in the next major release. |
 | `chip_size_x` | `int` | `256` | Chip width in pixels |
 | `chip_size_y` | `int` | `256` | Chip height in pixels |
 | `chip_transforms` | `list` | `None` | Chip coordinate transformations |

@@ -135,7 +135,8 @@ impl ChipTransform {
 pub struct DetectorConfig {
     /// TDC frequency in Hz (default: 60.0 for SNS).
     pub tdc_frequency_hz: f64,
-    /// Enable missing TDC correction.
+    /// Has no effect; the one-missed-TDC correction is always applied.
+    #[deprecated(note = "has no effect and will be removed in the next major release")]
     pub enable_missing_tdc_correction: bool,
     /// Chip size X in pixels (default: 256).
     pub chip_size_x: u16,
@@ -212,6 +213,7 @@ impl DetectorConfig {
     /// - Chip 2: Rotation 180 + Translation (255, 513)
     /// - Chip 3: Identity (0, 0)
     #[must_use]
+    #[allow(deprecated)]
     pub fn venus_defaults() -> Self {
         let transforms = vec![
             // Chip 0: [[1, 0, 258], [0, 1, 0]]
@@ -289,6 +291,7 @@ impl DetectorConfig {
     ///
     /// # Errors
     /// Returns an error if serialization fails.
+    #[allow(deprecated)]
     pub fn to_json_string(&self) -> Result<String, Box<dyn std::error::Error>> {
         let transforms = {
             let transforms = self
@@ -341,6 +344,7 @@ impl DetectorConfig {
         Ok(())
     }
 
+    #[allow(deprecated)]
     fn from_json_config(config: JsonConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let detector = config.detector;
 
@@ -484,6 +488,7 @@ impl DetectorConfig {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use serde_json::Value;
