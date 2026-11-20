@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `rustpix process --tdc-frequency <HZ>` (default 60) sets the TDC frequency.
+  The CLI always used 60 Hz, so a run at another TDC rate, such as 30 Hz,
+  could not be processed correctly from the CLI.
+
 ### Fixed
 
 - ABS clustering split a cluster into single-hit clusters when the cluster
@@ -110,9 +116,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README and book: examples that failed (Python calls without `collect=True`,
   a detector JSON without its `detector` key, CLI flags and a `convert`
   command that do not exist), a non-existent Graph algorithm, and wrong
-  out-of-core defaults are corrected. The docs now state that the CLI uses a
-  60 Hz TDC, that `tdc_frequency_hz` must match the run's TDC rate, and how
-  the CLI and Python API differ in generic HDF5 pulse times.
+  out-of-core defaults are corrected. The docs now state that the TDC
+  frequency must match the run's TDC rate, and how the CLI and Python API
+  differ in generic HDF5 pulse times.
 
 ### Changed
 

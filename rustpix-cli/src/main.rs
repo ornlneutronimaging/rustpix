@@ -17,6 +17,7 @@ use rustpix_core::soa::HitBatch;
 use rustpix_io::hdf5::{Hdf5NeutronSink, NeutronEventBatch, NeutronWriteOptions};
 use rustpix_io::hdf5_sns::{SnsEventSink, SnsRunMetadata, SnsWriteOptions};
 use rustpix_io::{out_of_core_neutron_stream, OutOfCoreConfig, Tpx3FileReader};
+use rustpix_tpx::DetectorConfig;
 use std::fs::File as StdFile;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -187,6 +188,10 @@ enum Commands {
         #[arg(long, default_value = "1")]
         min_cluster_size: u16,
 
+        /// TDC frequency in Hz; must match the run's TDC rate, or TOFs beyond one period fold back
+        #[arg(long, default_value = "60.0")]
+        tdc_frequency: f64,
+
         /// Enable out-of-core processing (pulse-bounded)
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         out_of_core: bool,
@@ -319,6 +324,7 @@ fn main() -> Result<()> {
             radius,
             temporal_window_ns,
             min_cluster_size,
+            tdc_frequency,
             out_of_core,
             memory_fraction,
             memory_budget_bytes,
@@ -340,6 +346,7 @@ fn main() -> Result<()> {
             radius,
             temporal_window_ns,
             min_cluster_size,
+            tdc_frequency,
             out_of_core,
             memory_fraction,
             memory_budget_bytes,
@@ -398,6 +405,7 @@ fn run_process(
     radius: f64,
     temporal_window_ns: f64,
     min_cluster_size: u16,
+    tdc_frequency: f64,
     out_of_core: bool,
     memory_fraction: Option<f64>,
     memory_budget_bytes: Option<usize>,
@@ -418,8 +426,18 @@ fn run_process(
         eprintln!("Radius: {radius} pixels");
         eprintln!("Temporal window: {temporal_window_ns} ns");
         eprintln!("Min cluster size: {min_cluster_size}");
+        eprintln!("TDC frequency: {tdc_frequency} Hz");
         eprintln!("Out-of-core: {out_of_core}");
     }
+    if !(tdc_frequency.is_finite() && tdc_frequency > 0.0) {
+        return Err(CliError::Other(format!(
+            "--tdc-frequency must be a positive number of Hz, got {tdc_frequency}"
+        )));
+    }
+    let detector = DetectorConfig {
+        tdc_frequency_hz: tdc_frequency,
+        ..DetectorConfig::default()
+    };
 
     let start = Instant::now();
     let algo = resolve_algorithm(algorithm);
@@ -472,6 +490,7 @@ fn run_process(
             out_of_core,
             &ooc_config,
             verbose,
+            &detector,
         )?,
         OutputFormat::Hdf5 => run_process_hdf5(
             input,
@@ -483,6 +502,7 @@ fn run_process(
             out_of_core,
             &ooc_config,
             verbose,
+            &detector,
         )?,
         OutputFormat::SnsHdf5 => run_process_sns_hdf5(
             input,
@@ -497,6 +517,7 @@ fn run_process(
             ipts,
             instrument,
             verbose,
+            &detector,
         )?,
         OutputFormat::Tiff => run_process_tiff(
             input,
@@ -511,6 +532,7 @@ fn run_process(
             tof_max,
             bit_depth,
             verbose,
+            &detector,
         )?,
     };
 
@@ -643,6 +665,7 @@ fn run_process_flat(
     out_of_core: bool,
     ooc_config: &OutOfCoreConfig,
     verbose: bool,
+    detector: &DetectorConfig,
 ) -> Result<(usize, usize)> {
     let pending = PendingOutput::new(output)?;
     let mut writer = rustpix_io::DataFileWriter::create(pending.path())?;
@@ -654,7 +677,7 @@ fn run_process_flat(
         if verbose {
             eprintln!("Reading: {}", path.display());
         }
-        let reader = open_input(path)?;
+        let reader = open_input(path)?.with_config(detector.clone());
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -717,6 +740,7 @@ fn run_process_hdf5(
     out_of_core: bool,
     ooc_config: &OutOfCoreConfig,
     verbose: bool,
+    detector: &DetectorConfig,
 ) -> Result<(usize, usize)> {
     let options = NeutronWriteOptions {
         x_size: 514,
@@ -757,7 +781,7 @@ fn run_process_hdf5(
 
         let mut file_base_tdc: Option<u64> = None;
 
-        let reader = open_input(path)?;
+        let reader = open_input(path)?.with_config(detector.clone());
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -826,6 +850,7 @@ fn run_process_sns_hdf5(
     ipts: Option<&str>,
     instrument: Instrument,
     verbose: bool,
+    detector: &DetectorConfig,
 ) -> Result<(usize, usize)> {
     let run_meta = SnsRunMetadata {
         run_number: run_number.unwrap_or(0),
@@ -875,7 +900,7 @@ fn run_process_sns_hdf5(
         // all timestamps in the file are relative to its own start.
         let mut file_base_tdc: Option<u64> = None;
 
-        let reader = open_input(path)?;
+        let reader = open_input(path)?.with_config(detector.clone());
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(
@@ -952,6 +977,7 @@ fn run_process_tiff(
     tof_max_override: Option<u32>,
     bit_depth: BitDepth,
     verbose: bool,
+    detector: &DetectorConfig,
 ) -> Result<(usize, usize)> {
     if tof_bins == 0 {
         return Err(CliError::Other("--tof-bins must be >= 1".to_string()));
@@ -971,7 +997,7 @@ fn run_process_tiff(
         }
         let mut observed: u32 = 0;
         for path in input {
-            let reader = open_input(path)?;
+            let reader = open_input(path)?.with_config(detector.clone());
             if out_of_core {
                 let stream = out_of_core_neutron_stream(
                     &reader, algo, clustering, extraction, params, ooc_config,
@@ -1009,7 +1035,7 @@ fn run_process_tiff(
         if verbose {
             eprintln!("Reading: {}", path.display());
         }
-        let reader = open_input(path)?;
+        let reader = open_input(path)?.with_config(detector.clone());
 
         if out_of_core {
             let stream = out_of_core_neutron_stream(

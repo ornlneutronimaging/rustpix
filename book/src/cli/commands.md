@@ -24,6 +24,7 @@ rustpix process [OPTIONS] -o <OUTPUT> <INPUT>...
 | `--radius <FLOAT>` | `5.0` | Spatial radius for clustering (pixels) |
 | `--temporal-window-ns <FLOAT>` | `75.0` | Temporal window for clustering (nanoseconds) |
 | `--min-cluster-size <INT>` | `1` | Minimum cluster size |
+| `--tdc-frequency <FLOAT>` | `60.0` | TDC frequency in Hz; must match the run's TDC rate |
 | `--out-of-core <BOOL>` | `true` | Enable out-of-core processing |
 | `--memory-fraction <FLOAT>` | `0.5` | Fraction of available memory to use (out-of-core only) |
 | `--memory-budget-bytes <INT>` | Auto | Explicit memory budget in bytes |
@@ -42,8 +43,9 @@ The out-of-core options (`--memory-fraction`, `--memory-budget-bytes`,
 `--parallelism`, `--queue-depth`, `--async-io`) have no effect with
 `--out-of-core false`.
 
-The CLI uses the VENUS detector configuration with a 60 Hz TDC. For a run at
-another TDC rate, use the Python API or the GUI and set the TDC frequency.
+The CLI uses the VENUS detector layout. Set `--tdc-frequency` to the run's
+TDC rate, for example `30` for a 30 Hz run; with the wrong rate, TOFs beyond
+one period fold back.
 
 ### Output files
 
