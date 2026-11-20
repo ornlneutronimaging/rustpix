@@ -57,8 +57,8 @@ impl Iterator for OutOfCoreNeutronStreamHandle {
 ///
 /// Dropping it cancels the workers and waits for any in-flight batch.
 pub struct ThreadedOutOfCoreNeutronStream {
-    /// Receives pulse outputs from the worker thread.
-    receiver: mpsc::Receiver<Result<PulseNeutronBatch>>,
+    /// Receives pulse outputs from the worker thread; `None` once dropped.
+    receiver: Option<mpsc::Receiver<Result<PulseNeutronBatch>>>,
     /// Join handles for reader/worker threads.
     handles: Vec<thread::JoinHandle<()>>,
     /// Cancellation flag used to stop worker threads.
@@ -69,13 +69,15 @@ impl Iterator for ThreadedOutOfCoreNeutronStream {
     type Item = Result<PulseNeutronBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.receiver.recv().ok()
+        self.receiver.as_ref()?.recv().ok()
     }
 }
 
 impl Drop for ThreadedOutOfCoreNeutronStream {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        // Unblocks a worker waiting in `send` on a full channel before joining it.
+        self.receiver = None;
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
@@ -405,7 +407,7 @@ where
     });
 
     ThreadedOutOfCoreNeutronStream {
-        receiver: out_rx,
+        receiver: Some(out_rx),
         handles: vec![reader_handle, worker_handle],
         cancel,
     }
@@ -820,5 +822,36 @@ mod tests {
             assert_eq!(tdcs, vec![1, 2, 3], "budget {budget}");
             assert_eq!(threaded, single, "budget {budget}");
         }
+    }
+
+    #[test]
+    fn dropping_a_busy_threaded_stream_returns() {
+        let pulses: Vec<EventBatch> = (0..2000u64)
+            .map(|tdc| make_event_batch(tdc, &[(1, 1, 10, 30, 0, 0), (50, 50, 20, 30, 0, 0)]))
+            .collect();
+        let config = OutOfCoreConfig::default().with_memory_budget_bytes(23 * 2);
+        let batcher = PulseBatcher::new(pulses.into_iter(), &config, 3).unwrap();
+        let mut stream = build_threaded_stream(
+            batcher,
+            ClusteringAlgorithm::Abs,
+            ClusteringConfig::default(),
+            ExtractionConfig::default(),
+            AlgorithmParams::default(),
+            1,
+            1,
+        );
+        assert!(stream.next().is_some());
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            // Give the worker time to fill the output channel and block in `send`.
+            thread::sleep(Duration::from_millis(200));
+            drop(stream);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(20)).is_ok(),
+            "dropping the stream did not return"
+        );
     }
 }

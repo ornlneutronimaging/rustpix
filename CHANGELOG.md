@@ -99,6 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GUI: the spectrum CSV dropped rows whose energy is undefined; they are now
   kept with an empty energy cell. A non-numeric SNS run number is refused
   instead of being written as 0.
+- Dropping a threaded out-of-core stream (`--parallelism` above 1 or async
+  I/O on) before it was exhausted could hang.
 
 ### Changed
 
