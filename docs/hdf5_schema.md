@@ -59,7 +59,7 @@ Group attributes:
 
 | Name             | Type | Shape | Units | Notes |
 |------------------|------|-------|-------|-------|
-| `event_time_zero`| u64  | (J)   | ns    | start time of each pulse |
+| `event_time_zero`| u64  | (J)   | ns    | Start time of each pulse. The CLI writes it relative to the first pulse of its first input; the Python API writes the detector's TDC time. |
 | `event_index`    | i32  | (J)   | id    | index into event arrays for each pulse |
 
 These fields are part of the NXevent_data definition and are standard for pulsed

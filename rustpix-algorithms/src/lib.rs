@@ -3,7 +3,6 @@
 //! This crate provides various clustering algorithms:
 //! - **ABS** (Age-Based Spatial) - O(n) average, bucket-based primary
 //! - **DBSCAN** - Density-based with noise handling
-//! - **Graph** - Union-Find connected components
 //! - **Grid** - Detector geometry optimized
 //!
 #![warn(missing_docs)]

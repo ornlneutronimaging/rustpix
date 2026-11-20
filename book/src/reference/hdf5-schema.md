@@ -44,7 +44,7 @@ Event groups follow the NeXus **NXevent_data** base class, used by SNS/ISIS even
 
 | Name | Type | Shape | Units | Description |
 |------|------|-------|-------|-------------|
-| `event_time_zero` | u64 | (J) | ns | Start time of each pulse |
+| `event_time_zero` | u64 | (J) | ns | Start time of each pulse. The CLI writes it relative to the first pulse of its first input; the Python API writes the detector's TDC time. |
 | `event_index` | i32 | (J) | id | Index into event arrays |
 
 ### Optional Datasets

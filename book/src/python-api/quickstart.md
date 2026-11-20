@@ -172,6 +172,7 @@ clustering = rustpix.ClusteringConfig.venus_defaults()
 rustpix.process_tpx3_neutrons(
     "venus_data.tpx3",
     clustering_config=clustering,
+    collect=True,
     output_path="neutrons.h5"
 )
 
@@ -179,6 +180,7 @@ rustpix.process_tpx3_neutrons(
 rustpix.process_tpx3_neutrons(
     "venus_data.tpx3",
     clustering_config=clustering,
+    collect=True,
     output_path="VENUS_12345.nxs.h5"
 )
 ```
