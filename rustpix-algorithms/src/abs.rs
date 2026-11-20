@@ -351,7 +351,8 @@ impl AbsClustering {
         usize::try_from(next).unwrap_or(0)
     }
 
-    /// Closes every open bucket so clusters never span batches, then relabels by size.
+    /// Closes every open bucket so clusters never span batches, then marks hits of clusters
+    /// below `min_cluster_size` as noise (-1) and renumbers the rest from 0.
     fn finish_batch(batch: &mut HitBatch, state: &mut AbsState, min_cluster_size: u32) -> usize {
         Self::close_active_buckets(state);
         Self::finalize_clusters(batch, state, min_cluster_size)

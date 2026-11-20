@@ -445,7 +445,7 @@ fn run_process(
         parallelism,
         queue_depth,
         async_io,
-    )?;
+    );
     if verbose && out_of_core {
         eprintln!("Memory fraction: {}", ooc_config.memory_fraction);
         if let Some(bytes) = ooc_config.memory_budget_bytes {
@@ -532,26 +532,10 @@ fn build_ooc_config(
     parallelism: Option<usize>,
     queue_depth: Option<usize>,
     async_io: Option<bool>,
-) -> Result<OutOfCoreConfig> {
+) -> OutOfCoreConfig {
     let mut config = OutOfCoreConfig::default();
     if !out_of_core {
-        let given: Vec<&str> = [
-            ("--memory-fraction", memory_fraction.is_some()),
-            ("--memory-budget-bytes", memory_budget_bytes.is_some()),
-            ("--parallelism", parallelism.is_some()),
-            ("--queue-depth", queue_depth.is_some()),
-            ("--async-io", async_io.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(name, set)| set.then_some(name))
-        .collect();
-        if !given.is_empty() {
-            return Err(CliError::Other(format!(
-                "{} only apply with --out-of-core true",
-                given.join(", ")
-            )));
-        }
-        return Ok(config);
+        return config;
     }
     if let Some(fraction) = memory_fraction {
         config = config.with_memory_fraction(fraction);
@@ -568,7 +552,7 @@ fn build_ooc_config(
     if let Some(enabled) = async_io {
         config = config.with_async_io(enabled);
     }
-    Ok(config)
+    config
 }
 
 /// Opens a TPX3 input, rejecting files that hold no TPX3 section header.
