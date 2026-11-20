@@ -3,8 +3,9 @@
 
 /// Timestamp rollover correction.
 ///
-/// TPX3 uses 30-bit timestamps that can roll over. This function
-/// corrects the hit timestamp relative to the TDC timestamp.
+/// Treats a hit more than 2^22 ticks (105 ms) below the TDC as stamped after the
+/// 30-bit wrap and extends it. A hit before the wrap measured against a TDC after
+/// it is not corrected.
 ///
 /// Formula: if `hit_ts` + 0x400000 < `tdc_ts`, extend by 0x40000000
 #[inline]
@@ -22,7 +23,8 @@ pub fn correct_timestamp_rollover(hit_timestamp: u32, tdc_timestamp: u32) -> u32
 
 /// Calculate TOF with TDC correction.
 ///
-/// If the raw TOF exceeds the TDC period, subtract one period.
+/// If the raw TOF exceeds the TDC period, subtract one period. This recovers one
+/// missed TDC; the period must match the TDC rate, or the rest of each frame folds back.
 ///
 /// # Arguments
 ///

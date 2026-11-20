@@ -107,6 +107,9 @@ pub fn discover_sections(data: &[u8]) -> Vec<Tpx3Section> {
 }
 
 /// Process a single section into a `HitBatch` (`SoA`).
+///
+/// Uses the latest TDC only, with no late-hit handling: a hit stamped before its TDC
+/// gets a wrapped TOF. `TimeOrderedStream` assigns late hits to their pulse.
 pub fn process_section_into_batch(
     data: &[u8],
     section: &Tpx3Section,
